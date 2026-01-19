@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { addMembersToGroup, listLocalGroups, listLocalMembers } from "@/lib/invoke";
+import { toast } from "sonner";
 import type { LocalGroup, LocalMember } from "@/lib/types";
 
 export function LocalMembersPage() {
@@ -33,13 +34,17 @@ export function LocalMembersPage() {
 
   async function addToGroup() {
     if (!groupId) {
-      alert("请选择分组");
+      toast.error("请选择分组");
       return;
     }
     const userIds = Array.from(selected);
     if (userIds.length === 0) return;
-    await addMembersToGroup(Number(groupId), userIds);
-    alert(`已添加 ${userIds.length} 人到分组`);
+    try {
+      await addMembersToGroup(Number(groupId), userIds);
+      toast.success(`加入分组成功：共处理 ${userIds.length} 人；已在分组中的成员会被更新，其余成员会新增。`);
+    } catch (e) {
+      toast.error(`加入分组失败：${String(e)}`);
+    }
   }
 
   return (

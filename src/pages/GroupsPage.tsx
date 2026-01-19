@@ -1,7 +1,15 @@
 import * as React from "react";
 
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -13,6 +21,7 @@ export function GroupsPage() {
   const [activeGroup, setActiveGroup] = React.useState<LocalGroup | null>(null);
   const [members, setMembers] = React.useState<LocalMember[]>([]);
   const [newName, setNewName] = React.useState("");
+  const [createOpen, setCreateOpen] = React.useState(false);
 
   async function refresh() {
     const g = await listLocalGroups();
@@ -34,6 +43,7 @@ export function GroupsPage() {
     await createLocalGroup(newName.trim());
     setNewName("");
     await refresh();
+    setCreateOpen(false);
   }
 
   async function removeOne(userId: number) {
@@ -51,21 +61,31 @@ export function GroupsPage() {
 
       <div className="flex items-center gap-2">
         <Button variant="secondary" onClick={refresh}>刷新</Button>
-        <Dialog>
+        <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
             <Button>新建分组</Button>
           </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
+          <DialogContent className="sm:max-w-[480px] space-y-4">
+            <DialogHeader className="space-y-1">
               <DialogTitle>新建分组</DialogTitle>
+              <DialogDescription>给分组取一个好记的名字，便于批量拉人/移除。</DialogDescription>
             </DialogHeader>
-            <div className="grid gap-2">
+            <div className="grid gap-3">
               <Label>分组名称</Label>
-              <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="例如：backend-team" />
+              <Input
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                autoFocus
+                placeholder="例如：backend-team"
+              />
             </div>
-            <DialogFooter>
-              <Button variant="secondary" onClick={() => setNewName("")}>清空</Button>
-              <Button onClick={onCreate}>创建</Button>
+            <DialogFooter className="gap-2">
+              <Button variant="secondary" onClick={() => setNewName("")}>
+                清空
+              </Button>
+              <Button onClick={onCreate} disabled={!newName.trim()}>
+                创建
+              </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>

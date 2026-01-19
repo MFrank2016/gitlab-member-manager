@@ -25,8 +25,22 @@
     ]
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
-    "icon": []
+    "active": true,
+    "targets": ["msi", "nsis", "app", "dmg"],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png",
+      "icons/Square44x44Logo.png",
+      "icons/Square150x150Logo.png"
+    ],
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      },
+      "nsis": {
+        "displayLanguage": "SimpChinese",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
   }
 }

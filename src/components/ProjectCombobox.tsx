@@ -1,16 +1,7 @@
 import * as React from "react";
 import { ChevronsUpDown, Check } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from "@/components/ui/command";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { ProjectSummary } from "@/lib/types";
 import { searchProjects } from "@/lib/invoke";
@@ -26,13 +17,14 @@ function isDigits(s: string) {
 }
 
 export function ProjectCombobox({ value, onChange, placeholder }: Props) {
-  const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [loading, setLoading] = React.useState(false);
   const [items, setItems] = React.useState<ProjectSummary[]>([]);
+  const [panelOpen, setPanelOpen] = React.useState(false);
+  const hoverRef = React.useRef(false);
 
   React.useEffect(() => {
-    if (!open) return;
+    if (!panelOpen) return;
     const q = query.trim();
     if (!q) {
       setItems([]);
@@ -51,97 +43,112 @@ export function ProjectCombobox({ value, onChange, placeholder }: Props) {
       } finally {
         if (!cancelled) setLoading(false);
       }
-    }, 250);
+    }, 1000);
 
     return () => {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [open, query]);
+  }, [panelOpen, query]);
 
   const q = query.trim();
   const showDirectId = q && isDigits(q);
+  const formatProject = (p: ProjectSummary) =>
+    `ID：${p.id}，空间：${p.namespace}，项目名：${p.name}`;
+  const displayValue = panelOpen ? query : query || (value ? formatProject(value) : "");
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          variant="outline"
-          role="combobox"
-          aria-expanded={open}
-          className="w-full justify-between"
-        >
-          {value ? value.pathWithNamespace : placeholder ?? "输入项目名或ID"}
-          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent className="w-[520px] p-0" align="start">
-        <Command>
-          <CommandInput
-            placeholder="输入关键字搜索项目..."
-            value={query}
-            onValueChange={setQuery}
-          />
-          <CommandList>
-            <CommandEmpty>{loading ? "搜索中..." : "无结果"}</CommandEmpty>
+    <div className="relative w-full">
+      <Input
+        className="pr-8"
+        value={displayValue}
+        onFocus={() => {
+          setPanelOpen(true);
+          if (!query && value) setQuery(formatProject(value));
+        }}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setPanelOpen(true);
+        }}
+        onBlur={() => {
+          setTimeout(() => {
+            if (!hoverRef.current) setPanelOpen(false);
+          }, 100);
+        }}
+        placeholder={placeholder ?? "输入项目名，模糊查询"}
+      />
+      <ChevronsUpDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 opacity-50" />
 
-            {showDirectId && (
-              <CommandGroup heading="Direct">
-                <CommandItem
-                  value={q}
-                  onSelect={() => {
-                    const pseudo: ProjectSummary = {
-                      id: Number(q),
-                      name: "",
-                      namespace: "",
-                      pathWithNamespace: `#${q}`,
-                      description: null,
-                      lastActivityAt: "",
-                    };
-                    onChange(pseudo);
-                    setOpen(false);
-                  }}
-                >
-                  使用项目ID：<span className="font-mono ml-2">{q}</span>
-                </CommandItem>
-              </CommandGroup>
+      {panelOpen && (
+        <div
+          className="absolute z-50 mt-1 w-full rounded-md border bg-popover text-popover-foreground shadow-md"
+          onMouseEnter={() => {
+            hoverRef.current = true;
+          }}
+          onMouseLeave={() => {
+            hoverRef.current = false;
+            setPanelOpen(false);
+          }}
+        >
+          <div className="border-b px-3 py-2 text-xs text-muted-foreground">输入后暂停 1 秒自动搜索</div>
+          <div className="max-h-64 overflow-y-auto">
+            {loading && (
+              <div className="py-6 text-center text-sm text-muted-foreground">搜索中...</div>
             )}
 
-            <CommandGroup heading="Projects">
-              {items.map((p) => {
+            {!loading && showDirectId && (
+              <button
+                className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-accent focus:outline-none"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  const pseudo: ProjectSummary = {
+                    id: Number(q),
+                    name: "",
+                    namespace: "",
+                    pathWithNamespace: `#${q}`,
+                    description: null,
+                    lastActivityAt: "",
+                  };
+                  onChange(pseudo);
+                  setQuery(formatProject(pseudo));
+                  setPanelOpen(false);
+                }}
+              >
+                <Check
+                  className={cn("mt-0.5 h-4 w-4 shrink-0", value?.id === Number(q) ? "opacity-100" : "opacity-0")}
+                />
+                <div className="text-sm font-medium">使用项目ID：{q}</div>
+              </button>
+            )}
+
+            {!loading && items.length === 0 && (
+              <div className="py-6 text-center text-sm text-muted-foreground">无结果</div>
+            )}
+
+            {!loading &&
+              items.map((p) => {
                 const selected = value?.id === p.id;
                 return (
-                  <CommandItem
+                  <button
                     key={p.id}
-                    value={String(p.id)}
-                    onSelect={() => {
+                    className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-accent focus:outline-none"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
                       onChange(p);
-                      setOpen(false);
+                      setQuery(formatProject(p));
+                      setPanelOpen(false);
                     }}
-                    className="flex items-start gap-2"
                   >
-                    <Check
-                      className={cn(
-                        "mt-0.5 h-4 w-4",
-                        selected ? "opacity-100" : "opacity-0"
-                      )}
-                    />
-                    <div className="flex flex-col gap-0.5">
-                      <div className="text-sm font-medium">
-                        {p.pathWithNamespace}{" "}
-                        <span className="text-muted-foreground">(#{p.id})</span>
-                      </div>
-                      <div className="text-xs text-muted-foreground line-clamp-2">
-                        {p.description ?? ""}
-                      </div>
+                    <Check className={cn("mt-0.5 h-4 w-4 shrink-0", selected ? "opacity-100" : "opacity-0")} />
+                    <div className="text-sm font-medium">
+                      ID：{p.id}，空间：{p.namespace}，项目名：{p.name}
                     </div>
-                  </CommandItem>
+                  </button>
                 );
               })}
-            </CommandGroup>
-          </CommandList>
-        </Command>
-      </PopoverContent>
-    </Popover>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
