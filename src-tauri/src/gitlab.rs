@@ -2,6 +2,7 @@ use crate::models::{ProjectMember, ProjectSummary};
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
 use serde::Deserialize;
+use serde_json;
 
 #[derive(Debug, Clone)]
 pub struct GitLabConfig {
@@ -62,15 +63,30 @@ struct ApiMember {
 pub async fn search_projects(cfg: &GitLabConfig, keyword: &str) -> Result<Vec<ProjectSummary>> {
   let keyword = keyword.trim();
   if keyword.is_empty() {
+    tracing::debug!("[gitlab] search_projects: keyword is empty, returning empty list");
     return Ok(Vec::new());
   }
 
   let url = api_url(&cfg.base_url, "/api/v4/projects");
   let http = client();
 
+  // 调试：打印 base_url 和 token（token 只显示前8位和长度）
+  let token_preview = if cfg.token.len() > 8 {
+    format!("{}...({} chars)", &cfg.token[..8], cfg.token.len())
+  } else {
+    format!("{}({} chars)", &cfg.token, cfg.token.len())
+  };
+  tracing::info!(
+    base_url = %cfg.base_url,
+    token = %token_preview,
+    url = %url,
+    keyword = %keyword,
+    "[gitlab] GET /api/v4/projects"
+  );
+
   // Keep it small; this is for typeahead/quick search.
   let resp = http
-    .get(url)
+    .get(&url)
     .header("PRIVATE-TOKEN", &cfg.token)
     .query(&[
       ("search", keyword),
@@ -83,13 +99,22 @@ pub async fn search_projects(cfg: &GitLabConfig, keyword: &str) -> Result<Vec<Pr
     .await
     .context("GitLab request failed")?;
 
-  if !resp.status().is_success() {
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+  let status = resp.status();
+  tracing::info!(status = %status, "[gitlab] response received");
+
+  // 先获取响应文本，打印完整报文用于调试
+  let text = resp.text().await.unwrap_or_default();
+  tracing::info!(body = %text, "[gitlab] response body");
+
+  if !status.is_success() {
+    tracing::error!(status = %status, body = %text, "[gitlab] API error");
     return Err(anyhow!("GitLab API error {status}: {text}"));
   }
 
-  let projects: Vec<ApiProject> = resp.json().await.context("Parse JSON")?;
+  // 从文本解析 JSON
+  let projects: Vec<ApiProject> = serde_json::from_str(&text).context("Parse JSON")?;
+  tracing::debug!(count = projects.len(), "[gitlab] parsed projects");
+  
   Ok(
     projects
       .into_iter()
@@ -124,11 +149,15 @@ pub async fn list_project_members(cfg: &GitLabConfig, project: &str) -> Result<V
   let mut all: Vec<ProjectMember> = Vec::new();
   let mut page: i64 = 1;
 
+  tracing::info!(project = %project, "[gitlab] listing project members");
+
   loop {
     let url = api_url(
       &cfg.base_url,
       &format!("/api/v4/projects/{}/members/all", project),
     );
+
+    tracing::debug!(url = %url, page = page, "[gitlab] GET members page");
 
     let resp = http
       .get(&url)
@@ -138,15 +167,20 @@ pub async fn list_project_members(cfg: &GitLabConfig, project: &str) -> Result<V
       .await
       .context("GitLab request failed")?;
 
-    if !resp.status().is_success() {
-      let status = resp.status();
+    let status = resp.status();
+    tracing::debug!(status = %status, page = page, "[gitlab] response received");
+
+    if !status.is_success() {
       let text = resp.text().await.unwrap_or_default();
+      tracing::error!(status = %status, body = %text, "[gitlab] API error");
       return Err(anyhow!("GitLab API error {status}: {text}"));
     }
 
     let members: Vec<ApiMember> = resp.json().await.context("Parse JSON")?;
 
     let count = members.len();
+    tracing::debug!(page = page, count = count, "[gitlab] parsed members");
+    
     all.extend(members.into_iter().map(|m| ProjectMember {
       id: m.id,
       username: m.username,
@@ -163,6 +197,7 @@ pub async fn list_project_members(cfg: &GitLabConfig, project: &str) -> Result<V
     page += 1;
   }
 
+  tracing::info!(total_count = all.len(), "[gitlab] list_project_members completed");
   Ok(all)
 }
 
@@ -180,6 +215,14 @@ pub async fn add_member(
   );
   let http = client();
 
+  tracing::info!(
+    url = %url,
+    user_id = user_id,
+    access_level = access_level,
+    expires_at = ?expires_at,
+    "[gitlab] POST add member"
+  );
+
   let mut params: Vec<(&str, String)> = vec![
     ("user_id", user_id.to_string()),
     ("access_level", access_level.to_string()),
@@ -191,19 +234,23 @@ pub async fn add_member(
   }
 
   let resp = http
-    .post(url)
+    .post(&url)
     .header("PRIVATE-TOKEN", &cfg.token)
     .form(&params)
     .send()
     .await
     .context("GitLab request failed")?;
 
-  if resp.status().is_success() {
+  let status = resp.status();
+  tracing::info!(status = %status, "[gitlab] add_member response");
+
+  if status.is_success() {
+    tracing::info!(user_id = user_id, "[gitlab] add_member success");
     return Ok(());
   }
 
-  let status = resp.status();
   let text = resp.text().await.unwrap_or_default();
+  tracing::warn!(status = %status, body = %text, "[gitlab] add_member failed");
 
   match status {
     StatusCode::CONFLICT => Err(anyhow!("already a member")),
@@ -219,23 +266,34 @@ pub async fn remove_member(cfg: &GitLabConfig, project: &str, user_id: u64) -> R
   );
   let http = client();
 
+  tracing::info!(
+    url = %url,
+    user_id = user_id,
+    "[gitlab] DELETE remove member"
+  );
+
   let resp = http
-    .delete(url)
+    .delete(&url)
     .header("PRIVATE-TOKEN", &cfg.token)
     .send()
     .await
     .context("GitLab request failed")?;
 
-  if resp.status().is_success() {
-    return Ok(());
-  }
-
-  if resp.status() == StatusCode::NOT_FOUND {
-    // Not a member -> treat as success.
-    return Ok(());
-  }
-
   let status = resp.status();
+  tracing::info!(status = %status, "[gitlab] remove_member response");
+
+  if status.is_success() {
+    tracing::info!(user_id = user_id, "[gitlab] remove_member success");
+    return Ok(());
+  }
+
+  if status == StatusCode::NOT_FOUND {
+    // Not a member -> treat as success.
+    tracing::info!(user_id = user_id, "[gitlab] user not found, treating as success");
+    return Ok(());
+  }
+
   let text = resp.text().await.unwrap_or_default();
+  tracing::warn!(status = %status, body = %text, "[gitlab] remove_member failed");
   Err(anyhow!("GitLab API error {status}: {text}"))
 }

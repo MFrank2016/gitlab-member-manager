@@ -1,7 +1,7 @@
 import * as React from "react";
 import { Toaster } from "sonner";
 
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Sidebar } from "@/components/ui/sidebar";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { MembersPage } from "@/pages/MembersPage";
@@ -9,49 +9,61 @@ import { LocalMembersPage } from "@/pages/LocalMembersPage";
 import { GroupsPage } from "@/pages/GroupsPage";
 import type { ProjectSummary } from "@/lib/types";
 
+const pageTitles: Record<string, string> = {
+  settings: "配置",
+  projects: "项目搜索",
+  members: "项目成员",
+  local: "本地成员",
+  groups: "本地分组",
+};
+
 export default function App() {
-  const [pickedProject, setPickedProject] = React.useState<ProjectSummary | null>(null);
+  const [pickedProject, setPickedProject] =
+    React.useState<ProjectSummary | null>(null);
+  const [activeTab, setActiveTab] = React.useState("settings");
+  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
 
   return (
-    <div className="min-h-screen p-6">
-      <div className="mb-6 flex items-baseline justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">GitLab 项目成员管理工具</h1>
-          <p className="text-sm text-muted-foreground">Tauri 2 + React 18 + Tailwind v4 + SQLite（本地）</p>
+    <div className="flex h-screen overflow-hidden bg-background">
+      {/* Sidebar */}
+      <Sidebar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        collapsed={sidebarCollapsed}
+        onCollapsedChange={setSidebarCollapsed}
+      />
+
+      {/* Main Content */}
+      <main className="flex flex-1 flex-col overflow-hidden">
+        {/* Header */}
+        <header className="flex h-16 items-center justify-between border-b border-border px-8">
+          <h1 className="text-xl font-semibold tracking-tight">
+            {pageTitles[activeTab]}
+          </h1>
+          {pickedProject && (
+            <div className="flex items-center gap-2 rounded-lg bg-muted px-4 py-2">
+              <span className="text-xs text-muted-foreground">当前项目</span>
+              <span className="text-sm font-medium">
+                {pickedProject.pathWithNamespace}
+              </span>
+              <span className="rounded bg-foreground px-1.5 py-0.5 text-xs text-background">
+                #{pickedProject.id}
+              </span>
+            </div>
+          )}
+        </header>
+
+        {/* Page Content */}
+        <div className="flex-1 overflow-auto p-8">
+          {activeTab === "settings" && <SettingsPage />}
+          {activeTab === "projects" && (
+            <ProjectsPage onPickProject={setPickedProject} />
+          )}
+          {activeTab === "members" && <MembersPage />}
+          {activeTab === "local" && <LocalMembersPage />}
+          {activeTab === "groups" && <GroupsPage />}
         </div>
-        {pickedProject && (
-          <div className="text-right">
-            <div className="text-xs text-muted-foreground">当前项目</div>
-            <div className="text-sm font-medium">{pickedProject.pathWithNamespace} (#{pickedProject.id})</div>
-          </div>
-        )}
-      </div>
-
-      <Tabs defaultValue="settings">
-        <TabsList className="mb-4">
-          <TabsTrigger value="settings">配置</TabsTrigger>
-          <TabsTrigger value="projects">项目搜索</TabsTrigger>
-          <TabsTrigger value="members">项目成员</TabsTrigger>
-          <TabsTrigger value="local">本地成员</TabsTrigger>
-          <TabsTrigger value="groups">本地分组</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="settings">
-          <SettingsPage />
-        </TabsContent>
-        <TabsContent value="projects">
-          <ProjectsPage onPickProject={setPickedProject} />
-        </TabsContent>
-        <TabsContent value="members">
-          <MembersPage />
-        </TabsContent>
-        <TabsContent value="local">
-          <LocalMembersPage />
-        </TabsContent>
-        <TabsContent value="groups">
-          <GroupsPage />
-        </TabsContent>
-      </Tabs>
+      </main>
 
       <Toaster richColors position="bottom-right" />
     </div>

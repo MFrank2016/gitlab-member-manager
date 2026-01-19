@@ -1,7 +1,12 @@
 use crate::models::{LocalGroup, LocalMember, LocalMemberUpsert};
 use anyhow::{Context, Result};
 use chrono::Utc;
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{
+  migrate::Migrator,
+  sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+  SqlitePool,
+};
+use std::str::FromStr;
 use tauri::Manager;
 
 pub async fn init_db(app: &tauri::AppHandle) -> Result<SqlitePool> {
@@ -12,21 +17,38 @@ pub async fn init_db(app: &tauri::AppHandle) -> Result<SqlitePool> {
   std::fs::create_dir_all(&dir).context("failed to create app data dir")?;
 
   let db_path = dir.join("gitlab_member_manager.sqlite3");
-  let db_url = format!("sqlite://{}", db_path.to_string_lossy());
+  // sqlx sqlite URL 在 Windows 需要使用正斜杠，否则会因反斜杠被当成转义而连接失败
+  let db_url = format!(
+    "sqlite://{}",
+    db_path
+      .to_string_lossy()
+      .replace('\\', "/")
+  );
+
+  tracing::info!(db_path = %db_path.display(), "[db] initializing database");
+
+  let options = SqliteConnectOptions::from_str(&db_url)
+    .context("invalid sqlite url")?
+    .create_if_missing(true);
 
   let pool = SqlitePoolOptions::new()
     .max_connections(5)
-    .connect(&db_url)
+    .connect_with(options)
     .await
-    .context("failed to connect sqlite")?;
+    .with_context(|| format!("failed to connect sqlite: {}", db_url))?;
 
+  tracing::info!("[db] running migrations");
   static MIGRATOR: Migrator = sqlx::migrate!();
   MIGRATOR.run(&pool).await?;
 
+  tracing::info!("[db] database initialized successfully");
   Ok(pool)
 }
 
 pub async fn upsert_local_members(pool: &SqlitePool, members: Vec<LocalMemberUpsert>) -> Result<()> {
+  let count = members.len();
+  tracing::info!(count = count, "[db] upsert_local_members starting");
+  
   let mut tx = pool.begin().await?;
   let now = Utc::now().to_rfc3339();
 
@@ -51,10 +73,13 @@ pub async fn upsert_local_members(pool: &SqlitePool, members: Vec<LocalMemberUps
   }
 
   tx.commit().await?;
+  tracing::info!(count = count, "[db] upsert_local_members completed");
   Ok(())
 }
 
 pub async fn list_local_members(pool: &SqlitePool, query: Option<String>) -> Result<Vec<LocalMember>> {
+  tracing::debug!(query = ?query, "[db] list_local_members");
+  
   let rows = if let Some(q) = query {
     let like = format!("%{}%", q);
     sqlx::query_as::<_, (i64, String, String, Option<String>, String)>(
@@ -80,6 +105,8 @@ pub async fn list_local_members(pool: &SqlitePool, query: Option<String>) -> Res
     .await?
   };
 
+  tracing::debug!(count = rows.len(), "[db] list_local_members result");
+  
   Ok(
     rows
       .into_iter()
@@ -95,6 +122,8 @@ pub async fn list_local_members(pool: &SqlitePool, query: Option<String>) -> Res
 }
 
 pub async fn create_local_group(pool: &SqlitePool, name: String) -> Result<LocalGroup> {
+  tracing::info!(name = %name, "[db] create_local_group");
+  
   let now = Utc::now().to_rfc3339();
   let res = sqlx::query(
     r#"INSERT INTO local_groups (name, created_at) VALUES (?1, ?2)"#,
@@ -105,16 +134,21 @@ pub async fn create_local_group(pool: &SqlitePool, name: String) -> Result<Local
   .await?;
 
   let id = res.last_insert_rowid();
+  tracing::info!(group_id = id, name = %name, "[db] create_local_group success");
   Ok(LocalGroup { id, name, created_at: now })
 }
 
 pub async fn list_local_groups(pool: &SqlitePool) -> Result<Vec<LocalGroup>> {
+  tracing::debug!("[db] list_local_groups");
+  
   let rows = sqlx::query_as::<_, (i64, String, String)>(
     r#"SELECT id, name, created_at FROM local_groups ORDER BY id DESC"#,
   )
   .fetch_all(pool)
   .await?;
 
+  tracing::debug!(count = rows.len(), "[db] list_local_groups result");
+  
   Ok(
     rows
       .into_iter()
@@ -128,6 +162,9 @@ pub async fn list_local_groups(pool: &SqlitePool) -> Result<Vec<LocalGroup>> {
 }
 
 pub async fn add_members_to_group(pool: &SqlitePool, group_id: i64, user_ids: Vec<u64>) -> Result<()> {
+  let count = user_ids.len();
+  tracing::info!(group_id = group_id, count = count, "[db] add_members_to_group");
+  
   let mut tx = pool.begin().await?;
   let now = Utc::now().to_rfc3339();
 
@@ -144,10 +181,14 @@ pub async fn add_members_to_group(pool: &SqlitePool, group_id: i64, user_ids: Ve
   }
 
   tx.commit().await?;
+  tracing::info!(group_id = group_id, count = count, "[db] add_members_to_group completed");
   Ok(())
 }
 
 pub async fn remove_members_from_group(pool: &SqlitePool, group_id: i64, user_ids: Vec<u64>) -> Result<()> {
+  let count = user_ids.len();
+  tracing::info!(group_id = group_id, count = count, "[db] remove_members_from_group");
+  
   let mut tx = pool.begin().await?;
 
   for uid in user_ids {
@@ -161,10 +202,13 @@ pub async fn remove_members_from_group(pool: &SqlitePool, group_id: i64, user_id
   }
 
   tx.commit().await?;
+  tracing::info!(group_id = group_id, count = count, "[db] remove_members_from_group completed");
   Ok(())
 }
 
 pub async fn list_group_members(pool: &SqlitePool, group_id: i64) -> Result<Vec<LocalMember>> {
+  tracing::debug!(group_id = group_id, "[db] list_group_members");
+  
   let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, String)>(
     r#"SELECT m.user_id, m.username, m.name, m.avatar_url, m.updated_at
        FROM local_members m
@@ -176,6 +220,8 @@ pub async fn list_group_members(pool: &SqlitePool, group_id: i64) -> Result<Vec<
   .fetch_all(pool)
   .await?;
 
+  tracing::debug!(group_id = group_id, count = rows.len(), "[db] list_group_members result");
+  
   Ok(
     rows
       .into_iter()
