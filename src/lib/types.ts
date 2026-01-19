@@ -34,6 +34,7 @@ export type LocalGroup = {
   id: number;
   name: string;
   createdAt: string;
+  membersCount: number;
 };
 
 export type BatchItemError = {

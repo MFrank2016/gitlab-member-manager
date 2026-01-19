@@ -186,6 +186,74 @@ export function MembersPage() {
 
       {error && <div className="text-sm text-destructive">{error}</div>}
 
+      <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3">
+        <div className="grid gap-1">
+          <Label>分组</Label>
+          <Select value={groupId} onValueChange={setGroupId}>
+            <SelectTrigger className="w-[260px]">
+              <SelectValue placeholder="选择本地分组" />
+            </SelectTrigger>
+            <SelectContent>
+              {groups.map((g) => (
+                <SelectItem key={g.id} value={String(g.id)}>
+                  #{g.id} {g.name}【{g.membersCount ?? 0}人】
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="grid gap-1">
+          <Label>权限</Label>
+          <Select value={accessLevel} onValueChange={setAccessLevel}>
+            <SelectTrigger className="w-[220px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {ACCESS_LEVELS.map((a) => (
+                <SelectItem key={a.value} value={String(a.value)}>
+                  {a.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="grid gap-1">
+          <Label>过期时间（可选）</Label>
+          <Input
+            type="date"
+            className="w-[220px]"
+            value={expiresAt}
+            onChange={(e) => setExpiresAt(e.target.value)}
+          />
+        </div>
+
+        <div className="text-sm text-muted-foreground">已选择 {selectedIds.size} 人</div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="secondary" onClick={batchAddByGroup} disabled={!selectedProject}>
+            按分组批量拉人
+          </Button>
+          <Button onClick={addSelectedToLocal} disabled={selectedIds.size === 0}>
+            保存所选到本地成员
+          </Button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 md:border-l md:border-border md:pl-3">
+          <Button variant="destructive" onClick={batchRemoveByGroup} disabled={!selectedProject}>
+            按分组批量移除
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={batchRemoveSelected}
+            disabled={!selectedProject || selectedIds.size === 0}
+          >
+            批量移除所选
+          </Button>
+        </div>
+      </div>
+
       <div className="w-full overflow-hidden rounded-lg border bg-card">
         <div className="max-h-[440px] overflow-auto">
           <Table>
@@ -235,71 +303,13 @@ export function MembersPage() {
               {members.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={8} className="text-center text-muted-foreground">
-                    {loading ? "加载中..." : "请选择项目"}
+                    {loading ? "加载中..." : selectedProject ? "该项目暂无成员" : "请选择项目"}
                   </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
         </div>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="grid gap-1">
-          <Label>分组</Label>
-          <Select value={groupId} onValueChange={setGroupId}>
-            <SelectTrigger className="w-[260px]">
-              <SelectValue placeholder="选择本地分组" />
-            </SelectTrigger>
-            <SelectContent>
-              {groups.map((g) => (
-                <SelectItem key={g.id} value={String(g.id)}>
-                  {g.name} (#{g.id})
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="grid gap-1">
-          <Label>权限</Label>
-          <Select value={accessLevel} onValueChange={setAccessLevel}>
-            <SelectTrigger className="w-[220px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {ACCESS_LEVELS.map((a) => (
-                <SelectItem key={a.value} value={String(a.value)}>
-                  {a.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="grid gap-1">
-          <Label>过期时间（可选）</Label>
-          <Input
-            className="w-[220px]"
-            placeholder="YYYY-MM-DD"
-            value={expiresAt}
-            onChange={(e) => setExpiresAt(e.target.value)}
-          />
-        </div>
-
-        <Button variant="secondary" onClick={batchAddByGroup} disabled={!selectedProject}>
-          按分组批量拉人
-        </Button>
-        <Button variant="destructive" onClick={batchRemoveByGroup} disabled={!selectedProject}>
-          按分组批量移除
-        </Button>
-
-        <Button onClick={addSelectedToLocal} disabled={selectedIds.size === 0}>
-          保存所选到本地成员
-        </Button>
-        <Button variant="destructive" onClick={batchRemoveSelected} disabled={!selectedProject || selectedIds.size === 0}>
-          批量移除所选
-        </Button>
       </div>
     </div>
   );

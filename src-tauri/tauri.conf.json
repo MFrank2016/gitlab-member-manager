@@ -38,8 +38,8 @@
         "language": "zh-CN"
       },
       "nsis": {
-        "displayLanguage": "SimpChinese",
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "languages": ["SimpChinese"]
       }
     }
   }

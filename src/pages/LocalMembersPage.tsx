@@ -70,7 +70,7 @@ export function LocalMembersPage() {
             <SelectContent>
               {groups.map((g) => (
                 <SelectItem key={g.id} value={String(g.id)}>
-                  {g.name} (#{g.id})
+                  #{g.id} {g.name}【{g.membersCount}人】
                 </SelectItem>
               ))}
             </SelectContent>

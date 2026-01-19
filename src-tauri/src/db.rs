@@ -135,14 +135,25 @@ pub async fn create_local_group(pool: &SqlitePool, name: String) -> Result<Local
 
   let id = res.last_insert_rowid();
   tracing::info!(group_id = id, name = %name, "[db] create_local_group success");
-  Ok(LocalGroup { id, name, created_at: now })
+  Ok(LocalGroup {
+    id,
+    name,
+    created_at: now,
+    members_count: 0,
+  })
 }
 
 pub async fn list_local_groups(pool: &SqlitePool) -> Result<Vec<LocalGroup>> {
   tracing::debug!("[db] list_local_groups");
   
-  let rows = sqlx::query_as::<_, (i64, String, String)>(
-    r#"SELECT id, name, created_at FROM local_groups ORDER BY id DESC"#,
+  let rows = sqlx::query_as::<_, (i64, String, String, i64)>(
+    r#"
+    SELECT g.id, g.name, g.created_at, COUNT(gm.user_id) as members_count
+    FROM local_groups g
+    LEFT JOIN local_group_members gm ON gm.group_id = g.id
+    GROUP BY g.id
+    ORDER BY g.id DESC
+    "#,
   )
   .fetch_all(pool)
   .await?;
@@ -156,6 +167,7 @@ pub async fn list_local_groups(pool: &SqlitePool) -> Result<Vec<LocalGroup>> {
         id: r.0,
         name: r.1,
         created_at: r.2,
+        members_count: r.3,
       })
       .collect(),
   )

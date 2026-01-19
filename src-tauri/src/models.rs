@@ -48,6 +48,7 @@ pub struct LocalGroup {
   pub id: i64,
   pub name: String,
   pub created_at: String,
+  pub members_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
