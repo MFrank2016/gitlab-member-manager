@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
@@ -189,7 +190,9 @@ export function MembersPage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
+      <Panel>
+        <PanelHeader className="flex-col items-start gap-3">
       <div className="space-y-1">
         <h2 className="text-xl font-semibold">项目成员管理</h2>
         <p className="text-sm text-muted-foreground">选择项目后查看成员，并支持保存到本地、按分组批量拉人/移除。</p>
@@ -208,10 +211,15 @@ export function MembersPage() {
           />
         </div>
       </div>
-
+        </PanelHeader>
+        <PanelBody>
       {error && <div className="text-sm text-destructive">{error}</div>}
+        </PanelBody>
+      </Panel>
 
-      <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3">
+      <Panel>
+        <PanelBody>
+      <div className="flex flex-wrap items-end gap-3">
         <div className="grid gap-1">
           <Label>分组</Label>
           <Select value={groupId} onValueChange={setGroupId}>
@@ -278,7 +286,11 @@ export function MembersPage() {
           </Button>
         </div>
       </div>
+        </PanelBody>
+      </Panel>
 
+      <Panel>
+        <PanelHeader className="flex flex-wrap items-end justify-between gap-2">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div className="grid gap-1">
           <Label>过滤成员</Label>
@@ -309,8 +321,9 @@ export function MembersPage() {
           </Button>
         </div>
       </div>
-
-      <div className="w-full overflow-hidden rounded-lg border bg-card">
+        </PanelHeader>
+        <PanelBody>
+      <div className="w-full overflow-hidden">
         <div className="max-h-[440px] overflow-auto">
           <Table>
             <TableHeader className="sticky top-0 bg-card">
@@ -373,6 +386,8 @@ export function MembersPage() {
           </Table>
         </div>
       </div>
+        </PanelBody>
+      </Panel>
     </div>
   );
 }
