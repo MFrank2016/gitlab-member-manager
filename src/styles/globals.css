@@ -3,18 +3,45 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Modern Minimalist Black & White Theme */
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("../assets/fonts/SpaceGrotesk-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("../assets/fonts/SpaceGrotesk-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("../assets/fonts/SpaceGrotesk-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Monochrome Workspace + Accent */
 :root {
-  --background: hsl(0 0% 100%);
+  --background: hsl(0 0% 99%);
   --foreground: hsl(0 0% 9%);
 
-  --card: hsl(0 0% 100%);
+  --card: hsl(0 0% 98%);
   --card-foreground: hsl(0 0% 9%);
 
   --popover: hsl(0 0% 100%);
   --popover-foreground: hsl(0 0% 9%);
 
-  --primary: hsl(0 0% 9%);
+  --brand: hsl(18 97% 57%);
+  --brand-foreground: hsl(0 0% 100%);
+
+  --primary: var(--brand);
   --primary-foreground: hsl(0 0% 100%);
 
   --secondary: hsl(0 0% 96%);
@@ -23,17 +50,18 @@
   --muted: hsl(0 0% 96%);
   --muted-foreground: hsl(0 0% 45%);
 
-  --accent: hsl(0 0% 96%);
-  --accent-foreground: hsl(0 0% 9%);
+  --accent: var(--brand);
+  --accent-foreground: var(--brand-foreground);
 
   --destructive: hsl(0 0% 30%);
   --destructive-foreground: hsl(0 0% 100%);
 
   --border: hsl(0 0% 90%);
   --input: hsl(0 0% 90%);
-  --ring: hsl(0 0% 9%);
+  --ring: var(--brand);
 
   --radius: 0.5rem;
+  --command-bar-height: 56px;
 
   /* Sidebar specific */
   --sidebar-width: 14rem;
@@ -50,8 +78,11 @@
   --popover: hsl(0 0% 7%);
   --popover-foreground: hsl(0 0% 95%);
 
-  --primary: hsl(0 0% 95%);
-  --primary-foreground: hsl(0 0% 9%);
+  --brand: hsl(18 97% 57%);
+  --brand-foreground: hsl(0 0% 100%);
+
+  --primary: var(--brand);
+  --primary-foreground: hsl(0 0% 100%);
 
   --secondary: hsl(0 0% 15%);
   --secondary-foreground: hsl(0 0% 95%);
@@ -59,15 +90,15 @@
   --muted: hsl(0 0% 15%);
   --muted-foreground: hsl(0 0% 60%);
 
-  --accent: hsl(0 0% 15%);
-  --accent-foreground: hsl(0 0% 95%);
+  --accent: var(--brand);
+  --accent-foreground: var(--brand-foreground);
 
   --destructive: hsl(0 0% 70%);
   --destructive-foreground: hsl(0 0% 9%);
 
   --border: hsl(0 0% 18%);
   --input: hsl(0 0% 18%);
-  --ring: hsl(0 0% 80%);
+  --ring: var(--brand);
 }
 
 @theme inline {
@@ -82,6 +113,9 @@
 
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
 
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
@@ -111,6 +145,7 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
+    font-family: "Space Grotesk", "Segoe UI", system-ui, -apple-system, sans-serif;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 }
@@ -148,5 +183,40 @@
 @layer utilities {
   .transition-sidebar {
     transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .animate-fade-up {
+    animation: fade-up 0.45s ease-out both;
+  }
+
+  .stagger-fade > * {
+    animation: fade-up 0.45s ease-out both;
+  }
+
+  .stagger-fade > *:nth-child(2) {
+    animation-delay: 80ms;
+  }
+
+  .stagger-fade > *:nth-child(3) {
+    animation-delay: 160ms;
+  }
+
+  .stagger-fade > *:nth-child(4) {
+    animation-delay: 240ms;
+  }
+
+  .stagger-fade > *:nth-child(5) {
+    animation-delay: 320ms;
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
