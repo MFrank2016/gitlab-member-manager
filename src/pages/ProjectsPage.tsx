@@ -3,7 +3,7 @@ import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Panel, PanelBody, PanelHeader, PanelTitle } from "@/components/ui/panel";
+import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { searchProjects } from "@/lib/invoke";
 import type { ProjectSummary } from "@/lib/types";
@@ -55,13 +55,16 @@ export function ProjectsPage({ onPickProject }: Props) {
   const pagedItems = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
+      <Panel>
+        <PanelHeader className="flex-col items-start gap-1">
       <div className="flex flex-col gap-2">
-        {/* <h2 className="text-xl font-semibold">项目搜索</h2> */}
+        <h2 className="text-xl font-semibold">项目搜索</h2>
         <p className="text-sm text-muted-foreground">输入关键字搜索项目，点击行可选择项目。</p>
       </div>
-
-      <div className="flex gap-2 max-w-2xl">
+        </PanelHeader>
+        <PanelBody>
+      <div className="flex flex-wrap gap-2 max-w-2xl">
         <Input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="关键字（项目名/namespace）" />
         <Button onClick={onSearch} disabled={loading}>
           {loading ? "搜索中..." : "搜索"}
@@ -69,7 +72,11 @@ export function ProjectsPage({ onPickProject }: Props) {
       </div>
 
       {error && <div className="text-sm text-destructive">{error}</div>}
+        </PanelBody>
+      </Panel>
 
+      <Panel>
+        <PanelHeader className="flex flex-wrap items-end justify-between gap-2">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div className="grid gap-1">
           <Label>过滤结果</Label>
@@ -100,7 +107,8 @@ export function ProjectsPage({ onPickProject }: Props) {
           </Button>
         </div>
       </div>
-
+        </PanelHeader>
+        <PanelBody>
       <Table>
         <TableHeader>
           <TableRow>
@@ -134,6 +142,8 @@ export function ProjectsPage({ onPickProject }: Props) {
           )}
         </TableBody>
       </Table>
+        </PanelBody>
+      </Panel>
     </div>
   );
 }

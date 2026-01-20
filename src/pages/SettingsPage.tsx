@@ -3,6 +3,7 @@ import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import { setGitLabConfig } from "@/lib/invoke";
 
 function loadRemembered() {
@@ -39,32 +40,37 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="space-y-2">
-        <h2 className="text-xl font-semibold">GitLab 配置</h2>
-        <p className="text-sm text-muted-foreground">
-          请输入 GitLab Base URL（如 https://gitlab.example.com）和 Private Token。
-        </p>
-      </div>
-
-      <div className="grid gap-4 max-w-xl">
-        <div className="grid gap-2">
-          <Label>Base URL</Label>
-          <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://gitlab.example.com" />
-        </div>
-        <div className="grid gap-2">
-          <Label>Private Token</Label>
-          <Input value={token} onChange={(e) => setToken(e.target.value)} placeholder="glpat-..." />
-          <p className="text-xs text-muted-foreground">建议使用 Project/Group Access Token 或 Personal Access Token（至少具备 API 权限）。</p>
-        </div>
-        <label className="flex items-center gap-2 text-sm">
-          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-          记住配置到 localStorage（不推荐在共享电脑）
-        </label>
-        <div className="flex items-center gap-3">
-          <Button onClick={onSave}>保存配置</Button>
-          {status && <span className="text-sm">{status}</span>}
-        </div>
-      </div>
+      <Panel>
+        <PanelHeader className="flex-col items-start gap-2">
+        <div className="space-y-2">
+                <h2 className="text-xl font-semibold">GitLab 配置</h2>
+                <p className="text-sm text-muted-foreground">
+                  请输入 GitLab Base URL（如 https://gitlab.example.com）和 Private Token。
+                </p>
+              </div>
+        </PanelHeader>
+        <PanelBody>
+        <div className="grid gap-4 max-w-xl">
+                <div className="grid gap-2">
+                  <Label>Base URL</Label>
+                  <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://gitlab.example.com" />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Private Token</Label>
+                  <Input value={token} onChange={(e) => setToken(e.target.value)} placeholder="glpat-..." />
+                  <p className="text-xs text-muted-foreground">建议使用 Project/Group Access Token 或 Personal Access Token（至少具备 API 权限）。</p>
+                </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+                  记住配置到 localStorage（不推荐在共享电脑）
+                </label>
+                <div className="flex items-center gap-3">
+                  <Button onClick={onSave}>保存配置</Button>
+                  {status && <span className="text-sm">{status}</span>}
+                </div>
+              </div>
+        </PanelBody>
+      </Panel>
     </div>
   );
 }

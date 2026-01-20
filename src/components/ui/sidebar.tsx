@@ -40,59 +40,62 @@ export function Sidebar({
   return (
     <aside
       className={cn(
-        "relative flex flex-col border-r border-border bg-background transition-all duration-300 ease-in-out",
-        collapsed ? "w-16" : "w-56"
+        "relative flex flex-col border-r border-border bg-background/95 backdrop-blur transition-sidebar",
+        collapsed
+          ? "w-[var(--sidebar-width-collapsed)]"
+          : "w-[var(--sidebar-width)]"
       )}
     >
-      {/* Logo / Brand */}
-      <div className="flex h-16 items-center border-b border-border px-4">
-        {!collapsed && (
-          <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-foreground">
-              <span className="text-sm font-bold text-background">GL</span>
+      <div className="flex h-16 items-center justify-between border-b border-border px-4">
+        <div className={cn("flex items-center gap-3", collapsed && "justify-center")}> 
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-foreground text-background shadow-sm">
+            <span className="text-sm font-semibold">GL</span>
+          </div>
+          {!collapsed && (
+            <div className="leading-tight">
+              <div className="text-sm font-semibold tracking-tight">成员管理</div>
+              <div className="text-xs text-muted-foreground">GitLab Workspace</div>
             </div>
-            <span className="text-sm font-semibold tracking-tight">
-              成员管理
-            </span>
-          </div>
-        )}
-        {collapsed && (
-          <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-foreground">
-            <span className="text-sm font-bold text-background">GL</span>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
-      {/* Navigation */}
       <nav className="flex-1 space-y-1 px-2 py-4">
-        {navItems.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => onTabChange(item.id)}
-            className={cn(
-              "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
-              activeTab === item.id
-                ? "bg-foreground text-background"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground"
-            )}
-          >
-            <span className="flex-shrink-0">{item.icon}</span>
-            {!collapsed && <span>{item.label}</span>}
-          </button>
-        ))}
+        {navItems.map((item) => {
+          const isActive = activeTab === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => onTabChange(item.id)}
+              title={item.label}
+              data-active={isActive}
+              className={cn(
+                "group relative flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
+                "before:absolute before:left-0 before:top-1/2 before:h-6 before:w-1 before:-translate-y-1/2 before:rounded-r before:bg-[color:var(--brand)] before:opacity-0 before:transition-opacity",
+                isActive
+                  ? "bg-foreground text-background before:opacity-100"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                collapsed && "justify-center px-2"
+              )}
+            >
+              <span className="flex-shrink-0">{item.icon}</span>
+              {!collapsed && <span>{item.label}</span>}
+            </button>
+          );
+        })}
       </nav>
 
-      {/* Collapse Toggle */}
       <div className="border-t border-border p-2">
         <button
           onClick={() => onCollapsedChange(!collapsed)}
-          className="flex w-full items-center justify-center rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="flex w-full items-center justify-center gap-2 rounded-lg px-2 py-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
           {collapsed ? (
             <ChevronRight className="h-5 w-5" />
           ) : (
             <ChevronLeft className="h-5 w-5" />
           )}
+          {!collapsed && <span className="text-xs font-medium">收起</span>}
         </button>
       </div>
     </aside>
