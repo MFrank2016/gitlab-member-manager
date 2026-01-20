@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { addMembersToGroup, listLocalGroups, listLocalMembers } from "@/lib/invoke";
@@ -68,12 +69,15 @@ export function LocalMembersPage() {
   const pagedItems = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
+      <Panel>
+        <PanelHeader className="flex-col items-start gap-1">
       <div className="space-y-1">
         <h2 className="text-xl font-semibold">本地成员库</h2>
         <p className="text-sm text-muted-foreground">从项目成员保存的本地成员，可用于创建“虚拟分组”。</p>
       </div>
-
+        </PanelHeader>
+        <PanelBody>
       <div className="flex flex-wrap items-end gap-2">
         <div className="grid gap-1">
           <Label>搜索</Label>
@@ -108,7 +112,11 @@ export function LocalMembersPage() {
         </div>
         <Button onClick={addToGroup} disabled={selected.size === 0}>加入分组</Button>
       </div>
+        </PanelBody>
+      </Panel>
 
+      <Panel>
+        <PanelHeader className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
       <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
         <span>
           第 {safePage} / {pageCount} 页（共 {filteredItems.length}）
@@ -130,7 +138,8 @@ export function LocalMembersPage() {
           </Button>
         </div>
       </div>
-
+        </PanelHeader>
+        <PanelBody>
       <Table>
         <TableHeader>
           <TableRow>
@@ -170,6 +179,8 @@ export function LocalMembersPage() {
           )}
         </TableBody>
       </Table>
+        </PanelBody>
+      </Panel>
     </div>
   );
 }
