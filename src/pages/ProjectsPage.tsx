@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { searchProjects } from "@/lib/invoke";
 import type { ProjectSummary } from "@/lib/types";
@@ -15,6 +16,12 @@ export function ProjectsPage({ onPickProject }: Props) {
   const [items, setItems] = React.useState<ProjectSummary[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string>("");
+  const [filterText, setFilterText] = React.useState("");
+  const [page, setPage] = React.useState(1);
+
+  React.useEffect(() => {
+    setPage(1);
+  }, [filterText, items.length]);
 
   async function onSearch() {
     setError("");
@@ -29,6 +36,22 @@ export function ProjectsPage({ onPickProject }: Props) {
       setLoading(false);
     }
   }
+
+  const pageSize = 20;
+  const filteredItems = items.filter((p) => {
+    const q = filterText.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      String(p.id).includes(q) ||
+      p.name.toLowerCase().includes(q) ||
+      p.namespace.toLowerCase().includes(q) ||
+      p.pathWithNamespace.toLowerCase().includes(q) ||
+      (p.description ?? "").toLowerCase().includes(q)
+    );
+  });
+  const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const pagedItems = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   return (
     <div className="space-y-4">
@@ -46,6 +69,37 @@ export function ProjectsPage({ onPickProject }: Props) {
 
       {error && <div className="text-sm text-destructive">{error}</div>}
 
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div className="grid gap-1">
+          <Label>过滤结果</Label>
+          <Input
+            className="w-[260px]"
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            placeholder="项目名 / namespace / ID"
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+          <span>
+            第 {safePage} / {pageCount} 页（共 {filteredItems.length}）
+          </span>
+          <Button
+            variant="secondary"
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={safePage <= 1}
+          >
+            上一页
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+            disabled={safePage >= pageCount}
+          >
+            下一页
+          </Button>
+        </div>
+      </div>
+
       <Table>
         <TableHeader>
           <TableRow>
@@ -57,8 +111,12 @@ export function ProjectsPage({ onPickProject }: Props) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {items.map((p) => (
-            <TableRow key={p.id} className="cursor-pointer" onClick={() => onPickProject(p)}>
+          {pagedItems.map((p) => (
+            <TableRow
+              key={p.id}
+              className="cursor-pointer transition-colors hover:bg-muted/50"
+              onClick={() => onPickProject(p)}
+            >
               <TableCell className="font-mono">{p.id}</TableCell>
               <TableCell>{p.name}</TableCell>
               <TableCell className="text-muted-foreground">{p.namespace}</TableCell>
@@ -66,10 +124,10 @@ export function ProjectsPage({ onPickProject }: Props) {
               <TableCell className="font-mono text-xs">{p.lastActivityAt}</TableCell>
             </TableRow>
           ))}
-          {items.length === 0 && (
+          {filteredItems.length === 0 && (
             <TableRow>
               <TableCell colSpan={5} className="text-center text-muted-foreground">
-                {loading ? "加载中..." : "暂无数据"}
+                {loading ? "加载中..." : items.length === 0 ? "暂无数据" : "无匹配结果"}
               </TableCell>
             </TableRow>
           )}

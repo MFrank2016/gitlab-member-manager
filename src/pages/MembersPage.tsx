@@ -27,6 +27,8 @@ export function MembersPage() {
   const [error, setError] = React.useState<string>("");
 
   const [selectedIds, setSelectedIds] = React.useState<Set<number>>(new Set());
+  const [memberFilter, setMemberFilter] = React.useState("");
+  const [memberPage, setMemberPage] = React.useState(1);
 
   const [groups, setGroups] = React.useState<LocalGroup[]>([]);
   const [groupId, setGroupId] = React.useState<string>("");
@@ -46,6 +48,10 @@ export function MembersPage() {
     refreshGroups();
   }, []);
 
+  React.useEffect(() => {
+    setMemberPage(1);
+  }, [memberFilter, members.length]);
+
   async function loadMembers(p: ProjectSummary) {
     setError("");
     setLoading(true);
@@ -61,14 +67,33 @@ export function MembersPage() {
     }
   }
 
-  const allChecked = members.length > 0 && selectedIds.size === members.length;
+  const membersPageSize = 50;
+  const filteredMembers = members.filter((m) => {
+    const q = memberFilter.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      String(m.id).includes(q) ||
+      m.username.toLowerCase().includes(q) ||
+      (m.name ?? "").toLowerCase().includes(q)
+    );
+  });
+  const membersPageCount = Math.max(1, Math.ceil(filteredMembers.length / membersPageSize));
+  const safeMemberPage = Math.min(memberPage, membersPageCount);
+  const pagedMembers = filteredMembers.slice(
+    (safeMemberPage - 1) * membersPageSize,
+    safeMemberPage * membersPageSize
+  );
+
+  const allChecked = pagedMembers.length > 0 && pagedMembers.every((m) => selectedIds.has(m.id));
 
   function toggleAll(checked: boolean) {
-    if (!checked) {
-      setSelectedIds(new Set());
-      return;
+    const next = new Set(selectedIds);
+    if (checked) {
+      pagedMembers.forEach((m) => next.add(m.id));
+    } else {
+      pagedMembers.forEach((m) => next.delete(m.id));
     }
-    setSelectedIds(new Set(members.map((m) => m.id)));
+    setSelectedIds(next);
   }
 
   function toggleOne(id: number, checked: boolean) {
@@ -254,6 +279,37 @@ export function MembersPage() {
         </div>
       </div>
 
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div className="grid gap-1">
+          <Label>过滤成员</Label>
+          <Input
+            className="w-[260px]"
+            value={memberFilter}
+            onChange={(e) => setMemberFilter(e.target.value)}
+            placeholder="用户名 / 昵称 / ID"
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+          <span>
+            第 {safeMemberPage} / {membersPageCount} 页（共 {filteredMembers.length}）
+          </span>
+          <Button
+            variant="secondary"
+            onClick={() => setMemberPage((p) => Math.max(1, p - 1))}
+            disabled={safeMemberPage <= 1}
+          >
+            上一页
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => setMemberPage((p) => Math.min(membersPageCount, p + 1))}
+            disabled={safeMemberPage >= membersPageCount}
+          >
+            下一页
+          </Button>
+        </div>
+      </div>
+
       <div className="w-full overflow-hidden rounded-lg border bg-card">
         <div className="max-h-[440px] overflow-auto">
           <Table>
@@ -278,8 +334,8 @@ export function MembersPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {members.map((m) => (
-                <TableRow key={m.id}>
+              {pagedMembers.map((m) => (
+                <TableRow key={m.id} className="transition-colors hover:bg-muted/50">
                   <TableCell>
                     <Checkbox
                       checked={selectedIds.has(m.id)}
@@ -300,10 +356,16 @@ export function MembersPage() {
                   <TableCell className="font-mono text-xs">{m.expiresAt ?? ""}</TableCell>
                 </TableRow>
               ))}
-              {members.length === 0 && (
+              {filteredMembers.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={8} className="text-center text-muted-foreground">
-                    {loading ? "加载中..." : selectedProject ? "该项目暂无成员" : "请选择项目"}
+                    {loading
+                      ? "加载中..."
+                      : selectedProject
+                        ? memberFilter.trim()
+                          ? "无匹配成员"
+                          : "该项目暂无成员"
+                        : "请选择项目"}
                   </TableCell>
                 </TableRow>
               )}

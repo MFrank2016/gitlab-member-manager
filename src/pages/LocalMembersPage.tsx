@@ -16,6 +16,8 @@ export function LocalMembersPage() {
   const [groups, setGroups] = React.useState<LocalGroup[]>([]);
   const [groupId, setGroupId] = React.useState<string>("");
   const [selected, setSelected] = React.useState<Set<number>>(new Set());
+  const [tableFilter, setTableFilter] = React.useState("");
+  const [page, setPage] = React.useState(1);
 
   async function refresh() {
     const res = await listLocalMembers(query.trim() ? query.trim() : undefined);
@@ -32,6 +34,10 @@ export function LocalMembersPage() {
     void refreshGroups();
   }, []);
 
+  React.useEffect(() => {
+    setPage(1);
+  }, [tableFilter, items.length]);
+
   async function addToGroup() {
     if (!groupId) {
       toast.error("请选择分组");
@@ -47,6 +53,20 @@ export function LocalMembersPage() {
     }
   }
 
+  const pageSize = 50;
+  const filteredItems = items.filter((m) => {
+    const q = tableFilter.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      String(m.userId).includes(q) ||
+      m.username.toLowerCase().includes(q) ||
+      m.name.toLowerCase().includes(q)
+    );
+  });
+  const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const pagedItems = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
+
   return (
     <div className="space-y-4">
       <div className="space-y-1">
@@ -60,6 +80,16 @@ export function LocalMembersPage() {
           <Input className="w-[320px]" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="username / name" />
         </div>
         <Button variant="secondary" onClick={refresh}>刷新</Button>
+
+        <div className="grid gap-1">
+          <Label>过滤当前结果</Label>
+          <Input
+            className="w-[240px]"
+            value={tableFilter}
+            onChange={(e) => setTableFilter(e.target.value)}
+            placeholder="用户名 / 昵称 / ID"
+          />
+        </div>
 
         <div className="grid gap-1">
           <Label>添加到分组</Label>
@@ -79,6 +109,28 @@ export function LocalMembersPage() {
         <Button onClick={addToGroup} disabled={selected.size === 0}>加入分组</Button>
       </div>
 
+      <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
+        <span>
+          第 {safePage} / {pageCount} 页（共 {filteredItems.length}）
+        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="secondary"
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={safePage <= 1}
+          >
+            上一页
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+            disabled={safePage >= pageCount}
+          >
+            下一页
+          </Button>
+        </div>
+      </div>
+
       <Table>
         <TableHeader>
           <TableRow>
@@ -90,8 +142,8 @@ export function LocalMembersPage() {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {items.map((m) => (
-            <TableRow key={m.userId}>
+          {pagedItems.map((m) => (
+            <TableRow key={m.userId} className="transition-colors hover:bg-muted/50">
               <TableCell>
                 <Checkbox
                   checked={selected.has(m.userId)}
@@ -109,9 +161,11 @@ export function LocalMembersPage() {
               <TableCell className="font-mono text-xs">{m.updatedAt}</TableCell>
             </TableRow>
           ))}
-          {items.length === 0 && (
+          {filteredItems.length === 0 && (
             <TableRow>
-              <TableCell colSpan={5} className="text-center text-muted-foreground">暂无本地成员</TableCell>
+              <TableCell colSpan={5} className="text-center text-muted-foreground">
+                {items.length === 0 ? "暂无本地成员" : "无匹配结果"}
+              </TableCell>
             </TableRow>
           )}
         </TableBody>
