@@ -59,7 +59,7 @@ export function ProjectsPage({ onPickProject }: Props) {
       <Panel>
         <PanelHeader className="flex-col items-start gap-1">
       <div className="flex flex-col gap-2">
-        <h2 className="text-xl font-semibold">项目搜索</h2>
+        {/* <h2 className="text-xl font-semibold">项目搜索</h2> */}
         <p className="text-sm text-muted-foreground">输入关键字搜索项目，点击行可选择项目。</p>
       </div>
         </PanelHeader>
