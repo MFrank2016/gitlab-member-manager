@@ -70,7 +70,7 @@ export function LocalMembersPage() {
   return (
     <div className="space-y-4">
       <div className="space-y-1">
-        <h2 className="text-xl font-semibold">本地成员库</h2>
+        {/* <h2 className="text-xl font-semibold">本地成员库</h2> */}
         <p className="text-sm text-muted-foreground">从项目成员保存的本地成员，可用于创建“虚拟分组”。</p>
       </div>
 

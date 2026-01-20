@@ -97,7 +97,7 @@ export function GroupsPage() {
   return (
     <div className="space-y-4">
       <div className="space-y-1">
-        <h2 className="text-xl font-semibold">本地虚拟分组</h2>
+        {/* <h2 className="text-xl font-semibold">本地虚拟分组</h2> */}
         <p className="text-sm text-muted-foreground">分组只保存在本地 SQLite，用于批量拉人/移除。</p>
       </div>
 

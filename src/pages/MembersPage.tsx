@@ -191,7 +191,7 @@ export function MembersPage() {
   return (
     <div className="space-y-4">
       <div className="space-y-1">
-        <h2 className="text-xl font-semibold">项目成员管理</h2>
+        {/* <h2 className="text-xl font-semibold">项目成员管理</h2> */}
         <p className="text-sm text-muted-foreground">选择项目后查看成员，并支持保存到本地、按分组批量拉人/移除。</p>
       </div>
 
