@@ -36,8 +36,8 @@ export function ProjectCombobox({ value, onChange, placeholder }: Props) {
     const t = setTimeout(async () => {
       setLoading(true);
       try {
-        const res = await searchProjects(q);
-        if (!cancelled) setItems(res);
+        const res = await searchProjects(q, 1, 30);
+        if (!cancelled) setItems(res.items);
       } catch {
         if (!cancelled) setItems([]);
       } finally {
@@ -60,7 +60,7 @@ export function ProjectCombobox({ value, onChange, placeholder }: Props) {
   return (
     <div className="relative w-full">
       <Input
-        className="pr-8"
+        className="pr-8 w-full"
         value={displayValue}
         onFocus={() => {
           setPanelOpen(true);

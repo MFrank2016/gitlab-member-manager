@@ -2,11 +2,13 @@ import * as React from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { searchProjects } from "@/lib/invoke";
 import type { ProjectSummary } from "@/lib/types";
+import { formatDateTime } from "@/lib/utils";
+
+const PAGE_SIZE = 20;
 
 type Props = {
   onPickProject: (p: ProjectSummary) => void;
@@ -15,44 +17,39 @@ type Props = {
 export function ProjectsPage({ onPickProject }: Props) {
   const [keyword, setKeyword] = React.useState("");
   const [items, setItems] = React.useState<ProjectSummary[]>([]);
+  const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string>("");
-  const [filterText, setFilterText] = React.useState("");
   const [page, setPage] = React.useState(1);
 
-  React.useEffect(() => {
-    setPage(1);
-  }, [filterText, items.length]);
-
-  async function onSearch() {
+  async function fetchPage(p: number) {
     setError("");
     setLoading(true);
     try {
-      const res = await searchProjects(keyword.trim());
-      setItems(res);
+      const res = await searchProjects(keyword.trim(), p, PAGE_SIZE);
+      setItems(res.items);
+      setTotal(res.total);
     } catch (e) {
       setError(String(e));
       setItems([]);
+      setTotal(0);
     } finally {
       setLoading(false);
     }
   }
 
-  const pageSize = 20;
-  const filteredItems = items.filter((p) => {
-    const q = filterText.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      String(p.id).includes(q) ||
-      p.name.toLowerCase().includes(q) ||
-      p.namespace.toLowerCase().includes(q) ||
-      p.pathWithNamespace.toLowerCase().includes(q) ||
-      (p.description ?? "").toLowerCase().includes(q)
-    );
-  });
-  const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  async function onSearch() {
+    setPage(1);
+    await fetchPage(1);
+  }
+
+  function onPageChange(next: number) {
+    setPage(next);
+    void fetchPage(next);
+  }
+
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const safePage = Math.min(page, pageCount);
-  const pagedItems = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   return (
     <div className="space-y-6">
@@ -77,36 +74,25 @@ export function ProjectsPage({ onPickProject }: Props) {
 
       <Panel>
         <PanelHeader className="flex flex-wrap items-end justify-between gap-2">
-      <div className="flex flex-wrap items-end justify-between gap-2">
-        <div className="grid gap-1">
-          <Label>过滤结果</Label>
-          <Input
-            className="w-[260px]"
-            value={filterText}
-            onChange={(e) => setFilterText(e.target.value)}
-            placeholder="项目名 / namespace / ID"
-          />
-        </div>
         <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
           <span>
-            第 {safePage} / {pageCount} 页（共 {filteredItems.length}）
+            第 {safePage} / {pageCount} 页（共 {total}）
           </span>
           <Button
             variant="secondary"
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-            disabled={safePage <= 1}
+            onClick={() => onPageChange(Math.max(1, safePage - 1))}
+            disabled={safePage <= 1 || loading}
           >
             上一页
           </Button>
           <Button
             variant="secondary"
-            onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
-            disabled={safePage >= pageCount}
+            onClick={() => onPageChange(Math.min(pageCount, safePage + 1))}
+            disabled={safePage >= pageCount || loading}
           >
             下一页
           </Button>
         </div>
-      </div>
         </PanelHeader>
         <PanelBody>
       <Table>
@@ -120,7 +106,7 @@ export function ProjectsPage({ onPickProject }: Props) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {pagedItems.map((p) => (
+          {items.map((p) => (
             <TableRow
               key={p.id}
               className="cursor-pointer transition-colors hover:bg-muted/50"
@@ -130,13 +116,13 @@ export function ProjectsPage({ onPickProject }: Props) {
               <TableCell>{p.name}</TableCell>
               <TableCell className="text-muted-foreground">{p.namespace}</TableCell>
               <TableCell className="text-muted-foreground line-clamp-2">{p.description ?? ""}</TableCell>
-              <TableCell className="font-mono text-xs">{p.lastActivityAt}</TableCell>
+              <TableCell className="font-mono text-xs">{formatDateTime(p.lastActivityAt)}</TableCell>
             </TableRow>
           ))}
-          {filteredItems.length === 0 && (
+          {items.length === 0 && (
             <TableRow>
               <TableCell colSpan={5} className="text-center text-muted-foreground">
-                {loading ? "加载中..." : items.length === 0 ? "暂无数据" : "无匹配结果"}
+                {loading ? "加载中..." : total === 0 ? "请输入关键字并搜索" : "无匹配结果"}
               </TableCell>
             </TableRow>
           )}

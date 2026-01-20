@@ -75,16 +75,40 @@ async function loggedInvoke<T>(cmd: string, args?: Record<string, unknown>): Pro
   }
 }
 
+export async function getGitLabConfig(): Promise<{ baseUrl: string; token: string } | null> {
+  const v = await loggedInvoke<[string, string] | null>("get_gitlab_config");
+  if (!v) return null;
+  return { baseUrl: v[0], token: v[1] };
+}
+
 export async function setGitLabConfig(baseUrl: string, token: string) {
   return loggedInvoke<void>("set_gitlab_config", { baseUrl, token });
 }
 
-export async function searchProjects(keyword: string) {
-  return loggedInvoke<ProjectSummary[]>("search_projects", { keyword });
+export async function searchProjects(
+  keyword: string,
+  page = 1,
+  perPage = 20
+): Promise<{ items: ProjectSummary[]; total: number }> {
+  const [items, total] = await loggedInvoke<[ProjectSummary[], number]>("search_projects", {
+    keyword,
+    page,
+    per_page: perPage,
+  });
+  return { items, total };
 }
 
-export async function listProjectMembers(project: string) {
-  return loggedInvoke<ProjectMember[]>("list_project_members", { project });
+export async function listProjectMembers(
+  project: string,
+  page = 1,
+  perPage = 50
+): Promise<{ members: ProjectMember[]; total: number }> {
+  const [members, total] = await loggedInvoke<[ProjectMember[], number]>("list_project_members", {
+    project,
+    page,
+    per_page: perPage,
+  });
+  return { members, total };
 }
 
 export async function upsertLocalMembers(members: Array<{
@@ -92,12 +116,27 @@ export async function upsertLocalMembers(members: Array<{
   username: string;
   name: string;
   avatarUrl?: string | null;
+  projectId?: number | null;
+  projectName?: string | null;
 }>) {
   return loggedInvoke<void>("upsert_local_members", { members });
 }
 
-export async function listLocalMembers(query?: string) {
-  return loggedInvoke<LocalMember[]>("list_local_members", { query });
+export async function listLocalMembers(
+  query?: string | null,
+  page = 1,
+  perPage = 50
+): Promise<{ items: LocalMember[]; total: number }> {
+  const [items, total] = await loggedInvoke<[LocalMember[], number]>("list_local_members", {
+    query: query && query.trim() ? query.trim() : null,
+    page,
+    per_page: perPage,
+  });
+  return { items, total };
+}
+
+export async function deleteLocalMembers(userIds: number[]) {
+  return loggedInvoke<void>("delete_local_members", { userIds });
 }
 
 export async function createLocalGroup(name: string) {
@@ -106,6 +145,14 @@ export async function createLocalGroup(name: string) {
 
 export async function listLocalGroups() {
   return loggedInvoke<LocalGroup[]>("list_local_groups");
+}
+
+export async function updateLocalGroup(id: number, name: string) {
+  return loggedInvoke<void>("update_local_group", { id, name });
+}
+
+export async function deleteLocalGroup(id: number) {
+  return loggedInvoke<void>("delete_local_group", { id });
 }
 
 export async function addMembersToGroup(groupId: number, userIds: number[]) {

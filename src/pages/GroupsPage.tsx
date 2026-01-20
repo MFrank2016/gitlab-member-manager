@@ -14,8 +14,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { listGroupMembers, listLocalGroups, createLocalGroup, removeMembersFromGroup } from "@/lib/invoke";
+import {
+  listGroupMembers,
+  listLocalGroups,
+  createLocalGroup,
+  updateLocalGroup,
+  deleteLocalGroup,
+  removeMembersFromGroup,
+} from "@/lib/invoke";
 import type { LocalGroup, LocalMember } from "@/lib/types";
+import { formatDateTime } from "@/lib/utils";
+import { toast } from "sonner";
 
 export function GroupsPage() {
   const [groups, setGroups] = React.useState<LocalGroup[]>([]);
@@ -23,6 +32,9 @@ export function GroupsPage() {
   const [members, setMembers] = React.useState<LocalMember[]>([]);
   const [newName, setNewName] = React.useState("");
   const [createOpen, setCreateOpen] = React.useState(false);
+  const [editOpen, setEditOpen] = React.useState(false);
+  const [editingGroup, setEditingGroup] = React.useState<LocalGroup | null>(null);
+  const [editName, setEditName] = React.useState("");
   const [groupFilter, setGroupFilter] = React.useState("");
   const [groupPage, setGroupPage] = React.useState(1);
   const [memberFilter, setMemberFilter] = React.useState("");
@@ -57,6 +69,41 @@ export function GroupsPage() {
     setNewName("");
     await refresh();
     setCreateOpen(false);
+  }
+
+  function openEdit(g: LocalGroup, e: React.MouseEvent) {
+    e.stopPropagation();
+    setEditingGroup(g);
+    setEditName(g.name);
+    setEditOpen(true);
+  }
+
+  async function onSaveEdit() {
+    if (!editingGroup || !editName.trim()) return;
+    await updateLocalGroup(editingGroup.id, editName.trim());
+    await refresh();
+    setActiveGroup((prev) =>
+      prev && prev.id === editingGroup.id ? { ...prev, name: editName.trim() } : prev
+    );
+    setEditOpen(false);
+    setEditingGroup(null);
+    toast.success("已更新分组名称");
+  }
+
+  async function onDeleteGroup(g: LocalGroup, e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!confirm(`确认删除分组「${g.name}」？成员关联将被移除。`)) return;
+    try {
+      await deleteLocalGroup(g.id);
+      await refresh();
+      if (activeGroup?.id === g.id) {
+        setActiveGroup(null);
+        setMembers([]);
+      }
+      toast.success("已删除分组");
+    } catch (err) {
+      toast.error(`删除失败：${String(err)}`);
+    }
   }
 
   async function removeOne(userId: number) {
@@ -135,6 +182,31 @@ export function GroupsPage() {
                     </DialogFooter>
                   </DialogContent>
                 </Dialog>
+                <Dialog open={editOpen} onOpenChange={setEditOpen}>
+                  <DialogContent className="sm:max-w-[480px] space-y-4">
+                    <DialogHeader className="space-y-1">
+                      <DialogTitle>编辑分组</DialogTitle>
+                      <DialogDescription>修改分组名称。</DialogDescription>
+                    </DialogHeader>
+                    <div className="grid gap-3">
+                      <Label>分组名称</Label>
+                      <Input
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        autoFocus
+                        placeholder="例如：backend-team"
+                      />
+                    </div>
+                    <DialogFooter className="gap-2">
+                      <Button variant="secondary" onClick={() => setEditOpen(false)}>
+                        取消
+                      </Button>
+                      <Button onClick={onSaveEdit} disabled={!editName.trim()}>
+                        保存
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
               </div>
         </PanelBody>
       </Panel>
@@ -181,6 +253,7 @@ export function GroupsPage() {
                           <TableHead>ID</TableHead>
                           <TableHead>名称</TableHead>
                           <TableHead>创建时间</TableHead>
+                          <TableHead>操作</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -194,12 +267,22 @@ export function GroupsPage() {
                           >
                             <TableCell className="font-mono">{g.id}</TableCell>
                             <TableCell className={activeGroup?.id === g.id ? "font-semibold" : ""}>{g.name}</TableCell>
-                            <TableCell className="font-mono text-xs">{g.createdAt}</TableCell>
+                            <TableCell className="font-mono text-xs">{formatDateTime(g.createdAt)}</TableCell>
+                            <TableCell onClick={(e) => e.stopPropagation()}>
+                              <div className="flex gap-1">
+                                <Button variant="ghost" size="sm" onClick={(e) => openEdit(g, e)}>
+                                  编辑
+                                </Button>
+                                <Button variant="ghost" size="sm" className="text-destructive" onClick={(e) => void onDeleteGroup(g, e)}>
+                                  删除
+                                </Button>
+                              </div>
+                            </TableCell>
                           </TableRow>
                         ))}
                         {filteredGroups.length === 0 && (
                           <TableRow>
-                            <TableCell colSpan={3} className="text-center text-muted-foreground">
+                            <TableCell colSpan={4} className="text-center text-muted-foreground">
                               {groups.length === 0 ? "暂无分组" : "无匹配结果"}
                             </TableCell>
                           </TableRow>

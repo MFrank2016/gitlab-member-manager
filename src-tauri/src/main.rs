@@ -78,14 +78,17 @@ fn require_cfg(state: &AppState) -> Result<GitLabConfig, String> {
 }
 
 #[tauri::command]
+async fn get_gitlab_config(state: State<'_, AppState>) -> Result<Option<(String, String)>, String> {
+  let cfg = db::get_gitlab_config(&state.db)
+    .await
+    .map_err(|e| e.to_string())?;
+  Ok(cfg)
+}
+
+#[tauri::command]
 async fn set_gitlab_config(state: State<'_, AppState>, base_url: String, token: String) -> Result<(), String> {
   tracing::info!(base_url = %base_url, token_len = token.len(), "set_gitlab_config called");
   
-  let mut guard = state
-    .gitlab
-    .lock()
-    .map_err(|_| "Mutex poisoned".to_string())?;
-
   if base_url.trim().is_empty() {
     tracing::warn!("set_gitlab_config failed: baseUrl is empty");
     return Err("baseUrl is empty".to_string());
@@ -95,9 +98,20 @@ async fn set_gitlab_config(state: State<'_, AppState>, base_url: String, token: 
     return Err("token is empty".to_string());
   }
 
+  let base = base_url.trim().to_string();
+  let tok = token.trim().to_string();
+
+  db::set_gitlab_config(&state.db, &base, &tok)
+    .await
+    .map_err(|e| e.to_string())?;
+
+  let mut guard = state
+    .gitlab
+    .lock()
+    .map_err(|_| "Mutex poisoned".to_string())?;
   *guard = Some(GitLabConfig {
-    base_url: base_url.trim().to_string(),
-    token: token.trim().to_string(),
+    base_url: base,
+    token: tok,
   });
   
   tracing::info!("set_gitlab_config success");
@@ -105,32 +119,46 @@ async fn set_gitlab_config(state: State<'_, AppState>, base_url: String, token: 
 }
 
 #[tauri::command]
-async fn search_projects(state: State<'_, AppState>, keyword: String) -> Result<Vec<ProjectSummary>, String> {
-  tracing::info!(keyword = %keyword, "search_projects called");
+async fn search_projects(
+  state: State<'_, AppState>,
+  keyword: String,
+  page: Option<u32>,
+  per_page: Option<u32>,
+) -> Result<(Vec<ProjectSummary>, u64), String> {
+  let page = page.unwrap_or(1);
+  let per_page = per_page.unwrap_or(20).clamp(1, 100);
+  tracing::info!(keyword = %keyword, page = page, per_page = per_page, "search_projects called");
   
   let cfg = require_cfg(&state)?;
-  let result = gitlab::search_projects(&cfg, keyword.trim())
+  let result = gitlab::search_projects(&cfg, keyword.trim(), page, per_page)
     .await
     .map_err(|e| e.to_string());
   
   match &result {
-    Ok(projects) => tracing::info!(count = projects.len(), "search_projects success"),
+    Ok((items, total)) => tracing::info!(count = items.len(), total = total, "search_projects success"),
     Err(e) => tracing::error!(error = %e, "search_projects failed"),
   }
   result
 }
 
 #[tauri::command]
-async fn list_project_members(state: State<'_, AppState>, project: String) -> Result<Vec<ProjectMember>, String> {
-  tracing::info!(project = %project, "list_project_members called");
+async fn list_project_members(
+  state: State<'_, AppState>,
+  project: String,
+  page: Option<u32>,
+  per_page: Option<u32>,
+) -> Result<(Vec<ProjectMember>, u64), String> {
+  let page = page.unwrap_or(1);
+  let per_page = per_page.unwrap_or(50).clamp(1, 100);
+  tracing::info!(project = %project, page = page, per_page = per_page, "list_project_members called");
   
   let cfg = require_cfg(&state)?;
-  let result = gitlab::list_project_members(&cfg, project.trim())
+  let result = gitlab::list_project_members(&cfg, project.trim(), page, per_page)
     .await
     .map_err(|e| e.to_string());
   
   match &result {
-    Ok(members) => tracing::info!(count = members.len(), "list_project_members success"),
+    Ok((members, total)) => tracing::info!(count = members.len(), total = total, "list_project_members success"),
     Err(e) => tracing::error!(error = %e, "list_project_members failed"),
   }
   result
@@ -152,16 +180,36 @@ async fn upsert_local_members(state: State<'_, AppState>, members: Vec<LocalMemb
 }
 
 #[tauri::command]
-async fn list_local_members(state: State<'_, AppState>, query: Option<String>) -> Result<Vec<LocalMember>, String> {
-  tracing::info!(query = ?query, "list_local_members called");
+async fn list_local_members(
+  state: State<'_, AppState>,
+  query: Option<String>,
+  page: Option<u32>,
+  per_page: Option<u32>,
+) -> Result<(Vec<LocalMember>, u64), String> {
+  let page = page.unwrap_or(1);
+  let per_page = per_page.unwrap_or(50).clamp(1, 100);
+  tracing::info!(query = ?query, page = page, per_page = per_page, "list_local_members called");
   
-  let result = db::list_local_members(&state.db, query)
+  let result = db::list_local_members(&state.db, query, page, per_page)
     .await
     .map_err(|e| e.to_string());
   
   match &result {
-    Ok(members) => tracing::info!(count = members.len(), "list_local_members success"),
+    Ok((members, total)) => tracing::info!(count = members.len(), total = total, "list_local_members success"),
     Err(e) => tracing::error!(error = %e, "list_local_members failed"),
+  }
+  result
+}
+
+#[tauri::command]
+async fn delete_local_members(state: State<'_, AppState>, user_ids: Vec<u64>) -> Result<(), String> {
+  tracing::info!(count = user_ids.len(), "delete_local_members called");
+  let result = db::delete_local_members(&state.db, user_ids)
+    .await
+    .map_err(|e| e.to_string());
+  match &result {
+    Ok(_) => tracing::info!("delete_local_members success"),
+    Err(e) => tracing::error!(error = %e, "delete_local_members failed"),
   }
   result
 }
@@ -194,6 +242,20 @@ async fn list_local_groups(state: State<'_, AppState>) -> Result<Vec<LocalGroup>
     Err(e) => tracing::error!(error = %e, "list_local_groups failed"),
   }
   result
+}
+
+#[tauri::command]
+async fn update_local_group(state: State<'_, AppState>, id: i64, name: String) -> Result<(), String> {
+  db::update_local_group(&state.db, id, name.trim().to_string())
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_local_group(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+  db::delete_local_group(&state.db, id)
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -351,22 +413,38 @@ fn main() {
       let db = tauri::async_runtime::block_on(db::init_db(&app.handle()))
         .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
 
+      let gitlab = match tauri::async_runtime::block_on(db::get_gitlab_config(&db)) {
+        Ok(Some((base_url, token))) => {
+          tracing::info!("[setup] loaded GitLab config from database");
+          Some(GitLabConfig { base_url, token })
+        }
+        Ok(None) => None,
+        Err(e) => {
+          tracing::warn!(error = %e, "[setup] failed to load GitLab config from database");
+          None
+        }
+      };
+
       app.manage(AppState {
         db,
-        gitlab: Mutex::new(None),
+        gitlab: Mutex::new(gitlab),
       });
 
       tracing::info!("Application initialized successfully");
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
+      get_gitlab_config,
       set_gitlab_config,
       search_projects,
       list_project_members,
       upsert_local_members,
       list_local_members,
+      delete_local_members,
       create_local_group,
       list_local_groups,
+      update_local_group,
+      delete_local_group,
       add_members_to_group,
       remove_members_from_group,
       list_group_members,

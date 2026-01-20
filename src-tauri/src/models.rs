@@ -30,6 +30,10 @@ pub struct LocalMemberUpsert {
   pub username: String,
   pub name: String,
   pub avatar_url: Option<String>,
+  #[serde(default)]
+  pub project_id: Option<u64>,
+  #[serde(default)]
+  pub project_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +44,10 @@ pub struct LocalMember {
   pub name: String,
   pub avatar_url: Option<String>,
   pub updated_at: String,
+  #[serde(default)]
+  pub project_id: Option<u64>,
+  #[serde(default)]
+  pub project_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

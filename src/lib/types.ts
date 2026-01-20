@@ -28,6 +28,8 @@ export type LocalMember = {
   name: string;
   avatarUrl?: string | null;
   updatedAt: string;
+  projectId?: number | null;
+  projectName?: string | null;
 };
 
 export type LocalGroup = {

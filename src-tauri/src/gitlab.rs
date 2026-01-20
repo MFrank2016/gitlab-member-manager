@@ -60,38 +60,40 @@ struct ApiMember {
     expires_at: Option<String>,
 }
 
-pub async fn search_projects(cfg: &GitLabConfig, keyword: &str) -> Result<Vec<ProjectSummary>> {
+/// 分页搜索项目。返回 (项目列表, 总条数)。总条数来自响应头 X-Total，若缺失则用本页数量估算。
+pub async fn search_projects(
+    cfg: &GitLabConfig,
+    keyword: &str,
+    page: u32,
+    per_page: u32,
+) -> Result<(Vec<ProjectSummary>, u64)> {
     let keyword = keyword.trim();
-    // if keyword.is_empty() {
-    //   tracing::debug!("[gitlab] search_projects: keyword is empty, returning empty list");
-    //   return Ok(Vec::new());
-    // }
-
     let url = api_url(&cfg.base_url, "/api/v4/projects");
     let http = client();
 
-    // 调试：打印 base_url 和 token（token 只显示前8位和长度）
     let token_preview = if cfg.token.len() > 8 {
         format!("{}...({} chars)", &cfg.token[..8], cfg.token.len())
     } else {
         format!("{}({} chars)", &cfg.token, cfg.token.len())
     };
     tracing::info!(
-      base_url = %cfg.base_url,
-      token = %token_preview,
-      url = %url,
-      keyword = %keyword,
-      "[gitlab] GET /api/v4/projects"
+        base_url = %cfg.base_url,
+        token = %token_preview,
+        url = %url,
+        keyword = %keyword,
+        page = page,
+        per_page = per_page,
+        "[gitlab] GET /api/v4/projects"
     );
 
-    // Keep it small; this is for typeahead/quick search.
     let resp = http
         .get(&url)
         .header("PRIVATE-TOKEN", &cfg.token)
         .query(&[
             ("search", keyword),
             ("simple", "true"),
-            ("per_page", "50"),
+            ("per_page", per_page.to_string().as_str()),
+            ("page", page.to_string().as_str()),
             ("order_by", "last_activity_at"),
             ("sort", "desc"),
         ])
@@ -100,22 +102,25 @@ pub async fn search_projects(cfg: &GitLabConfig, keyword: &str) -> Result<Vec<Pr
         .context("GitLab request failed")?;
 
     let status = resp.status();
-    tracing::info!(status = %status, "[gitlab] response received");
+    let total: u64 = resp
+        .headers()
+        .get("x-total")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
-    // 先获取响应文本，打印完整报文用于调试
     let text = resp.text().await.unwrap_or_default();
-    tracing::info!(body = %text, "[gitlab] response body");
+    tracing::debug!(status = %status, total = total, "[gitlab] response received");
 
     if !status.is_success() {
         tracing::error!(status = %status, body = %text, "[gitlab] API error");
         return Err(anyhow!("GitLab API error {status}: {text}"));
     }
 
-    // 从文本解析 JSON
     let projects: Vec<ApiProject> = serde_json::from_str(&text).context("Parse JSON")?;
     tracing::debug!(count = projects.len(), "[gitlab] parsed projects");
 
-    Ok(projects
+    let items: Vec<ProjectSummary> = projects
         .into_iter()
         .map(|p| {
             let namespace = p
@@ -137,49 +142,67 @@ pub async fn search_projects(cfg: &GitLabConfig, keyword: &str) -> Result<Vec<Pr
                 last_activity_at: p.last_activity_at,
             }
         })
-        .collect())
+        .collect();
+
+    // 若接口未返回 X-Total，用「本页满页则可能还有下一页」的启发式
+    let total_resolved = if total > 0 {
+        total
+    } else if items.len() as u32 >= per_page {
+        ((page - 1) * per_page) as u64 + items.len() as u64 + 1
+    } else {
+        ((page - 1) * per_page) as u64 + items.len() as u64
+    };
+
+    Ok((items, total_resolved))
 }
 
-pub async fn list_project_members(cfg: &GitLabConfig, project: &str) -> Result<Vec<ProjectMember>> {
+/// 分页获取项目成员。返回 (成员列表, 总条数)。总条数来自响应头 X-Total。
+pub async fn list_project_members(
+    cfg: &GitLabConfig,
+    project: &str,
+    page: u32,
+    per_page: u32,
+) -> Result<(Vec<ProjectMember>, u64)> {
     let project = encode_project(project.trim());
     let http = client();
+    let url = api_url(
+        &cfg.base_url,
+        &format!("/api/v4/projects/{}/members/all", project),
+    );
 
-    let mut all: Vec<ProjectMember> = Vec::new();
-    let mut page: i64 = 1;
+    tracing::info!(project = %project, page = page, per_page = per_page, "[gitlab] GET project members");
 
-    tracing::info!(project = %project, "[gitlab] listing project members");
+    let resp = http
+        .get(&url)
+        .header("PRIVATE-TOKEN", &cfg.token)
+        .query(&[
+            ("per_page", per_page.to_string().as_str()),
+            ("page", page.to_string().as_str()),
+        ])
+        .send()
+        .await
+        .context("GitLab request failed")?;
 
-    loop {
-        let url = api_url(
-            &cfg.base_url,
-            &format!("/api/v4/projects/{}/members/all", project),
-        );
+    let status = resp.status();
+    let total: u64 = resp
+        .headers()
+        .get("x-total")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
-        tracing::debug!(url = %url, page = page, "[gitlab] GET members page");
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        tracing::error!(status = %status, body = %text, "[gitlab] API error");
+        return Err(anyhow!("GitLab API error {status}: {text}"));
+    }
 
-        let resp = http
-            .get(&url)
-            .header("PRIVATE-TOKEN", &cfg.token)
-            .query(&[("per_page", "100"), ("page", &page.to_string())])
-            .send()
-            .await
-            .context("GitLab request failed")?;
+    let members: Vec<ApiMember> = resp.json().await.context("Parse JSON")?;
+    tracing::debug!(page = page, count = members.len(), total = total, "[gitlab] parsed members");
 
-        let status = resp.status();
-        tracing::debug!(status = %status, page = page, "[gitlab] response received");
-
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            tracing::error!(status = %status, body = %text, "[gitlab] API error");
-            return Err(anyhow!("GitLab API error {status}: {text}"));
-        }
-
-        let members: Vec<ApiMember> = resp.json().await.context("Parse JSON")?;
-
-        let count = members.len();
-        tracing::debug!(page = page, count = count, "[gitlab] parsed members");
-
-        all.extend(members.into_iter().map(|m| ProjectMember {
+    let items: Vec<ProjectMember> = members
+        .into_iter()
+        .map(|m| ProjectMember {
             id: m.id,
             username: m.username,
             name: m.name,
@@ -187,19 +210,18 @@ pub async fn list_project_members(cfg: &GitLabConfig, project: &str) -> Result<V
             access_level: m.access_level,
             created_at: m.created_at,
             expires_at: m.expires_at,
-        }));
+        })
+        .collect();
 
-        if count < 100 {
-            break;
-        }
-        page += 1;
-    }
+    let total_resolved = if total > 0 {
+        total
+    } else if items.len() as u32 >= per_page {
+        ((page - 1) * per_page) as u64 + items.len() as u64 + 1
+    } else {
+        ((page - 1) * per_page) as u64 + items.len() as u64
+    };
 
-    tracing::info!(
-        total_count = all.len(),
-        "[gitlab] list_project_members completed"
-    );
-    Ok(all)
+    Ok((items, total_resolved))
 }
 
 pub async fn add_member(
