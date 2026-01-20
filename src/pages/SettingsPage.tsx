@@ -53,7 +53,7 @@ export function SettingsPage() {
                 </div>
                 <div className="grid gap-2">
                   <Label>Private Token</Label>
-                  <Input value={token} onChange={(e) => setToken(e.target.value)} placeholder="glpat-..." disabled={loading} />
+                  <Input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="glpat-..." disabled={loading} />
                   <p className="text-xs text-muted-foreground">建议使用 Project/Group Access Token 或 Personal Access Token（至少具备 API 权限）。</p>
                 </div>
                 <div className="flex items-center gap-3">

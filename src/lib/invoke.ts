@@ -176,6 +176,21 @@ export async function batchAddMembersToProject(args: {
   return loggedInvoke<BatchResult>("batch_add_members_to_project", args);
 }
 
+export async function addMemberToProject(args: {
+  project: string;
+  userId: number;
+  accessLevel: number;
+  expiresAt?: string | null;
+}) {
+  // 注意：Tauri command 参数名会按 camelCase 进行匹配（例如 user_ids -> userIds）
+  return loggedInvoke<void>("add_member_to_project", {
+    project: args.project,
+    userId: args.userId,
+    accessLevel: args.accessLevel,
+    expiresAt: args.expiresAt,
+  });
+}
+
 export async function batchRemoveMembersFromProject(args: {
   project: string;
   userIds: number[];

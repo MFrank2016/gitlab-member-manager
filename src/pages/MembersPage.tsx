@@ -4,6 +4,7 @@ import { ProjectCombobox } from "@/components/ProjectCombobox";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
@@ -11,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
 import {
-  batchAddMembersToProject,
+  addMemberToProject,
   batchRemoveMembersFromProject,
   listGroupMembers,
   listLocalGroups,
@@ -21,6 +22,81 @@ import {
 import type { LocalGroup, ProjectMember, ProjectSummary } from "@/lib/types";
 import { ACCESS_LEVELS, accessLevelLabel } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
+
+type AddProgressStatus = "idle" | "running" | "done";
+
+type AddProgressFailure = {
+  userId: number;
+  username?: string;
+  name?: string;
+  reason: string;
+};
+
+type AddProgressState = {
+  open: boolean;
+  status: AddProgressStatus;
+  total: number;
+  processed: number;
+  success: number;
+  failed: AddProgressFailure[];
+  currentUser?: string;
+};
+
+function normalizeErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error && typeof (error as { message?: unknown }).message === "string") {
+    return (error as { message: string }).message;
+  }
+  return String(error);
+}
+
+function pickFirstString(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const first = value.find((v) => typeof v === "string");
+    if (typeof first === "string") return first;
+  }
+  if (value && typeof value === "object") {
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      const picked = pickFirstString(v);
+      if (picked) return picked;
+    }
+  }
+  return undefined;
+}
+
+function analyzeAddMemberError(message: string): { treatedAsSuccess: boolean; reason: string } {
+  const lower = message.toLowerCase();
+  if (lower.includes("member already exists") || lower.includes("already a member")) {
+    return { treatedAsSuccess: true, reason: "" };
+  }
+
+  const jsonStrCandidate = (() => {
+    const start = message.indexOf("{");
+    const end = message.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      return message.slice(start, end + 1);
+    }
+    return undefined;
+  })();
+
+  const parsed = (() => {
+    if (!jsonStrCandidate) return undefined;
+    try {
+      return JSON.parse(jsonStrCandidate);
+    } catch {
+      return undefined;
+    }
+  })();
+
+  if (parsed && typeof parsed === "object" && "message" in parsed) {
+    const msg = (parsed as { message?: unknown }).message;
+    const reason = pickFirstString(msg) ?? message;
+    return { treatedAsSuccess: false, reason };
+  }
+
+  return { treatedAsSuccess: false, reason: message };
+}
 
 export function MembersPage() {
   const [selectedProject, setSelectedProject] = React.useState<ProjectSummary | null>(null);
@@ -38,6 +114,14 @@ export function MembersPage() {
   const [accessLevel, setAccessLevel] = React.useState<string>("30");
   const [expiresAt, setExpiresAt] = React.useState<string>("");
   const [actionLoading, setActionLoading] = React.useState(false);
+  const [addProgress, setAddProgress] = React.useState<AddProgressState>({
+    open: false,
+    status: "idle",
+    total: 0,
+    processed: 0,
+    success: 0,
+    failed: [],
+  });
 
   async function refreshGroups() {
     try {
@@ -132,17 +216,74 @@ export function MembersPage() {
         toast.error("该分组没有成员");
         return;
       }
-      const res = await batchAddMembersToProject({
-        project: String(selectedProject.id),
-        userIds,
-        accessLevel: Number(accessLevel),
-        expiresAt: expiresAt.trim() ? expiresAt.trim() : null,
+      const expires = expiresAt.trim() ? expiresAt.trim() : null;
+
+      let processed = 0;
+      let successCount = 0;
+      const failedRows: AddProgressFailure[] = [];
+
+      setAddProgress({
+        open: true,
+        status: "running",
+        total: groupMembers.length,
+        processed: 0,
+        success: 0,
+        failed: [],
+        currentUser: "",
       });
-      toast.success(`批量添加完成：成功 ${res.successUserIds.length}，失败 ${res.failed.length}`);
-      if (res.failed.length > 0) {
-        const msg = res.failed.slice(0, 3).map((f) => `用户 ${f.userId}: ${f.message}`).join("；");
-        toast.error(`部分失败：${msg}${res.failed.length > 3 ? " …" : ""}`);
+
+      for (const m of groupMembers) {
+        setAddProgress((prev) => ({
+          ...prev,
+          currentUser: m.username || m.name || String(m.userId),
+        }));
+
+        const result = await addMemberToProject({
+          project: String(selectedProject.id),
+          userId: m.userId,
+          accessLevel: Number(accessLevel),
+          expiresAt: expires,
+        }).then(
+          () => ({ ok: true as const }),
+          (err) => ({ ok: false as const, message: normalizeErrorMessage(err) })
+        );
+
+        if (!result.ok) {
+          const parsed = analyzeAddMemberError(result.message);
+          if (parsed.treatedAsSuccess) {
+            successCount += 1;
+          } else {
+            failedRows.push({
+              userId: m.userId,
+              username: m.username,
+              name: m.name,
+              reason: parsed.reason,
+            });
+          }
+        } else {
+          successCount += 1;
+        }
+
+        processed += 1;
+        setAddProgress((prev) => ({
+          ...prev,
+          processed,
+          success: successCount,
+          failed: failedRows.slice(),
+          currentUser: undefined,
+        }));
       }
+
+      setAddProgress((prev) => ({
+        ...prev,
+        status: "done",
+        processed,
+        success: successCount,
+        failed: failedRows.slice(),
+        currentUser: undefined,
+      }));
+
+      toast.success(`批量添加完成：成功 ${successCount}，失败 ${failedRows.length}`);
       await loadMembers(selectedProject, memberPage);
     } catch (e) {
       toast.error(`批量添加失败：${String(e)}`);
@@ -207,13 +348,13 @@ export function MembersPage() {
   return (
     <div className="space-y-6">
       <Panel>
-        <PanelHeader className="flex-col items-start gap-3">
+        <PanelHeader className="flex-col items-stretch gap-3">
       <div className="space-y-1">
         {/* <h2 className="text-xl font-semibold">项目成员管理</h2> */}
         <p className="text-sm text-muted-foreground">选择项目后查看成员，并支持保存到本地、按分组批量拉人/移除。</p>
       </div>
 
-      <div className="grid gap-4">
+      <div className="grid w-full gap-4">
         <div className="grid gap-2 w-full">
           <Label>选择项目</Label>
           <ProjectCombobox
@@ -397,6 +538,88 @@ export function MembersPage() {
       </div>
         </PanelBody>
       </Panel>
+
+      <Dialog
+        open={addProgress.open}
+        onOpenChange={(open) =>
+          setAddProgress((prev) => {
+            if (!open && prev.status === "running") return prev;
+            return { ...prev, open };
+          })
+        }
+      >
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>按分组批量拉人进度</DialogTitle>
+            <DialogDescription>
+              {addProgress.status === "running" ? "处理中，出现错误不会中断。" : "已完成处理。"}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-2 rounded-lg border p-3">
+              <div className="flex flex-wrap justify-between text-sm">
+                <span>
+                  进度：{addProgress.processed} / {addProgress.total}
+                  {addProgress.total > 0 ? `（${Math.round((addProgress.processed / addProgress.total) * 100)}%）` : ""}
+                </span>
+                <span>
+                  成功 {addProgress.success}，失败 {addProgress.failed.length}
+                </span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded bg-muted">
+                <div
+                  className="h-2 rounded bg-primary transition-all"
+                  style={{
+                    width:
+                      addProgress.total > 0
+                        ? `${Math.min(100, Math.round((addProgress.processed / addProgress.total) * 100))}%`
+                        : "0%",
+                  }}
+                />
+              </div>
+              {addProgress.status === "running" && (
+                <div className="text-sm text-muted-foreground">
+                  当前用户：{addProgress.currentUser || "-"}
+                </div>
+              )}
+            </div>
+
+            {addProgress.status === "done" && (
+              <div className="space-y-2">
+                <div className="text-sm font-medium">失败明细</div>
+                {addProgress.failed.length === 0 ? (
+                  <div className="rounded-md border border-muted p-3 text-sm text-muted-foreground">全部成功</div>
+                ) : (
+                  <div className="max-h-80 overflow-auto rounded-md border">
+                    <Table>
+                      <TableHeader className="sticky top-0 bg-card">
+                        <TableRow>
+                          <TableHead className="w-28">用户ID</TableHead>
+                          <TableHead>用户名</TableHead>
+                          <TableHead>昵称</TableHead>
+                          <TableHead>失败原因</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {addProgress.failed.map((f) => (
+                          <TableRow key={f.userId}>
+                            <TableCell className="font-mono">{f.userId}</TableCell>
+                            <TableCell className="font-mono">{f.username || "-"}</TableCell>
+                            <TableCell>{f.name || "-"}</TableCell>
+                            <TableCell className="text-sm">{f.reason}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
     </div>
   );
 }

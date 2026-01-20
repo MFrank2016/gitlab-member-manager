@@ -353,6 +353,31 @@ async fn batch_add_members_to_project(
 }
 
 #[tauri::command]
+async fn add_member_to_project(
+  state: State<'_, AppState>,
+  project: String,
+  user_id: u64,
+  access_level: i64,
+  expires_at: Option<String>,
+) -> Result<(), String> {
+  tracing::info!(
+    project = %project,
+    user_id = user_id,
+    access_level = access_level,
+    expires_at = ?expires_at,
+    "add_member_to_project called"
+  );
+
+  let cfg = require_cfg(&state)?;
+  gitlab::add_member(&cfg, &project, user_id, access_level, expires_at)
+    .await
+    .map_err(|e| e.to_string())?;
+
+  tracing::info!(user_id = user_id, "add_member_to_project success");
+  Ok(())
+}
+
+#[tauri::command]
 async fn batch_remove_members_from_project(
   state: State<'_, AppState>,
   project: String,
@@ -450,6 +475,7 @@ fn main() {
       list_group_members,
       batch_add_members_to_project,
       batch_remove_members_from_project,
+      add_member_to_project,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

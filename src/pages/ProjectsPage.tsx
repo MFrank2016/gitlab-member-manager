@@ -10,11 +10,7 @@ import { formatDateTime } from "@/lib/utils";
 
 const PAGE_SIZE = 20;
 
-type Props = {
-  onPickProject: (p: ProjectSummary) => void;
-};
-
-export function ProjectsPage({ onPickProject }: Props) {
+export function ProjectsPage() {
   const [keyword, setKeyword] = React.useState("");
   const [items, setItems] = React.useState<ProjectSummary[]>([]);
   const [total, setTotal] = React.useState(0);
@@ -57,7 +53,7 @@ export function ProjectsPage({ onPickProject }: Props) {
         <PanelHeader className="flex-col items-start gap-1">
       <div className="flex flex-col gap-2">
         {/* <h2 className="text-xl font-semibold">项目搜索</h2> */}
-        <p className="text-sm text-muted-foreground">输入关键字搜索项目，点击行可选择项目。</p>
+        <p className="text-sm text-muted-foreground">输入关键字搜索项目。</p>
       </div>
         </PanelHeader>
         <PanelBody>
@@ -109,8 +105,7 @@ export function ProjectsPage({ onPickProject }: Props) {
           {items.map((p) => (
             <TableRow
               key={p.id}
-              className="cursor-pointer transition-colors hover:bg-muted/50"
-              onClick={() => onPickProject(p)}
+              className="transition-colors hover:bg-muted/50"
             >
               <TableCell className="font-mono">{p.id}</TableCell>
               <TableCell>{p.name}</TableCell>

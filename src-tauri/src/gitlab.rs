@@ -272,13 +272,19 @@ pub async fn add_member(
         return Ok(());
     }
 
+    // GitLab 在成员已存在时返回 409，需视作成功
+    if status == StatusCode::CONFLICT {
+        tracing::info!(
+            user_id = user_id,
+            "[gitlab] member already exists, treating as success"
+        );
+        return Ok(());
+    }
+
     let text = resp.text().await.unwrap_or_default();
     tracing::warn!(status = %status, body = %text, "[gitlab] add_member failed");
 
-    match status {
-        StatusCode::CONFLICT => Err(anyhow!("already a member")),
-        _ => Err(anyhow!("GitLab API error {status}: {text}")),
-    }
+    Err(anyhow!("GitLab API error {status}: {text}"))
 }
 
 pub async fn remove_member(cfg: &GitLabConfig, project: &str, user_id: u64) -> Result<()> {

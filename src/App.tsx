@@ -8,7 +8,6 @@ import { ProjectsPage } from "@/pages/ProjectsPage";
 import { MembersPage } from "@/pages/MembersPage";
 import { LocalMembersPage } from "@/pages/LocalMembersPage";
 import { GroupsPage } from "@/pages/GroupsPage";
-import type { ProjectSummary } from "@/lib/types";
 
 const pageTitles: Record<string, string> = {
   settings: "配置",
@@ -19,8 +18,6 @@ const pageTitles: Record<string, string> = {
 };
 
 export default function App() {
-  const [pickedProject, setPickedProject] =
-    React.useState<ProjectSummary | null>(null);
   const [activeTab, setActiveTab] = React.useState("settings");
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
 
@@ -45,37 +42,12 @@ export default function App() {
               </span>
             </div>
           </CommandBarSection>
-
-          <CommandBarSection className="flex-1 justify-center">
-            {pickedProject ? (
-              <div className="flex items-center gap-2 rounded-full border border-border/60 bg-card px-3 py-1.5 text-xs">
-                <span className="text-muted-foreground">当前项目</span>
-                <span className="font-medium">
-                  {pickedProject.pathWithNamespace}
-                </span>
-                <span className="rounded-full bg-foreground px-2 py-0.5 text-[10px] text-background">
-                  #{pickedProject.id}
-                </span>
-              </div>
-            ) : (
-              <div className="text-xs text-muted-foreground">未选择项目</div>
-            )}
-          </CommandBarSection>
-
-          <CommandBarSection className="justify-end">
-            <div className="hidden items-center gap-2 rounded-full border border-border/60 bg-card px-3 py-1 text-xs text-muted-foreground md:flex">
-              <span className="h-2 w-2 rounded-full bg-[color:var(--brand)]" />
-              工作区已就绪
-            </div>
-          </CommandBarSection>
         </CommandBar>
 
         <div className="flex-1 overflow-auto px-8 py-6">
           <div className="animate-fade-up">
             {activeTab === "settings" && <SettingsPage />}
-            {activeTab === "projects" && (
-              <ProjectsPage onPickProject={setPickedProject} />
-            )}
+            {activeTab === "projects" && <ProjectsPage />}
             {activeTab === "members" && <MembersPage />}
             {activeTab === "local" && <LocalMembersPage />}
             {activeTab === "groups" && <GroupsPage />}
