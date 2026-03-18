@@ -39,6 +39,19 @@ export type LocalGroup = {
   membersCount: number;
 };
 
+export type ManagedProject = {
+  id: number;
+  gitlabProjectId: number;
+  name: string;
+  pathWithNamespace: string;
+  repoPath: string;
+  defaultBranch: string;
+  defaultRemote: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type BatchItemError = {
   userId: number;
   message: string;

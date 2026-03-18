@@ -3,6 +3,7 @@ import type {
   BatchResult,
   LocalGroup,
   LocalMember,
+  ManagedProject,
   ProjectMember,
   ProjectSummary,
 } from "@/lib/types";
@@ -109,6 +110,59 @@ export async function listProjectMembers(
     per_page: perPage,
   });
   return { members, total };
+}
+
+export async function createManagedProject(args: {
+  gitlabProjectId: number;
+  name: string;
+  pathWithNamespace: string;
+  repoPath: string;
+  defaultBranch?: string | null;
+  defaultRemote?: string | null;
+  enabled?: boolean;
+}) {
+  const normalizedDefaultBranch = args.defaultBranch?.trim();
+  const normalizedDefaultRemote = args.defaultRemote?.trim();
+
+  return loggedInvoke<ManagedProject>("create_managed_project", {
+    gitlab_project_id: args.gitlabProjectId,
+    name: args.name,
+    path_with_namespace: args.pathWithNamespace,
+    repo_path: args.repoPath,
+    default_branch: normalizedDefaultBranch ? normalizedDefaultBranch : null,
+    default_remote: normalizedDefaultRemote ? normalizedDefaultRemote : null,
+    enabled: args.enabled ?? true,
+  });
+}
+
+export async function listManagedProjects() {
+  return loggedInvoke<ManagedProject[]>("list_managed_projects");
+}
+
+export async function updateManagedProject(args: {
+  id: number;
+  gitlabProjectId: number;
+  name: string;
+  pathWithNamespace: string;
+  repoPath: string;
+  defaultBranch: string;
+  defaultRemote: string;
+  enabled: boolean;
+}) {
+  return loggedInvoke<void>("update_managed_project", {
+    id: args.id,
+    gitlab_project_id: args.gitlabProjectId,
+    name: args.name,
+    path_with_namespace: args.pathWithNamespace,
+    repo_path: args.repoPath,
+    default_branch: args.defaultBranch,
+    default_remote: args.defaultRemote,
+    enabled: args.enabled,
+  });
+}
+
+export async function deleteManagedProject(id: number) {
+  return loggedInvoke<void>("delete_managed_project", { id });
 }
 
 export async function upsertLocalMembers(members: Array<{

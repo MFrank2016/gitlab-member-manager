@@ -72,3 +72,28 @@ pub struct BatchResult {
   pub success_user_ids: Vec<u64>,
   pub failed: Vec<BatchItemError>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedProject {
+  pub id: i64,
+  pub gitlab_project_id: u64,
+  pub name: String,
+  pub path_with_namespace: String,
+  pub repo_path: String,
+  pub default_branch: String,
+  pub default_remote: String,
+  pub enabled: bool,
+  pub created_at: String,
+  pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectGroup {
+  pub id: i64,
+  pub name: String,
+  pub created_at: String,
+  pub updated_at: String,
+  pub projects_count: i64,
+}

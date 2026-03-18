@@ -6,8 +6,8 @@ use tauri::Manager;
 
 use crate::gitlab::GitLabConfig;
 use crate::models::{
-  BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert, ProjectMember,
-  ProjectSummary,
+  BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
+  ProjectMember, ProjectSummary,
 };
 use sqlx::SqlitePool;
 use std::sync::Mutex;
@@ -75,6 +75,17 @@ fn require_cfg(state: &AppState) -> Result<GitLabConfig, String> {
     .map_err(|_| "Mutex poisoned".to_string())?
     .clone()
     .ok_or_else(|| "GitLab config not set. Please go to 设置页保存 Base URL 和 Token".to_string())
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+  value.and_then(|raw| {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+      None
+    } else {
+      Some(trimmed.to_string())
+    }
+  })
 }
 
 #[tauri::command]
@@ -161,6 +172,103 @@ async fn list_project_members(
     Ok((members, total)) => tracing::info!(count = members.len(), total = total, "list_project_members success"),
     Err(e) => tracing::error!(error = %e, "list_project_members failed"),
   }
+  result
+}
+
+#[tauri::command]
+async fn create_managed_project(
+  state: State<'_, AppState>,
+  gitlab_project_id: u64,
+  name: String,
+  path_with_namespace: String,
+  repo_path: String,
+  default_branch: Option<String>,
+  default_remote: Option<String>,
+  enabled: Option<bool>,
+) -> Result<ManagedProject, String> {
+  let normalized_default_branch = normalize_optional_text(default_branch);
+  let normalized_default_remote = normalize_optional_text(default_remote);
+
+  let result = db::create_managed_project(
+    &state.db,
+    gitlab_project_id,
+    name.trim().to_string(),
+    path_with_namespace.trim().to_string(),
+    repo_path.trim().to_string(),
+    normalized_default_branch,
+    normalized_default_remote,
+    enabled.unwrap_or(true),
+  )
+  .await
+  .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(project) => tracing::info!(id = project.id, gitlab_project_id = project.gitlab_project_id, "create_managed_project success"),
+    Err(e) => tracing::error!(error = %e, "create_managed_project failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn list_managed_projects(state: State<'_, AppState>) -> Result<Vec<ManagedProject>, String> {
+  let result = db::list_managed_projects(&state.db)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(items) => tracing::info!(count = items.len(), "list_managed_projects success"),
+    Err(e) => tracing::error!(error = %e, "list_managed_projects failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn update_managed_project(
+  state: State<'_, AppState>,
+  id: i64,
+  gitlab_project_id: u64,
+  name: String,
+  path_with_namespace: String,
+  repo_path: String,
+  default_branch: String,
+  default_remote: String,
+  enabled: bool,
+) -> Result<(), String> {
+  let result = db::update_managed_project(
+    &state.db,
+    id,
+    gitlab_project_id,
+    name.trim().to_string(),
+    path_with_namespace.trim().to_string(),
+    repo_path.trim().to_string(),
+    default_branch.trim().to_string(),
+    default_remote.trim().to_string(),
+    enabled,
+  )
+  .await
+  .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(_) => tracing::info!(id = id, "update_managed_project success"),
+    Err(e) => tracing::error!(id = id, error = %e, "update_managed_project failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn delete_managed_project(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+  let result = db::delete_managed_project(&state.db, id)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(_) => tracing::info!(id = id, "delete_managed_project success"),
+    Err(e) => tracing::error!(id = id, error = %e, "delete_managed_project failed"),
+  }
+
   result
 }
 
@@ -463,6 +571,10 @@ fn main() {
       set_gitlab_config,
       search_projects,
       list_project_members,
+      create_managed_project,
+      list_managed_projects,
+      update_managed_project,
+      delete_managed_project,
       upsert_local_members,
       list_local_members,
       delete_local_members,

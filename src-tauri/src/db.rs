@@ -1,5 +1,5 @@
-use crate::models::{LocalGroup, LocalMember, LocalMemberUpsert};
-use anyhow::{Context, Result};
+use crate::models::{LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject, ProjectGroup};
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use sqlx::{
   migrate::Migrator,
@@ -43,6 +43,199 @@ pub async fn init_db(app: &tauri::AppHandle) -> Result<SqlitePool> {
 
   tracing::info!("[db] database initialized successfully");
   Ok(pool)
+}
+
+fn u64_to_i64_checked(value: u64, field_name: &str) -> Result<i64> {
+  i64::try_from(value).map_err(|_| anyhow!("{field_name} out of range for SQLite INTEGER: {value}"))
+}
+
+fn i64_to_u64_checked(value: i64, field_name: &str) -> Result<u64> {
+  u64::try_from(value).map_err(|_| anyhow!("{field_name} out of range for u64: {value}"))
+}
+
+pub async fn create_managed_project(
+  pool: &SqlitePool,
+  gitlab_project_id: u64,
+  name: String,
+  path_with_namespace: String,
+  repo_path: String,
+  default_branch: Option<String>,
+  default_remote: Option<String>,
+  enabled: bool,
+) -> Result<ManagedProject> {
+  let now = Utc::now().to_rfc3339();
+  let default_branch = default_branch.unwrap_or_else(|| "main".to_string());
+  let default_remote = default_remote.unwrap_or_else(|| "origin".to_string());
+  let enabled_value = if enabled { 1_i64 } else { 0_i64 };
+  let gitlab_project_id_i64 = u64_to_i64_checked(gitlab_project_id, "gitlab_project_id")?;
+
+  let res = sqlx::query(
+    r#"INSERT INTO managed_projects (
+         gitlab_project_id, name, path_with_namespace, repo_path,
+         default_branch, default_remote, enabled, created_at, updated_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
+  )
+  .bind(gitlab_project_id_i64)
+  .bind(&name)
+  .bind(&path_with_namespace)
+  .bind(&repo_path)
+  .bind(&default_branch)
+  .bind(&default_remote)
+  .bind(enabled_value)
+  .bind(&now)
+  .bind(&now)
+  .execute(pool)
+  .await?;
+
+  Ok(ManagedProject {
+    id: res.last_insert_rowid(),
+    gitlab_project_id,
+    name,
+    path_with_namespace,
+    repo_path,
+    default_branch,
+    default_remote,
+    enabled,
+    created_at: now.clone(),
+    updated_at: now,
+  })
+}
+
+pub async fn list_managed_projects(pool: &SqlitePool) -> Result<Vec<ManagedProject>> {
+  let rows = sqlx::query_as::<_, (i64, i64, String, String, String, String, String, i64, String, String)>(
+    r#"SELECT
+         id, gitlab_project_id, name, path_with_namespace, repo_path,
+         default_branch, default_remote, enabled, created_at, updated_at
+       FROM managed_projects
+       ORDER BY id DESC"#,
+  )
+  .fetch_all(pool)
+  .await?;
+
+  let mut items = Vec::with_capacity(rows.len());
+  for r in rows {
+    items.push(ManagedProject {
+      id: r.0,
+      gitlab_project_id: i64_to_u64_checked(r.1, "managed_projects.gitlab_project_id")?,
+      name: r.2,
+      path_with_namespace: r.3,
+      repo_path: r.4,
+      default_branch: r.5,
+      default_remote: r.6,
+      enabled: r.7 != 0,
+      created_at: r.8,
+      updated_at: r.9,
+    });
+  }
+
+  Ok(items)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_managed_project(
+  pool: &SqlitePool,
+  id: i64,
+  gitlab_project_id: u64,
+  name: String,
+  path_with_namespace: String,
+  repo_path: String,
+  default_branch: String,
+  default_remote: String,
+  enabled: bool,
+) -> Result<()> {
+  let now = Utc::now().to_rfc3339();
+  let enabled_value = if enabled { 1_i64 } else { 0_i64 };
+  let gitlab_project_id_i64 = u64_to_i64_checked(gitlab_project_id, "gitlab_project_id")?;
+
+  let res = sqlx::query(
+    r#"UPDATE managed_projects
+       SET gitlab_project_id = ?1,
+           name = ?2,
+           path_with_namespace = ?3,
+           repo_path = ?4,
+           default_branch = ?5,
+           default_remote = ?6,
+           enabled = ?7,
+           updated_at = ?8
+       WHERE id = ?9"#,
+  )
+  .bind(gitlab_project_id_i64)
+  .bind(&name)
+  .bind(&path_with_namespace)
+  .bind(&repo_path)
+  .bind(&default_branch)
+  .bind(&default_remote)
+  .bind(enabled_value)
+  .bind(&now)
+  .bind(id)
+  .execute(pool)
+  .await?;
+
+  if res.rows_affected() == 0 {
+    return Err(anyhow!("managed project not found: {id}"));
+  }
+
+  Ok(())
+}
+
+pub async fn delete_managed_project(pool: &SqlitePool, id: i64) -> Result<()> {
+  let res = sqlx::query(r#"DELETE FROM managed_projects WHERE id = ?1"#)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+  if res.rows_affected() == 0 {
+    return Err(anyhow!("managed project not found: {id}"));
+  }
+
+  Ok(())
+}
+
+pub async fn create_project_group(pool: &SqlitePool, name: String) -> Result<ProjectGroup> {
+  let now = Utc::now().to_rfc3339();
+  let res = sqlx::query(
+    r#"INSERT INTO project_groups (name, created_at, updated_at)
+       VALUES (?1, ?2, ?3)"#,
+  )
+  .bind(&name)
+  .bind(&now)
+  .bind(&now)
+  .execute(pool)
+  .await?;
+
+  Ok(ProjectGroup {
+    id: res.last_insert_rowid(),
+    name,
+    created_at: now.clone(),
+    updated_at: now,
+    projects_count: 0,
+  })
+}
+
+pub async fn list_project_groups(pool: &SqlitePool) -> Result<Vec<ProjectGroup>> {
+  let rows = sqlx::query_as::<_, (i64, String, String, String, i64)>(
+    r#"SELECT
+         g.id, g.name, g.created_at, g.updated_at, COUNT(i.managed_project_id) as projects_count
+       FROM project_groups g
+       LEFT JOIN project_group_items i ON i.project_group_id = g.id
+       GROUP BY g.id
+       ORDER BY g.id DESC"#,
+  )
+  .fetch_all(pool)
+  .await?;
+
+  Ok(
+    rows
+      .into_iter()
+      .map(|r| ProjectGroup {
+        id: r.0,
+        name: r.1,
+        created_at: r.2,
+        updated_at: r.3,
+        projects_count: r.4,
+      })
+      .collect(),
+  )
 }
 
 pub async fn upsert_local_members(pool: &SqlitePool, members: Vec<LocalMemberUpsert>) -> Result<()> {
@@ -351,4 +544,248 @@ pub async fn set_gitlab_config(pool: &SqlitePool, base_url: &str, token: &str) -
   .execute(pool)
   .await?;
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use sqlx::sqlite::SqlitePoolOptions;
+
+  static TEST_MIGRATOR: Migrator = sqlx::migrate!();
+
+  async fn setup_test_pool() -> SqlitePool {
+    let pool = SqlitePoolOptions::new()
+      .max_connections(1)
+      .connect("sqlite::memory:")
+      .await
+      .expect("connect in-memory sqlite");
+    TEST_MIGRATOR.run(&pool).await.expect("run migrations");
+    pool
+  }
+
+  #[tokio::test]
+  async fn managed_projects_create_and_list() {
+    let pool = setup_test_pool().await;
+
+    let empty_projects = list_managed_projects(&pool)
+      .await
+      .expect("list empty managed projects");
+    assert!(empty_projects.is_empty());
+
+    let empty_groups = list_project_groups(&pool)
+      .await
+      .expect("list empty project groups");
+    assert!(empty_groups.is_empty());
+
+    let created = create_managed_project(
+      &pool,
+      10001,
+      "project-alpha".to_string(),
+      "group/project-alpha".to_string(),
+      "D:/repos/project-alpha".to_string(),
+      None,
+      None,
+      true,
+    )
+    .await
+    .expect("create managed project");
+
+    assert_eq!(created.gitlab_project_id, 10001);
+    assert_eq!(created.default_branch, "main");
+    assert_eq!(created.default_remote, "origin");
+    assert!(created.enabled);
+
+    let items = list_managed_projects(&pool)
+      .await
+      .expect("list managed projects");
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].gitlab_project_id, 10001);
+    assert_eq!(items[0].path_with_namespace, "group/project-alpha");
+  }
+
+  #[tokio::test]
+  async fn project_groups_create_and_list() {
+    let pool = setup_test_pool().await;
+
+    let empty_groups = list_project_groups(&pool)
+      .await
+      .expect("list empty project groups");
+    assert!(empty_groups.is_empty());
+
+    let group = create_project_group(&pool, "delivery-train".to_string())
+      .await
+      .expect("create project group");
+
+    assert_eq!(group.name, "delivery-train");
+    assert_eq!(group.projects_count, 0);
+
+    let groups = list_project_groups(&pool)
+      .await
+      .expect("list project groups");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].name, "delivery-train");
+    assert_eq!(groups[0].projects_count, 0);
+
+    let empty_projects = list_managed_projects(&pool)
+      .await
+      .expect("list empty managed projects");
+    assert!(empty_projects.is_empty());
+  }
+
+  #[tokio::test]
+  async fn project_groups_and_managed_projects_are_independent_create_list_flows() {
+    let pool = setup_test_pool().await;
+
+    let _group = create_project_group(&pool, "ops".to_string())
+      .await
+      .expect("create project group");
+
+    let _project = create_managed_project(
+      &pool,
+      30001,
+      "project-three".to_string(),
+      "team/project-three".to_string(),
+      "D:/repos/project-three".to_string(),
+      None,
+      None,
+      true,
+    )
+    .await
+    .expect("create managed project");
+
+    let groups = list_project_groups(&pool)
+      .await
+      .expect("list project groups");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].projects_count, 0);
+
+    let projects = list_managed_projects(&pool)
+      .await
+      .expect("list managed projects");
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].gitlab_project_id, 30001);
+  }
+
+  #[tokio::test]
+  async fn managed_project_rejects_blank_name_by_constraint() {
+    let pool = setup_test_pool().await;
+
+    let result = create_managed_project(
+      &pool,
+      40001,
+      "   ".to_string(),
+      "team/project-four".to_string(),
+      "D:/repos/project-four".to_string(),
+      None,
+      None,
+      true,
+    )
+    .await;
+
+    assert!(result.is_err());
+  }
+
+  #[tokio::test]
+  async fn managed_project_rejects_duplicate_gitlab_project_id() {
+    let pool = setup_test_pool().await;
+
+    let first = create_managed_project(
+      &pool,
+      50001,
+      "project-first".to_string(),
+      "team/project-first".to_string(),
+      "D:/repos/project-first".to_string(),
+      None,
+      None,
+      true,
+    )
+    .await;
+    assert!(first.is_ok());
+
+    let second = create_managed_project(
+      &pool,
+      50001,
+      "project-second".to_string(),
+      "team/project-second".to_string(),
+      "D:/repos/project-second".to_string(),
+      None,
+      None,
+      true,
+    )
+    .await;
+
+    assert!(second.is_err());
+  }
+
+  #[tokio::test]
+  async fn managed_project_update_changes_fields() {
+    let pool = setup_test_pool().await;
+
+    let created = create_managed_project(
+      &pool,
+      60001,
+      "project-update-before".to_string(),
+      "team/project-update-before".to_string(),
+      "D:/repos/project-update-before".to_string(),
+      Some("main".to_string()),
+      Some("origin".to_string()),
+      true,
+    )
+    .await
+    .expect("create managed project");
+
+    update_managed_project(
+      &pool,
+      created.id,
+      60002,
+      "project-update-after".to_string(),
+      "team/project-update-after".to_string(),
+      "D:/repos/project-update-after".to_string(),
+      "release".to_string(),
+      "upstream".to_string(),
+      false,
+    )
+    .await
+    .expect("update managed project");
+
+    let items = list_managed_projects(&pool)
+      .await
+      .expect("list managed projects");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].gitlab_project_id, 60002);
+    assert_eq!(items[0].name, "project-update-after");
+    assert_eq!(items[0].path_with_namespace, "team/project-update-after");
+    assert_eq!(items[0].repo_path, "D:/repos/project-update-after");
+    assert_eq!(items[0].default_branch, "release");
+    assert_eq!(items[0].default_remote, "upstream");
+    assert!(!items[0].enabled);
+  }
+
+  #[tokio::test]
+  async fn managed_project_delete_removes_record() {
+    let pool = setup_test_pool().await;
+
+    let created = create_managed_project(
+      &pool,
+      70001,
+      "project-delete".to_string(),
+      "team/project-delete".to_string(),
+      "D:/repos/project-delete".to_string(),
+      None,
+      None,
+      true,
+    )
+    .await
+    .expect("create managed project");
+
+    delete_managed_project(&pool, created.id)
+      .await
+      .expect("delete managed project");
+
+    let items = list_managed_projects(&pool)
+      .await
+      .expect("list managed projects");
+    assert!(items.is_empty());
+  }
 }
