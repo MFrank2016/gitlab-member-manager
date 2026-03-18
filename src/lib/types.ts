@@ -60,6 +60,17 @@ export type ProjectGroup = {
   projectsCount: number;
 };
 
+export type ProjectGroupMemberSyncRow = {
+  managedProjectId: number;
+  gitlabProjectId: number;
+  projectName: string;
+  projectPathWithNamespace: string;
+  attemptedUserIds: number[];
+  successUserIds: number[];
+  failed: BatchItemError[];
+  success: boolean;
+};
+
 export type BatchItemError = {
   userId: number;
   message: string;

@@ -5,6 +5,7 @@ import type {
   LocalMember,
   ManagedProject,
   ProjectGroup,
+  ProjectGroupMemberSyncRow,
   ProjectMember,
   ProjectSummary,
 } from "@/lib/types";
@@ -202,6 +203,24 @@ export async function listProjectGroupProjects(projectGroupId: number) {
   });
 }
 
+export async function syncProjectGroupMembers(args: {
+  projectGroupId: number;
+  sourceLocalGroupId?: number | null;
+  selectedUserIds?: number[];
+  accessLevel: number;
+  expiresAt?: string | null;
+}) {
+  const normalizedExpiresAt = args.expiresAt?.trim();
+
+  return loggedInvoke<ProjectGroupMemberSyncRow[]>("sync_project_group_members", {
+    project_group_id: args.projectGroupId,
+    source_local_group_id: args.sourceLocalGroupId ?? null,
+    selected_user_ids: args.selectedUserIds ?? [],
+    access_level: args.accessLevel,
+    expires_at: normalizedExpiresAt ? normalizedExpiresAt : null,
+  });
+}
+
 export async function upsertLocalMembers(members: Array<{
   userId: number;
   username: string;
@@ -227,7 +246,7 @@ export async function listLocalMembers(
 }
 
 export async function deleteLocalMembers(userIds: number[]) {
-  return loggedInvoke<void>("delete_local_members", { userIds });
+  return loggedInvoke<void>("delete_local_members", { user_ids: userIds });
 }
 
 export async function createLocalGroup(name: string) {
@@ -247,15 +266,21 @@ export async function deleteLocalGroup(id: number) {
 }
 
 export async function addMembersToGroup(groupId: number, userIds: number[]) {
-  return loggedInvoke<void>("add_members_to_group", { groupId, userIds });
+  return loggedInvoke<void>("add_members_to_group", {
+    group_id: groupId,
+    user_ids: userIds,
+  });
 }
 
 export async function removeMembersFromGroup(groupId: number, userIds: number[]) {
-  return loggedInvoke<void>("remove_members_from_group", { groupId, userIds });
+  return loggedInvoke<void>("remove_members_from_group", {
+    group_id: groupId,
+    user_ids: userIds,
+  });
 }
 
 export async function listGroupMembers(groupId: number) {
-  return loggedInvoke<LocalMember[]>("list_group_members", { groupId });
+  return loggedInvoke<LocalMember[]>("list_group_members", { group_id: groupId });
 }
 
 export async function batchAddMembersToProject(args: {
@@ -264,7 +289,14 @@ export async function batchAddMembersToProject(args: {
   accessLevel: number;
   expiresAt?: string | null;
 }) {
-  return loggedInvoke<BatchResult>("batch_add_members_to_project", args);
+  const normalizedExpiresAt = args.expiresAt?.trim();
+
+  return loggedInvoke<BatchResult>("batch_add_members_to_project", {
+    project: args.project,
+    user_ids: args.userIds,
+    access_level: args.accessLevel,
+    expires_at: normalizedExpiresAt ? normalizedExpiresAt : null,
+  });
 }
 
 export async function addMemberToProject(args: {
@@ -274,11 +306,12 @@ export async function addMemberToProject(args: {
   expiresAt?: string | null;
 }) {
   // 注意：Tauri command 参数名会按 camelCase 进行匹配（例如 user_ids -> userIds）
+  const normalizedExpiresAt = args.expiresAt?.trim();
   return loggedInvoke<void>("add_member_to_project", {
     project: args.project,
-    userId: args.userId,
-    accessLevel: args.accessLevel,
-    expiresAt: args.expiresAt,
+    user_id: args.userId,
+    access_level: args.accessLevel,
+    expires_at: normalizedExpiresAt ? normalizedExpiresAt : null,
   });
 }
 
@@ -286,5 +319,8 @@ export async function batchRemoveMembersFromProject(args: {
   project: string;
   userIds: number[];
 }) {
-  return loggedInvoke<BatchResult>("batch_remove_members_from_project", args);
+  return loggedInvoke<BatchResult>("batch_remove_members_from_project", {
+    project: args.project,
+    user_ids: args.userIds,
+  });
 }

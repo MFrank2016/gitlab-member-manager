@@ -7,7 +7,7 @@ use tauri::Manager;
 use crate::gitlab::GitLabConfig;
 use crate::models::{
   BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
-  ProjectGroup, ProjectMember, ProjectSummary,
+  ProjectGroup, ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
 };
 use sqlx::SqlitePool;
 use std::sync::Mutex;
@@ -136,7 +136,7 @@ async fn search_projects(
   page: Option<u32>,
   per_page: Option<u32>,
 ) -> Result<(Vec<ProjectSummary>, u64), String> {
-  let page = page.unwrap_or(1);
+  let page = page.unwrap_or(1).max(1);
   let per_page = per_page.unwrap_or(20).clamp(1, 100);
   tracing::info!(keyword = %keyword, page = page, per_page = per_page, "search_projects called");
   
@@ -159,7 +159,7 @@ async fn list_project_members(
   page: Option<u32>,
   per_page: Option<u32>,
 ) -> Result<(Vec<ProjectMember>, u64), String> {
-  let page = page.unwrap_or(1);
+  let page = page.unwrap_or(1).max(1);
   let per_page = per_page.unwrap_or(50).clamp(1, 100);
   tracing::info!(project = %project, page = page, per_page = per_page, "list_project_members called");
   
@@ -382,6 +382,78 @@ async fn list_project_group_projects(
 }
 
 #[tauri::command]
+async fn sync_project_group_members(
+  state: State<'_, AppState>,
+  project_group_id: i64,
+  source_local_group_id: Option<i64>,
+  selected_user_ids: Vec<u64>,
+  access_level: i64,
+  expires_at: Option<String>,
+) -> Result<Vec<ProjectGroupMemberSyncRow>, String> {
+  tracing::info!(
+    project_group_id = project_group_id,
+    source_local_group_id = ?source_local_group_id,
+    selected_user_ids_count = selected_user_ids.len(),
+    access_level = access_level,
+    expires_at = ?expires_at,
+    "sync_project_group_members called"
+  );
+
+  if source_local_group_id.is_none() && selected_user_ids.is_empty() {
+    return Err("at least one member source is required".to_string());
+  }
+
+  let group_exists = db::project_group_exists(&state.db, project_group_id)
+    .await
+    .map_err(|e| e.to_string())?;
+  if !group_exists {
+    return Err(format!("project group not found: {project_group_id}"));
+  }
+
+  let resolved_user_ids = db::resolve_member_sync_user_ids(
+    &state.db,
+    source_local_group_id,
+    selected_user_ids,
+  )
+  .await
+  .map_err(|e| e.to_string())?;
+  if resolved_user_ids.is_empty() {
+    return Err("no local members resolved from selected sources".to_string());
+  }
+
+  let projects = db::list_project_group_projects(&state.db, project_group_id)
+    .await
+    .map_err(|e| e.to_string())?;
+
+  let cfg = require_cfg(&state)?;
+  let normalized_expires_at = normalize_optional_text(expires_at);
+  let mut rows = Vec::with_capacity(projects.len());
+  for project in &projects {
+    let row = gitlab::sync_members_for_managed_project(
+      &cfg,
+      project,
+      &resolved_user_ids,
+      access_level,
+      normalized_expires_at.clone(),
+    )
+    .await;
+    rows.push(row);
+  }
+
+  let succeeded_projects = rows.iter().filter(|row| row.success).count();
+  tracing::info!(
+    project_group_id = project_group_id,
+    project_count = rows.len(),
+    resolved_user_count = resolved_user_ids.len(),
+    succeeded_projects = succeeded_projects,
+    failed_projects = rows.len().saturating_sub(succeeded_projects),
+    "sync_project_group_members completed"
+  );
+
+  Ok(rows)
+}
+
+#[tauri::command]
 async fn upsert_local_members(state: State<'_, AppState>, members: Vec<LocalMemberUpsert>) -> Result<(), String> {
   tracing::info!(count = members.len(), "upsert_local_members called");
   
@@ -403,7 +475,7 @@ async fn list_local_members(
   page: Option<u32>,
   per_page: Option<u32>,
 ) -> Result<(Vec<LocalMember>, u64), String> {
-  let page = page.unwrap_or(1);
+  let page = page.unwrap_or(1).max(1);
   let per_page = per_page.unwrap_or(50).clamp(1, 100);
   tracing::info!(query = ?query, page = page, per_page = per_page, "list_local_members called");
   
@@ -691,6 +763,7 @@ fn main() {
       add_projects_to_group,
       remove_projects_from_group,
       list_project_group_projects,
+      sync_project_group_members,
       upsert_local_members,
       list_local_members,
       delete_local_members,

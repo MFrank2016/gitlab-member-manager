@@ -1,8 +1,11 @@
-use crate::models::{ProjectMember, ProjectSummary};
+use crate::models::{
+    BatchItemError, ManagedProject, ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
+};
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json;
+use std::future::Future;
 
 #[derive(Debug, Clone)]
 pub struct GitLabConfig {
@@ -67,18 +70,14 @@ pub async fn search_projects(
     page: u32,
     per_page: u32,
 ) -> Result<(Vec<ProjectSummary>, u64)> {
+    let page = page.max(1);
+    let per_page = per_page.clamp(1, 100);
     let keyword = keyword.trim();
     let url = api_url(&cfg.base_url, "/api/v4/projects");
     let http = client();
 
-    let token_preview = if cfg.token.len() > 8 {
-        format!("{}...({} chars)", &cfg.token[..8], cfg.token.len())
-    } else {
-        format!("{}({} chars)", &cfg.token, cfg.token.len())
-    };
     tracing::info!(
         base_url = %cfg.base_url,
-        token = %token_preview,
         url = %url,
         keyword = %keyword,
         page = page,
@@ -145,12 +144,16 @@ pub async fn search_projects(
         .collect();
 
     // 若接口未返回 X-Total，用「本页满页则可能还有下一页」的启发式
+    let page_u64 = u64::from(page);
+    let per_page_u64 = u64::from(per_page);
+    let items_len_u64 = items.len() as u64;
+    let offset_u64 = page_u64.saturating_sub(1).saturating_mul(per_page_u64);
     let total_resolved = if total > 0 {
         total
     } else if items.len() as u32 >= per_page {
-        ((page - 1) * per_page) as u64 + items.len() as u64 + 1
+        offset_u64.saturating_add(items_len_u64).saturating_add(1)
     } else {
-        ((page - 1) * per_page) as u64 + items.len() as u64
+        offset_u64.saturating_add(items_len_u64)
     };
 
     Ok((items, total_resolved))
@@ -163,6 +166,8 @@ pub async fn list_project_members(
     page: u32,
     per_page: u32,
 ) -> Result<(Vec<ProjectMember>, u64)> {
+    let page = page.max(1);
+    let per_page = per_page.clamp(1, 100);
     let project = encode_project(project.trim());
     let http = client();
     let url = api_url(
@@ -198,7 +203,12 @@ pub async fn list_project_members(
     }
 
     let members: Vec<ApiMember> = resp.json().await.context("Parse JSON")?;
-    tracing::debug!(page = page, count = members.len(), total = total, "[gitlab] parsed members");
+    tracing::debug!(
+        page = page,
+        count = members.len(),
+        total = total,
+        "[gitlab] parsed members"
+    );
 
     let items: Vec<ProjectMember> = members
         .into_iter()
@@ -213,12 +223,16 @@ pub async fn list_project_members(
         })
         .collect();
 
+    let page_u64 = u64::from(page);
+    let per_page_u64 = u64::from(per_page);
+    let items_len_u64 = items.len() as u64;
+    let offset_u64 = page_u64.saturating_sub(1).saturating_mul(per_page_u64);
     let total_resolved = if total > 0 {
         total
     } else if items.len() as u32 >= per_page {
-        ((page - 1) * per_page) as u64 + items.len() as u64 + 1
+        offset_u64.saturating_add(items_len_u64).saturating_add(1)
     } else {
-        ((page - 1) * per_page) as u64 + items.len() as u64
+        offset_u64.saturating_add(items_len_u64)
     };
 
     Ok((items, total_resolved))
@@ -328,4 +342,119 @@ pub async fn remove_member(cfg: &GitLabConfig, project: &str, user_id: u64) -> R
     let text = resp.text().await.unwrap_or_default();
     tracing::warn!(status = %status, body = %text, "[gitlab] remove_member failed");
     Err(anyhow!("GitLab API error {status}: {text}"))
+}
+
+async fn sync_members_for_managed_project_with<F, Fut>(
+    project: &ManagedProject,
+    user_ids: &[u64],
+    access_level: i64,
+    expires_at: Option<String>,
+    mut add_member_fn: F,
+) -> ProjectGroupMemberSyncRow
+where
+    F: FnMut(u64, i64, Option<String>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let mut success_user_ids = Vec::new();
+    let mut failed = Vec::new();
+
+    for user_id in user_ids {
+        match add_member_fn(*user_id, access_level, expires_at.clone()).await {
+            Ok(_) => success_user_ids.push(*user_id),
+            Err(error) => {
+                failed.push(BatchItemError {
+                    user_id: *user_id,
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
+
+    ProjectGroupMemberSyncRow {
+        managed_project_id: project.id,
+        gitlab_project_id: project.gitlab_project_id,
+        project_name: project.name.clone(),
+        project_path_with_namespace: project.path_with_namespace.clone(),
+        attempted_user_ids: user_ids.to_vec(),
+        success_user_ids,
+        success: failed.is_empty(),
+        failed,
+    }
+}
+
+pub async fn sync_members_for_managed_project(
+    cfg: &GitLabConfig,
+    project: &ManagedProject,
+    user_ids: &[u64],
+    access_level: i64,
+    expires_at: Option<String>,
+) -> ProjectGroupMemberSyncRow {
+    sync_members_for_managed_project_with(
+        project,
+        user_ids,
+        access_level,
+        expires_at,
+        |user_id, access_level, expires_at| async move {
+            add_member(
+                cfg,
+                &project.gitlab_project_id.to_string(),
+                user_id,
+                access_level,
+                expires_at,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ManagedProject;
+    use anyhow::anyhow;
+
+    fn sample_project() -> ManagedProject {
+        ManagedProject {
+            id: 12,
+            gitlab_project_id: 3456,
+            name: "sample-project".to_string(),
+            path_with_namespace: "org/sample-project".to_string(),
+            repo_path: "D:/repos/sample-project".to_string(),
+            default_branch: "main".to_string(),
+            default_remote: "origin".to_string(),
+            enabled: true,
+            created_at: "2026-03-18T00:00:00Z".to_string(),
+            updated_at: "2026-03-18T00:00:00Z".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn member_sync_project_row_collects_per_user_failures() {
+        let project = sample_project();
+
+        let row = sync_members_for_managed_project_with(
+            &project,
+            &[1001, 1002, 1003],
+            30,
+            Some("2026-12-31".to_string()),
+            |user_id, _access_level, _expires_at| async move {
+                if user_id == 1002 {
+                    Err(anyhow!("simulated gitlab failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(row.managed_project_id, 12);
+        assert_eq!(row.gitlab_project_id, 3456);
+        assert_eq!(row.attempted_user_ids, vec![1001, 1002, 1003]);
+        assert_eq!(row.success_user_ids, vec![1001, 1003]);
+        assert_eq!(row.failed.len(), 1);
+        assert_eq!(row.failed[0].user_id, 1002);
+        assert!(row.failed[0].message.contains("simulated gitlab failure"));
+        assert!(!row.success);
+    }
 }
