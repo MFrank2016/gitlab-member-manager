@@ -1,10 +1,14 @@
-use crate::models::{LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject, ProjectGroup};
+use crate::models::{
+    LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject, ProjectGroup,
+    WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowStep, WorkflowStepInput,
+};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
+use serde_json::{Map, Value};
 use sqlx::{
     migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    SqlitePool,
+    Sqlite, SqlitePool, Transaction,
 };
 use std::collections::BTreeSet;
 use std::str::FromStr;
@@ -60,6 +64,105 @@ fn option_i64_to_u64_checked(value: Option<i64>, field_name: &str) -> Result<Opt
     value
         .map(|raw| i64_to_u64_checked(raw, field_name))
         .transpose()
+}
+
+fn normalize_json_object(value: Value, field_name: &str) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Object(Map::new())),
+        Value::Object(_) => Ok(value),
+        _ => Err(anyhow!("{field_name} must be a JSON object")),
+    }
+}
+
+fn normalize_workflow_step_inputs(steps: Vec<WorkflowStepInput>) -> Result<Vec<WorkflowStepInput>> {
+    if steps.is_empty() {
+        return Err(anyhow!("workflow definition must contain at least one step"));
+    }
+
+    let mut normalized = Vec::with_capacity(steps.len());
+    for step in steps {
+        let step_type = step.step_type.trim().to_string();
+        if step_type.is_empty() {
+            return Err(anyhow!("workflow step type is empty"));
+        }
+        let parameters = normalize_json_object(step.parameters, "workflow step parameters")?;
+        normalized.push(WorkflowStepInput {
+            step_type,
+            parameters,
+        });
+    }
+
+    Ok(normalized)
+}
+
+fn serialize_json(value: &Value, field_name: &str) -> Result<String> {
+    serde_json::to_string(value).with_context(|| format!("serialize {field_name} json"))
+}
+
+fn deserialize_json(raw: &str, field_name: &str) -> Result<Value> {
+    serde_json::from_str(raw).with_context(|| format!("parse {field_name} json"))
+}
+
+fn deserialize_json_object(raw: &str, field_name: &str) -> Result<Value> {
+    let parsed = deserialize_json(raw, field_name)?;
+    normalize_json_object(parsed, field_name)
+}
+
+async fn insert_workflow_steps(
+    tx: &mut Transaction<'_, Sqlite>,
+    workflow_definition_id: i64,
+    steps: &[WorkflowStepInput],
+    now: &str,
+) -> Result<()> {
+    for (index, step) in steps.iter().enumerate() {
+        let step_order = i64::try_from(index)
+            .map_err(|_| anyhow!("workflow step index out of range: {index}"))?;
+        let parameters_json =
+            serialize_json(&step.parameters, "workflow_steps.parameters_json")?;
+
+        sqlx::query(
+            r#"INSERT INTO workflow_steps (
+             workflow_definition_id, step_order, step_type, parameters_json, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+        )
+        .bind(workflow_definition_id)
+        .bind(step_order)
+        .bind(&step.step_type)
+        .bind(&parameters_json)
+        .bind(now)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn load_workflow_steps(
+    pool: &SqlitePool,
+    workflow_definition_id: i64,
+) -> Result<Vec<WorkflowStep>> {
+    let rows = sqlx::query_as::<_, (i64, String, String)>(
+        r#"SELECT
+         step_order, step_type, parameters_json
+       FROM workflow_steps
+       WHERE workflow_definition_id = ?1
+       ORDER BY step_order ASC, id ASC"#,
+    )
+    .bind(workflow_definition_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut steps = Vec::with_capacity(rows.len());
+    for row in rows {
+        steps.push(WorkflowStep {
+            step_order: row.0,
+            step_type: row.1,
+            parameters: deserialize_json_object(&row.2, "workflow step parameters")?,
+        });
+    }
+
+    Ok(steps)
 }
 
 pub async fn create_managed_project(
@@ -435,6 +538,189 @@ pub async fn project_group_exists(pool: &SqlitePool, project_group_id: i64) -> R
             .await?;
 
     Ok(count > 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_workflow_definition(
+    pool: &SqlitePool,
+    name: String,
+    description: String,
+    enabled: bool,
+    variables_schema: Value,
+    max_concurrency_default: i64,
+    steps: Vec<WorkflowStepInput>,
+) -> Result<WorkflowDefinitionDetail> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(anyhow!("workflow definition name is empty"));
+    }
+    if max_concurrency_default < 1 {
+        return Err(anyhow!("max_concurrency_default must be >= 1"));
+    }
+
+    let steps = normalize_workflow_step_inputs(steps)?;
+    let variables_schema = normalize_json_object(variables_schema, "variables_schema")?;
+    let variables_schema_json =
+        serialize_json(&variables_schema, "workflow_definitions.variables_schema")?;
+    let description = description.trim().to_string();
+    let enabled_value = if enabled { 1_i64 } else { 0_i64 };
+    let now = Utc::now().to_rfc3339();
+
+    let mut tx = pool.begin().await?;
+    let res = sqlx::query(
+        r#"INSERT INTO workflow_definitions (
+         name, description, enabled, variables_schema, max_concurrency_default, created_at, updated_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+    )
+    .bind(&name)
+    .bind(&description)
+    .bind(enabled_value)
+    .bind(&variables_schema_json)
+    .bind(max_concurrency_default)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    let workflow_definition_id = res.last_insert_rowid();
+
+    insert_workflow_steps(&mut tx, workflow_definition_id, &steps, &now).await?;
+    tx.commit().await?;
+
+    get_workflow_definition_detail(pool, workflow_definition_id).await
+}
+
+pub async fn list_workflow_definitions(pool: &SqlitePool) -> Result<Vec<WorkflowDefinitionListItem>> {
+    let rows = sqlx::query_as::<_, (i64, String, String, i64, String, i64, String, String, i64)>(
+        r#"SELECT
+         d.id, d.name, d.description, d.enabled, d.variables_schema, d.max_concurrency_default,
+         d.created_at, d.updated_at, COUNT(s.id) as steps_count
+       FROM workflow_definitions d
+       LEFT JOIN workflow_steps s ON s.workflow_definition_id = d.id
+       GROUP BY d.id
+       ORDER BY d.id DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(WorkflowDefinitionListItem {
+            id: row.0,
+            name: row.1,
+            description: row.2,
+            enabled: row.3 != 0,
+            variables_schema: deserialize_json_object(&row.4, "variables_schema")?,
+            max_concurrency_default: row.5,
+            created_at: row.6,
+            updated_at: row.7,
+            steps_count: row.8,
+        });
+    }
+
+    Ok(items)
+}
+
+pub async fn get_workflow_definition_detail(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<WorkflowDefinitionDetail> {
+    let row = sqlx::query_as::<_, (i64, String, String, i64, String, i64, String, String)>(
+        r#"SELECT
+         id, name, description, enabled, variables_schema, max_concurrency_default, created_at, updated_at
+       FROM workflow_definitions
+       WHERE id = ?1"#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow!("workflow definition not found: {id}"))?;
+
+    let steps = load_workflow_steps(pool, id).await?;
+    Ok(WorkflowDefinitionDetail {
+        id: row.0,
+        name: row.1,
+        description: row.2,
+        enabled: row.3 != 0,
+        variables_schema: deserialize_json_object(&row.4, "variables_schema")?,
+        max_concurrency_default: row.5,
+        created_at: row.6,
+        updated_at: row.7,
+        steps,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_workflow_definition(
+    pool: &SqlitePool,
+    id: i64,
+    name: String,
+    description: String,
+    enabled: bool,
+    variables_schema: Value,
+    max_concurrency_default: i64,
+    steps: Vec<WorkflowStepInput>,
+) -> Result<()> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(anyhow!("workflow definition name is empty"));
+    }
+    if max_concurrency_default < 1 {
+        return Err(anyhow!("max_concurrency_default must be >= 1"));
+    }
+
+    let steps = normalize_workflow_step_inputs(steps)?;
+    let variables_schema = normalize_json_object(variables_schema, "variables_schema")?;
+    let variables_schema_json =
+        serialize_json(&variables_schema, "workflow_definitions.variables_schema")?;
+    let description = description.trim().to_string();
+    let enabled_value = if enabled { 1_i64 } else { 0_i64 };
+    let now = Utc::now().to_rfc3339();
+
+    let mut tx = pool.begin().await?;
+    let res = sqlx::query(
+        r#"UPDATE workflow_definitions
+       SET name = ?1,
+           description = ?2,
+           enabled = ?3,
+           variables_schema = ?4,
+           max_concurrency_default = ?5,
+           updated_at = ?6
+       WHERE id = ?7"#,
+    )
+    .bind(&name)
+    .bind(&description)
+    .bind(enabled_value)
+    .bind(&variables_schema_json)
+    .bind(max_concurrency_default)
+    .bind(&now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
+    if res.rows_affected() == 0 {
+        return Err(anyhow!("workflow definition not found: {id}"));
+    }
+
+    sqlx::query(r#"DELETE FROM workflow_steps WHERE workflow_definition_id = ?1"#)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    insert_workflow_steps(&mut tx, id, &steps, &now).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn delete_workflow_definition(pool: &SqlitePool, id: i64) -> Result<()> {
+    let res = sqlx::query(r#"DELETE FROM workflow_definitions WHERE id = ?1"#)
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    if res.rows_affected() == 0 {
+        return Err(anyhow!("workflow definition not found: {id}"));
+    }
+
+    Ok(())
 }
 
 pub async fn resolve_member_sync_user_ids(
@@ -1318,5 +1604,190 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("local group not found"));
+    }
+
+    #[tokio::test]
+    async fn workflow_definition_create_list_detail_preserves_step_order() {
+        let pool = setup_test_pool().await;
+
+        let created = create_workflow_definition(
+            &pool,
+            "release-flow".to_string(),
+            "release flow".to_string(),
+            true,
+            serde_json::json!({
+                "source_branch": {"type": "string"},
+                "target_branch": {"type": "string"}
+            }),
+            2,
+            vec![
+                WorkflowStepInput {
+                    step_type: "checkout_branch".to_string(),
+                    parameters: serde_json::json!({ "branch": "${source_branch}" }),
+                },
+                WorkflowStepInput {
+                    step_type: "git_merge".to_string(),
+                    parameters: serde_json::json!({ "from": "${source_branch}" }),
+                },
+                WorkflowStepInput {
+                    step_type: "git_push".to_string(),
+                    parameters: serde_json::json!({ "remote": "origin" }),
+                },
+            ],
+        )
+        .await
+        .expect("create workflow definition");
+
+        let listed = list_workflow_definitions(&pool)
+            .await
+            .expect("list workflow definitions");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+        assert_eq!(listed[0].steps_count, 3);
+
+        let detail = get_workflow_definition_detail(&pool, created.id)
+            .await
+            .expect("get workflow definition detail");
+        assert_eq!(detail.id, created.id);
+        assert_eq!(detail.steps.len(), 3);
+        assert_eq!(detail.steps[0].step_type, "checkout_branch");
+        assert_eq!(detail.steps[1].step_type, "git_merge");
+        assert_eq!(detail.steps[2].step_type, "git_push");
+        assert_eq!(
+            detail.steps[0].parameters,
+            serde_json::json!({ "branch": "${source_branch}" })
+        );
+        assert_eq!(
+            detail.steps[1].parameters,
+            serde_json::json!({ "from": "${source_branch}" })
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_definition_update_and_delete() {
+        let pool = setup_test_pool().await;
+
+        let created = create_workflow_definition(
+            &pool,
+            "flow-before".to_string(),
+            "before".to_string(),
+            true,
+            serde_json::json!({"source_branch": {"type": "string"}}),
+            2,
+            vec![WorkflowStepInput {
+                step_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "${source_branch}" }),
+            }],
+        )
+        .await
+        .expect("create workflow definition");
+
+        update_workflow_definition(
+            &pool,
+            created.id,
+            "flow-after".to_string(),
+            "after".to_string(),
+            false,
+            serde_json::json!({"target_branch": {"type": "string"}}),
+            3,
+            vec![
+                WorkflowStepInput {
+                    step_type: "git_pull".to_string(),
+                    parameters: serde_json::json!({ "branch": "${target_branch}" }),
+                },
+                WorkflowStepInput {
+                    step_type: "git_push".to_string(),
+                    parameters: serde_json::json!({ "remote": "origin" }),
+                },
+            ],
+        )
+        .await
+        .expect("update workflow definition");
+
+        let detail = get_workflow_definition_detail(&pool, created.id)
+            .await
+            .expect("get workflow definition detail after update");
+        assert_eq!(detail.name, "flow-after");
+        assert!(!detail.enabled);
+        assert_eq!(detail.max_concurrency_default, 3);
+        assert_eq!(detail.steps.len(), 2);
+        assert_eq!(detail.steps[0].step_type, "git_pull");
+        assert_eq!(detail.steps[1].step_type, "git_push");
+
+        delete_workflow_definition(&pool, created.id)
+            .await
+            .expect("delete workflow definition");
+
+        let list_after_delete = list_workflow_definitions(&pool)
+            .await
+            .expect("list workflow definitions after delete");
+        assert!(list_after_delete.is_empty());
+    }
+
+    #[tokio::test]
+    async fn workflow_definition_rejects_non_object_variables_schema() {
+        let pool = setup_test_pool().await;
+
+        let result = create_workflow_definition(
+            &pool,
+            "invalid-variables-schema".to_string(),
+            "invalid".to_string(),
+            true,
+            serde_json::json!(123),
+            2,
+            vec![WorkflowStepInput {
+                step_type: "git_pull".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("variables_schema must be a JSON object"));
+    }
+
+    #[tokio::test]
+    async fn workflow_definition_rejects_non_object_step_parameters() {
+        let pool = setup_test_pool().await;
+
+        let result = create_workflow_definition(
+            &pool,
+            "invalid-step-parameters".to_string(),
+            "invalid".to_string(),
+            true,
+            serde_json::json!({ "source_branch": { "type": "string" } }),
+            2,
+            vec![WorkflowStepInput {
+                step_type: "git_pull".to_string(),
+                parameters: serde_json::json!(["not-object"]),
+            }],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("workflow step parameters must be a JSON object"));
+    }
+
+    #[test]
+    fn workflow_definition_step_input_accepts_camel_and_snake_case_keys() {
+        let camel_case: WorkflowStepInput = serde_json::from_value(serde_json::json!({
+            "stepType": "git_pull",
+            "parameters": {}
+        }))
+        .expect("deserialize camelCase step input");
+        assert_eq!(camel_case.step_type, "git_pull");
+
+        let snake_case: WorkflowStepInput = serde_json::from_value(serde_json::json!({
+            "step_type": "git_push",
+            "parameters": {}
+        }))
+        .expect("deserialize snake_case step input");
+        assert_eq!(snake_case.step_type, "git_push");
     }
 }

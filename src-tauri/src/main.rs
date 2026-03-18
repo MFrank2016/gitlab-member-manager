@@ -8,6 +8,7 @@ use crate::gitlab::GitLabConfig;
 use crate::models::{
   BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
   ProjectGroup, ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
+  WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowStepInput,
 };
 use sqlx::SqlitePool;
 use std::sync::Mutex;
@@ -376,6 +377,115 @@ async fn list_project_group_projects(
   match &result {
     Ok(projects) => tracing::info!(project_group_id = project_group_id, count = projects.len(), "list_project_group_projects success"),
     Err(e) => tracing::error!(project_group_id = project_group_id, error = %e, "list_project_group_projects failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn create_workflow_definition(
+  state: State<'_, AppState>,
+  name: String,
+  description: String,
+  enabled: bool,
+  variables_schema: serde_json::Value,
+  max_concurrency_default: i64,
+  steps: Vec<WorkflowStepInput>,
+) -> Result<WorkflowDefinitionDetail, String> {
+  let result = db::create_workflow_definition(
+    &state.db,
+    name.trim().to_string(),
+    description.trim().to_string(),
+    enabled,
+    variables_schema,
+    max_concurrency_default,
+    steps,
+  )
+  .await
+  .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(workflow) => tracing::info!(id = workflow.id, "create_workflow_definition success"),
+    Err(e) => tracing::error!(error = %e, "create_workflow_definition failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn list_workflow_definitions(
+  state: State<'_, AppState>,
+) -> Result<Vec<WorkflowDefinitionListItem>, String> {
+  let result = db::list_workflow_definitions(&state.db)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(workflows) => tracing::info!(count = workflows.len(), "list_workflow_definitions success"),
+    Err(e) => tracing::error!(error = %e, "list_workflow_definitions failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn get_workflow_definition_detail(
+  state: State<'_, AppState>,
+  id: i64,
+) -> Result<WorkflowDefinitionDetail, String> {
+  let result = db::get_workflow_definition_detail(&state.db, id)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(_) => tracing::info!(id = id, "get_workflow_definition_detail success"),
+    Err(e) => tracing::error!(id = id, error = %e, "get_workflow_definition_detail failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn update_workflow_definition(
+  state: State<'_, AppState>,
+  id: i64,
+  name: String,
+  description: String,
+  enabled: bool,
+  variables_schema: serde_json::Value,
+  max_concurrency_default: i64,
+  steps: Vec<WorkflowStepInput>,
+) -> Result<(), String> {
+  let result = db::update_workflow_definition(
+    &state.db,
+    id,
+    name.trim().to_string(),
+    description.trim().to_string(),
+    enabled,
+    variables_schema,
+    max_concurrency_default,
+    steps,
+  )
+  .await
+  .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(_) => tracing::info!(id = id, "update_workflow_definition success"),
+    Err(e) => tracing::error!(id = id, error = %e, "update_workflow_definition failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn delete_workflow_definition(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+  let result = db::delete_workflow_definition(&state.db, id)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(_) => tracing::info!(id = id, "delete_workflow_definition success"),
+    Err(e) => tracing::error!(id = id, error = %e, "delete_workflow_definition failed"),
   }
 
   result
@@ -763,6 +873,11 @@ fn main() {
       add_projects_to_group,
       remove_projects_from_group,
       list_project_group_projects,
+      create_workflow_definition,
+      list_workflow_definitions,
+      get_workflow_definition_detail,
+      update_workflow_definition,
+      delete_workflow_definition,
       sync_project_group_members,
       upsert_local_members,
       list_local_members,

@@ -60,6 +60,41 @@ export type ProjectGroup = {
   projectsCount: number;
 };
 
+export type WorkflowStepInput = {
+  stepType: string;
+  parameters?: unknown;
+};
+
+export type WorkflowStep = {
+  stepOrder: number;
+  stepType: string;
+  parameters: unknown;
+};
+
+export type WorkflowDefinitionListItem = {
+  id: number;
+  name: string;
+  description: string;
+  enabled: boolean;
+  variablesSchema: unknown;
+  maxConcurrencyDefault: number;
+  createdAt: string;
+  updatedAt: string;
+  stepsCount: number;
+};
+
+export type WorkflowDefinitionDetail = {
+  id: number;
+  name: string;
+  description: string;
+  enabled: boolean;
+  variablesSchema: unknown;
+  maxConcurrencyDefault: number;
+  createdAt: string;
+  updatedAt: string;
+  steps: WorkflowStep[];
+};
+
 export type ProjectGroupMemberSyncRow = {
   managedProjectId: number;
   gitlabProjectId: number;

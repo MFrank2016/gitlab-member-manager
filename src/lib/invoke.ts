@@ -8,6 +8,9 @@ import type {
   ProjectGroupMemberSyncRow,
   ProjectMember,
   ProjectSummary,
+  WorkflowDefinitionDetail,
+  WorkflowDefinitionListItem,
+  WorkflowStepInput,
 } from "@/lib/types";
 import { logger } from "@/lib/logger";
 
@@ -55,6 +58,16 @@ function summarizeResult(result: unknown): unknown {
     return { type: "Object", keys: Object.keys(obj) };
   }
   return result;
+}
+
+function normalizeJsonObject(value: unknown, fieldName: string): Record<string, unknown> {
+  if (value === null || value === undefined) {
+    return {};
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  throw new Error(`${fieldName} must be an object`);
 }
 
 /**
@@ -201,6 +214,67 @@ export async function listProjectGroupProjects(projectGroupId: number) {
   return loggedInvoke<ManagedProject[]>("list_project_group_projects", {
     project_group_id: projectGroupId,
   });
+}
+
+function toWorkflowStepPayload(step: WorkflowStepInput) {
+  return {
+    stepType: step.stepType.trim(),
+    parameters: normalizeJsonObject(step.parameters, "workflow step parameters"),
+  };
+}
+
+export async function createWorkflowDefinition(args: {
+  name: string;
+  description?: string | null;
+  enabled?: boolean;
+  variablesSchema?: unknown;
+  maxConcurrencyDefault?: number;
+  steps: WorkflowStepInput[];
+}) {
+  const normalizedDescription = args.description?.trim();
+
+  return loggedInvoke<WorkflowDefinitionDetail>("create_workflow_definition", {
+    name: args.name,
+    description: normalizedDescription ?? "",
+    enabled: args.enabled ?? true,
+    variables_schema: normalizeJsonObject(args.variablesSchema, "variablesSchema"),
+    max_concurrency_default: args.maxConcurrencyDefault ?? 2,
+    steps: args.steps.map(toWorkflowStepPayload),
+  });
+}
+
+export async function listWorkflowDefinitions() {
+  return loggedInvoke<WorkflowDefinitionListItem[]>("list_workflow_definitions");
+}
+
+export async function getWorkflowDefinitionDetail(id: number) {
+  return loggedInvoke<WorkflowDefinitionDetail>("get_workflow_definition_detail", { id });
+}
+
+export async function updateWorkflowDefinition(args: {
+  id: number;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  variablesSchema: unknown;
+  maxConcurrencyDefault: number;
+  steps: WorkflowStepInput[];
+}) {
+  const normalizedDescription = args.description?.trim();
+
+  return loggedInvoke<void>("update_workflow_definition", {
+    id: args.id,
+    name: args.name,
+    description: normalizedDescription ?? "",
+    enabled: args.enabled,
+    variables_schema: normalizeJsonObject(args.variablesSchema, "variablesSchema"),
+    max_concurrency_default: args.maxConcurrencyDefault,
+    steps: args.steps.map(toWorkflowStepPayload),
+  });
+}
+
+export async function deleteWorkflowDefinition(id: number) {
+  return loggedInvoke<void>("delete_workflow_definition", { id });
 }
 
 export async function syncProjectGroupMembers(args: {

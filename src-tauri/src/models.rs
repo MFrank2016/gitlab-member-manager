@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,6 +97,51 @@ pub struct ProjectGroup {
     pub created_at: String,
     pub updated_at: String,
     pub projects_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowStepInput {
+    #[serde(alias = "step_type")]
+    pub step_type: String,
+    #[serde(default)]
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowStep {
+    pub step_order: i64,
+    pub step_type: String,
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowDefinitionListItem {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub variables_schema: Value,
+    pub max_concurrency_default: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub steps_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowDefinitionDetail {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub variables_schema: Value,
+    pub max_concurrency_default: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub steps: Vec<WorkflowStep>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
