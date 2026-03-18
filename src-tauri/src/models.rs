@@ -146,6 +146,92 @@ pub struct WorkflowDefinitionDetail {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkflowRunStep {
+    pub id: i64,
+    pub workflow_step_id: Option<i64>,
+    pub step_order: i64,
+    pub step_type: String,
+    pub rendered_parameters: Value,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i64>,
+    pub summary_message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunProject {
+    pub id: i64,
+    pub managed_project_id: Option<i64>,
+    pub gitlab_project_id: u64,
+    pub project_name: String,
+    pub project_path_with_namespace: String,
+    pub repo_path: String,
+    pub status: String,
+    pub summary_message: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub steps: Vec<WorkflowRunStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunListItem {
+    pub id: i64,
+    pub workflow_definition_id: i64,
+    pub workflow_definition_name: String,
+    pub project_group_id: i64,
+    pub project_group_name: String,
+    pub source_workflow_run_id: Option<i64>,
+    pub trigger_kind: String,
+    pub status: String,
+    pub run_parameters: Value,
+    pub max_concurrency: i64,
+    pub projects_total: i64,
+    pub projects_queued: i64,
+    pub projects_running: i64,
+    pub projects_success: i64,
+    pub projects_failed: i64,
+    pub projects_cancelled: i64,
+    pub projects_failed_precheck: i64,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunDetail {
+    pub id: i64,
+    pub workflow_definition_id: i64,
+    pub workflow_definition_name: String,
+    pub project_group_id: i64,
+    pub project_group_name: String,
+    pub source_workflow_run_id: Option<i64>,
+    pub trigger_kind: String,
+    pub status: String,
+    pub run_parameters: Value,
+    pub max_concurrency: i64,
+    pub projects_total: i64,
+    pub projects_queued: i64,
+    pub projects_running: i64,
+    pub projects_success: i64,
+    pub projects_failed: i64,
+    pub projects_cancelled: i64,
+    pub projects_failed_precheck: i64,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub projects: Vec<WorkflowRunProject>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectGroupMemberSyncRow {
     pub managed_project_id: i64,
     pub gitlab_project_id: u64,

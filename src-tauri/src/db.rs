@@ -1,6 +1,7 @@
 use crate::models::{
     LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject, ProjectGroup,
-    WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowStep, WorkflowStepInput,
+    WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem,
+    WorkflowRunProject, WorkflowRunStep, WorkflowStep, WorkflowStepInput,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -10,7 +11,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     Sqlite, SqlitePool, Transaction,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 use tauri::Manager;
 
@@ -106,6 +107,62 @@ fn deserialize_json(raw: &str, field_name: &str) -> Result<Value> {
 fn deserialize_json_object(raw: &str, field_name: &str) -> Result<Value> {
     let parsed = deserialize_json(raw, field_name)?;
     normalize_json_object(parsed, field_name)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct WorkflowRunSummaryRow {
+    id: i64,
+    workflow_definition_id: i64,
+    workflow_definition_name: String,
+    project_group_id: i64,
+    project_group_name: String,
+    source_workflow_run_id: Option<i64>,
+    trigger_kind: String,
+    status: String,
+    run_parameters_json: String,
+    max_concurrency: i64,
+    projects_total: i64,
+    projects_queued: i64,
+    projects_running: i64,
+    projects_success: i64,
+    projects_failed: i64,
+    projects_cancelled: i64,
+    projects_failed_precheck: i64,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct WorkflowRunProjectRow {
+    id: i64,
+    managed_project_id: Option<i64>,
+    gitlab_project_id: i64,
+    project_name: String,
+    project_path_with_namespace: String,
+    repo_path: String,
+    status: String,
+    summary_message: String,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct WorkflowRunStepRow {
+    id: i64,
+    workflow_run_project_id: i64,
+    workflow_step_id: Option<i64>,
+    step_order: i64,
+    step_type: String,
+    rendered_parameters_json: String,
+    status: String,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i64>,
+    summary_message: String,
 }
 
 async fn insert_workflow_steps(
@@ -721,6 +778,221 @@ pub async fn delete_workflow_definition(pool: &SqlitePool, id: i64) -> Result<()
     }
 
     Ok(())
+}
+
+pub async fn list_workflow_runs(pool: &SqlitePool) -> Result<Vec<WorkflowRunListItem>> {
+    let rows = sqlx::query_as::<_, WorkflowRunSummaryRow>(
+        r#"SELECT
+         r.id,
+         r.workflow_definition_id,
+         d.name as workflow_definition_name,
+         r.project_group_id,
+         g.name as project_group_name,
+         r.source_workflow_run_id,
+         r.trigger_kind,
+         r.status,
+         r.run_parameters_json,
+         r.max_concurrency,
+         COUNT(p.id) as projects_total,
+         COALESCE(SUM(CASE WHEN p.status = 'queued' THEN 1 ELSE 0 END), 0) as projects_queued,
+         COALESCE(SUM(CASE WHEN p.status = 'running' THEN 1 ELSE 0 END), 0) as projects_running,
+         COALESCE(SUM(CASE WHEN p.status = 'success' THEN 1 ELSE 0 END), 0) as projects_success,
+         COALESCE(SUM(CASE WHEN p.status = 'failed' THEN 1 ELSE 0 END), 0) as projects_failed,
+         COALESCE(SUM(CASE WHEN p.status = 'cancelled' THEN 1 ELSE 0 END), 0) as projects_cancelled,
+         COALESCE(SUM(CASE WHEN p.status = 'failed_precheck' THEN 1 ELSE 0 END), 0) as projects_failed_precheck,
+         r.started_at,
+         r.finished_at,
+         r.created_at,
+         r.updated_at
+       FROM workflow_runs r
+       INNER JOIN workflow_definitions d ON d.id = r.workflow_definition_id
+       INNER JOIN project_groups g ON g.id = r.project_group_id
+       LEFT JOIN workflow_run_projects p ON p.workflow_run_id = r.id
+       GROUP BY r.id
+       ORDER BY r.id DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(WorkflowRunListItem {
+            id: row.id,
+            workflow_definition_id: row.workflow_definition_id,
+            workflow_definition_name: row.workflow_definition_name,
+            project_group_id: row.project_group_id,
+            project_group_name: row.project_group_name,
+            source_workflow_run_id: row.source_workflow_run_id,
+            trigger_kind: row.trigger_kind,
+            status: row.status,
+            run_parameters: deserialize_json_object(
+                &row.run_parameters_json,
+                "workflow run parameters",
+            )?,
+            max_concurrency: row.max_concurrency,
+            projects_total: row.projects_total,
+            projects_queued: row.projects_queued,
+            projects_running: row.projects_running,
+            projects_success: row.projects_success,
+            projects_failed: row.projects_failed,
+            projects_cancelled: row.projects_cancelled,
+            projects_failed_precheck: row.projects_failed_precheck,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        });
+    }
+
+    Ok(items)
+}
+
+pub async fn get_workflow_run_detail(pool: &SqlitePool, id: i64) -> Result<WorkflowRunDetail> {
+    let mut tx = pool.begin().await?;
+
+    let row = sqlx::query_as::<_, WorkflowRunSummaryRow>(
+        r#"SELECT
+         r.id,
+         r.workflow_definition_id,
+         d.name as workflow_definition_name,
+         r.project_group_id,
+         g.name as project_group_name,
+         r.source_workflow_run_id,
+         r.trigger_kind,
+         r.status,
+         r.run_parameters_json,
+         r.max_concurrency,
+         COUNT(p.id) as projects_total,
+         COALESCE(SUM(CASE WHEN p.status = 'queued' THEN 1 ELSE 0 END), 0) as projects_queued,
+         COALESCE(SUM(CASE WHEN p.status = 'running' THEN 1 ELSE 0 END), 0) as projects_running,
+         COALESCE(SUM(CASE WHEN p.status = 'success' THEN 1 ELSE 0 END), 0) as projects_success,
+         COALESCE(SUM(CASE WHEN p.status = 'failed' THEN 1 ELSE 0 END), 0) as projects_failed,
+         COALESCE(SUM(CASE WHEN p.status = 'cancelled' THEN 1 ELSE 0 END), 0) as projects_cancelled,
+         COALESCE(SUM(CASE WHEN p.status = 'failed_precheck' THEN 1 ELSE 0 END), 0) as projects_failed_precheck,
+         r.started_at,
+         r.finished_at,
+         r.created_at,
+         r.updated_at
+       FROM workflow_runs r
+       INNER JOIN workflow_definitions d ON d.id = r.workflow_definition_id
+       INNER JOIN project_groups g ON g.id = r.project_group_id
+       LEFT JOIN workflow_run_projects p ON p.workflow_run_id = r.id
+       WHERE r.id = ?1
+       GROUP BY r.id"#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| anyhow!("workflow run not found: {id}"))?;
+
+    let project_rows = sqlx::query_as::<_, WorkflowRunProjectRow>(
+        r#"SELECT
+         id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path,
+         status, summary_message, started_at, finished_at
+       FROM workflow_run_projects
+       WHERE workflow_run_id = ?1
+       ORDER BY id ASC"#,
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let step_rows = sqlx::query_as::<_, WorkflowRunStepRow>(
+        r#"SELECT
+         s.id,
+         s.workflow_run_project_id,
+         s.workflow_step_id,
+         s.step_order,
+         s.step_type,
+         s.rendered_parameters_json,
+         s.status,
+         s.started_at,
+         s.finished_at,
+         s.stdout,
+         s.stderr,
+         s.exit_code,
+         s.summary_message
+       FROM workflow_run_steps s
+       INNER JOIN workflow_run_projects p ON p.id = s.workflow_run_project_id
+       WHERE p.workflow_run_id = ?1
+       ORDER BY s.workflow_run_project_id ASC, s.step_order ASC, s.id ASC"#,
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut steps_by_project_id = HashMap::<i64, Vec<WorkflowRunStep>>::new();
+    for step_row in step_rows {
+        let step = WorkflowRunStep {
+            id: step_row.id,
+            workflow_step_id: step_row.workflow_step_id,
+            step_order: step_row.step_order,
+            step_type: step_row.step_type,
+            rendered_parameters: deserialize_json_object(
+                &step_row.rendered_parameters_json,
+                "workflow run step rendered parameters",
+            )?,
+            status: step_row.status,
+            started_at: step_row.started_at,
+            finished_at: step_row.finished_at,
+            stdout: step_row.stdout,
+            stderr: step_row.stderr,
+            exit_code: step_row.exit_code,
+            summary_message: step_row.summary_message,
+        };
+        steps_by_project_id
+            .entry(step_row.workflow_run_project_id)
+            .or_default()
+            .push(step);
+    }
+
+    let mut projects = Vec::with_capacity(project_rows.len());
+    for project_row in project_rows {
+        let steps = steps_by_project_id.remove(&project_row.id).unwrap_or_default();
+        projects.push(WorkflowRunProject {
+            id: project_row.id,
+            managed_project_id: project_row.managed_project_id,
+            gitlab_project_id: i64_to_u64_checked(
+                project_row.gitlab_project_id,
+                "workflow_run_projects.gitlab_project_id",
+            )?,
+            project_name: project_row.project_name,
+            project_path_with_namespace: project_row.project_path_with_namespace,
+            repo_path: project_row.repo_path,
+            status: project_row.status,
+            summary_message: project_row.summary_message,
+            started_at: project_row.started_at,
+            finished_at: project_row.finished_at,
+            steps,
+        });
+    }
+
+    tx.commit().await?;
+
+    Ok(WorkflowRunDetail {
+        id: row.id,
+        workflow_definition_id: row.workflow_definition_id,
+        workflow_definition_name: row.workflow_definition_name,
+        project_group_id: row.project_group_id,
+        project_group_name: row.project_group_name,
+        source_workflow_run_id: row.source_workflow_run_id,
+        trigger_kind: row.trigger_kind,
+        status: row.status,
+        run_parameters: deserialize_json_object(&row.run_parameters_json, "workflow run parameters")?,
+        max_concurrency: row.max_concurrency,
+        projects_total: row.projects_total,
+        projects_queued: row.projects_queued,
+        projects_running: row.projects_running,
+        projects_success: row.projects_success,
+        projects_failed: row.projects_failed,
+        projects_cancelled: row.projects_cancelled,
+        projects_failed_precheck: row.projects_failed_precheck,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        projects,
+    })
 }
 
 pub async fn resolve_member_sync_user_ids(
@@ -1772,6 +2044,164 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("workflow step parameters must be a JSON object"));
+    }
+
+    #[tokio::test]
+    async fn workflow_run_history_queries_return_nested_project_and_step_state() {
+        let pool = setup_test_pool().await;
+
+        let workflow = create_workflow_definition(
+            &pool,
+            "release-with-history".to_string(),
+            "workflow run history coverage".to_string(),
+            true,
+            serde_json::json!({
+                "source_branch": { "type": "string" },
+                "target_branch": { "type": "string" }
+            }),
+            2,
+            vec![WorkflowStepInput {
+                step_type: "git_merge".to_string(),
+                parameters: serde_json::json!({
+                    "from": "${source_branch}",
+                    "to": "${target_branch}"
+                }),
+            }],
+        )
+        .await
+        .expect("create workflow definition");
+
+        let project_group = create_project_group(&pool, "delivery-group".to_string())
+            .await
+            .expect("create project group");
+
+        let managed_project = create_managed_project(
+            &pool,
+            99001,
+            "project-history".to_string(),
+            "team/project-history".to_string(),
+            "D:/repos/project-history".to_string(),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("create managed project");
+
+        let now = Utc::now().to_rfc3339();
+        let run_id = sqlx::query(
+            r#"INSERT INTO workflow_runs (
+             workflow_definition_id, project_group_id, source_workflow_run_id, trigger_kind,
+             status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        )
+        .bind(workflow.id)
+        .bind(project_group.id)
+        .bind("manual")
+        .bind("partial_failed")
+        .bind(r#"{"source_branch":"release","target_branch":"main"}"#)
+        .bind(2_i64)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert workflow run")
+        .last_insert_rowid();
+
+        let run_project_id = sqlx::query(
+            r#"INSERT INTO workflow_run_projects (
+             workflow_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path,
+             status, summary_message, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+        )
+        .bind(run_id)
+        .bind(managed_project.id)
+        .bind(u64_to_i64_checked(managed_project.gitlab_project_id, "gitlab_project_id").expect("convert project id"))
+        .bind(&managed_project.name)
+        .bind(&managed_project.path_with_namespace)
+        .bind(&managed_project.repo_path)
+        .bind("failed")
+        .bind("git merge conflict")
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert workflow run project")
+        .last_insert_rowid();
+
+        sqlx::query(
+            r#"INSERT INTO workflow_run_steps (
+             workflow_run_project_id, workflow_step_id, step_order, step_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+        )
+        .bind(run_project_id)
+        .bind(Option::<i64>::None)
+        .bind(0_i64)
+        .bind("git_merge")
+        .bind(r#"{"from":"release","to":"main"}"#)
+        .bind("failed")
+        .bind(&now)
+        .bind(&now)
+        .bind("stdout text")
+        .bind("stderr text")
+        .bind(1_i64)
+        .bind("merge conflict")
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert workflow run step");
+
+        sqlx::query(
+            r#"INSERT INTO workflow_run_steps (
+             workflow_run_project_id, workflow_step_id, step_order, step_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, ?8, NULL, ?9, ?10, ?11)"#,
+        )
+        .bind(run_project_id)
+        .bind(Option::<i64>::None)
+        .bind(1_i64)
+        .bind("git_push")
+        .bind(r#"{"remote":"origin"}"#)
+        .bind("cancelled")
+        .bind("")
+        .bind("")
+        .bind("cancelled after previous step failure")
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert cancelled workflow run step");
+
+        let list = list_workflow_runs(&pool)
+            .await
+            .expect("list workflow runs");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, run_id);
+        assert_eq!(list[0].status, "partial_failed");
+        assert_eq!(list[0].projects_total, 1);
+        assert_eq!(list[0].projects_failed, 1);
+
+        let detail = get_workflow_run_detail(&pool, run_id)
+            .await
+            .expect("get workflow run detail");
+        assert_eq!(detail.id, run_id);
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "failed");
+        assert_eq!(detail.projects[0].steps.len(), 2);
+        assert_eq!(detail.projects[0].steps[0].step_type, "git_merge");
+        assert_eq!(
+            detail.projects[0].steps[0].rendered_parameters,
+            serde_json::json!({"from":"release","to":"main"})
+        );
+        assert_eq!(detail.projects[0].steps[0].status, "failed");
+        assert_eq!(detail.projects[0].steps[1].step_type, "git_push");
+        assert_eq!(detail.projects[0].steps[1].status, "cancelled");
     }
 
     #[test]

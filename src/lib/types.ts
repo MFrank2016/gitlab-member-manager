@@ -95,6 +95,87 @@ export type WorkflowDefinitionDetail = {
   steps: WorkflowStep[];
 };
 
+export type WorkflowRunStatus =
+  | "pending"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "partial_failed"
+  | "cancelled";
+
+export type WorkflowRunProjectStatus =
+  | "queued"
+  | "running"
+  | "success"
+  | "failed"
+  | "cancelled"
+  | "failed_precheck";
+
+export type WorkflowRunStepStatus =
+  | "pending"
+  | "running"
+  | "success"
+  | "failed"
+  | "skipped"
+  | "cancelled";
+
+export type WorkflowRunStep = {
+  id: number;
+  workflowStepId?: number | null;
+  stepOrder: number;
+  stepType: string;
+  renderedParameters: unknown;
+  status: WorkflowRunStepStatus;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  stdout: string;
+  stderr: string;
+  exitCode?: number | null;
+  summaryMessage: string;
+};
+
+export type WorkflowRunProject = {
+  id: number;
+  managedProjectId?: number | null;
+  gitlabProjectId: number;
+  projectName: string;
+  projectPathWithNamespace: string;
+  repoPath: string;
+  status: WorkflowRunProjectStatus;
+  summaryMessage: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  steps: WorkflowRunStep[];
+};
+
+export type WorkflowRunListItem = {
+  id: number;
+  workflowDefinitionId: number;
+  workflowDefinitionName: string;
+  projectGroupId: number;
+  projectGroupName: string;
+  sourceWorkflowRunId?: number | null;
+  triggerKind: string;
+  status: WorkflowRunStatus;
+  runParameters: unknown;
+  maxConcurrency: number;
+  projectsTotal: number;
+  projectsQueued: number;
+  projectsRunning: number;
+  projectsSuccess: number;
+  projectsFailed: number;
+  projectsCancelled: number;
+  projectsFailedPrecheck: number;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkflowRunDetail = WorkflowRunListItem & {
+  projects: WorkflowRunProject[];
+};
+
 export type ProjectGroupMemberSyncRow = {
   managedProjectId: number;
   gitlabProjectId: number;

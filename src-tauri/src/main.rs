@@ -8,7 +8,8 @@ use crate::gitlab::GitLabConfig;
 use crate::models::{
   BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
   ProjectGroup, ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
-  WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowStepInput,
+  WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem,
+  WorkflowStepInput,
 };
 use sqlx::SqlitePool;
 use std::sync::Mutex;
@@ -492,6 +493,39 @@ async fn delete_workflow_definition(state: State<'_, AppState>, id: i64) -> Resu
 }
 
 #[tauri::command]
+async fn list_workflow_runs(
+  state: State<'_, AppState>,
+) -> Result<Vec<WorkflowRunListItem>, String> {
+  let result = db::list_workflow_runs(&state.db)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(runs) => tracing::info!(count = runs.len(), "list_workflow_runs success"),
+    Err(e) => tracing::error!(error = %e, "list_workflow_runs failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn get_workflow_run_detail(
+  state: State<'_, AppState>,
+  id: i64,
+) -> Result<WorkflowRunDetail, String> {
+  let result = db::get_workflow_run_detail(&state.db, id)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(_) => tracing::info!(id = id, "get_workflow_run_detail success"),
+    Err(e) => tracing::error!(id = id, error = %e, "get_workflow_run_detail failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
 async fn sync_project_group_members(
   state: State<'_, AppState>,
   project_group_id: i64,
@@ -878,6 +912,8 @@ fn main() {
       get_workflow_definition_detail,
       update_workflow_definition,
       delete_workflow_definition,
+      list_workflow_runs,
+      get_workflow_run_detail,
       sync_project_group_members,
       upsert_local_members,
       list_local_members,

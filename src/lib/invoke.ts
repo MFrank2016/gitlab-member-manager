@@ -10,6 +10,8 @@ import type {
   ProjectSummary,
   WorkflowDefinitionDetail,
   WorkflowDefinitionListItem,
+  WorkflowRunDetail,
+  WorkflowRunListItem,
   WorkflowStepInput,
 } from "@/lib/types";
 import { logger } from "@/lib/logger";
@@ -275,6 +277,14 @@ export async function updateWorkflowDefinition(args: {
 
 export async function deleteWorkflowDefinition(id: number) {
   return loggedInvoke<void>("delete_workflow_definition", { id });
+}
+
+export async function listWorkflowRuns() {
+  return loggedInvoke<WorkflowRunListItem[]>("list_workflow_runs");
+}
+
+export async function getWorkflowRunDetail(id: number) {
+  return loggedInvoke<WorkflowRunDetail>("get_workflow_run_detail", { id });
 }
 
 export async function syncProjectGroupMembers(args: {
