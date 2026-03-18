@@ -20,6 +20,8 @@ const navItems: NavItem[] = [
   { id: "settings", label: "配置", icon: <Settings className="h-5 w-5" /> },
   { id: "projects", label: "项目搜索", icon: <Search className="h-5 w-5" /> },
   { id: "members", label: "项目成员", icon: <Users className="h-5 w-5" /> },
+  { id: "managedProjects", label: "Managed Projects", icon: <FolderOpen className="h-5 w-5" /> },
+  { id: "projectGroups", label: "Project Groups", icon: <FolderOpen className="h-5 w-5" /> },
   { id: "local", label: "本地成员", icon: <UserCircle className="h-5 w-5" /> },
   { id: "groups", label: "本地分组", icon: <FolderOpen className="h-5 w-5" /> },
 ];
@@ -47,7 +49,7 @@ export function Sidebar({
       )}
     >
       <div className="flex h-16 items-center justify-between border-b border-border px-4">
-        <div className={cn("flex items-center gap-3", collapsed && "justify-center")}> 
+        <div className={cn("flex items-center gap-3", collapsed && "justify-center")}>
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-foreground text-background shadow-sm">
             <span className="text-sm font-semibold">GL</span>
           </div>
