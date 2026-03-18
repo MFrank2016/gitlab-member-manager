@@ -4,12 +4,17 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use serde_json::{Map, Value};
 use sqlx::{Sqlite, SqlitePool, Transaction};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration as StdDuration, Instant};
-use tokio::sync::Semaphore;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::task::JoinSet;
 
 const GIT_COMMAND_TIMEOUT_SECS: u64 = 120;
+
+static REPO_LEASE_REGISTRY: OnceLock<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone)]
 struct RenderedStepDefinition {
@@ -38,6 +43,14 @@ enum ProjectOutcome {
     Success,
     Failed,
     FailedPrecheck,
+    Cancelled,
+}
+
+#[derive(Debug)]
+struct RetrySourceRun {
+    workflow_definition_id: i64,
+    project_group_id: i64,
+    run_parameters: Value,
 }
 
 #[derive(Debug)]
@@ -92,6 +105,28 @@ impl StepOperation {
 
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn normalize_repo_lease_key(repo_path: &str) -> String {
+    let normalized = repo_path.replace('\\', "/");
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn repo_lease_registry() -> &'static TokioMutex<HashMap<String, Arc<TokioMutex<()>>>> {
+    REPO_LEASE_REGISTRY.get_or_init(|| TokioMutex::new(HashMap::new()))
+}
+
+async fn get_repo_lease(repo_path: &str) -> Arc<TokioMutex<()>> {
+    let key = normalize_repo_lease_key(repo_path);
+    let mut registry = repo_lease_registry().lock().await;
+    registry
+        .entry(key)
+        .or_insert_with(|| Arc::new(TokioMutex::new(())))
+        .clone()
 }
 
 fn normalize_run_parameters(value: Value) -> Result<Value> {
@@ -229,6 +264,18 @@ async fn run_git(repo_path: String, args: Vec<String>) -> Result<CommandResult> 
             }
 
             if Instant::now() >= deadline {
+                if let Some(status) = child.try_wait().context("poll git command status at timeout boundary")? {
+                    let output = child
+                        .wait_with_output()
+                        .context("collect git command output at timeout boundary")?;
+                    return Ok(CommandResult {
+                        success: status.success(),
+                        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                        exit_code: status.code().map(i64::from),
+                    });
+                }
+
                 let _ = child.kill();
                 let output = child.wait_with_output().ok();
                 let timed_out_note =
@@ -388,6 +435,8 @@ async fn insert_workflow_run_row(
     tx: &mut Transaction<'_, Sqlite>,
     workflow_definition_id: i64,
     project_group_id: i64,
+    source_workflow_run_id: Option<i64>,
+    trigger_kind: &str,
     run_parameters: &Value,
     max_concurrency: i64,
 ) -> Result<i64> {
@@ -398,11 +447,12 @@ async fn insert_workflow_run_row(
         r#"INSERT INTO workflow_runs (
          workflow_definition_id, project_group_id, source_workflow_run_id, trigger_kind,
          status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
-       ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)"#,
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10)"#,
     )
     .bind(workflow_definition_id)
     .bind(project_group_id)
-    .bind("manual")
+    .bind(source_workflow_run_id)
+    .bind(trigger_kind)
     .bind("running")
     .bind(run_parameters_json)
     .bind(max_concurrency)
@@ -480,6 +530,8 @@ async fn seed_workflow_run_and_children(
     pool: &SqlitePool,
     workflow_definition_id: i64,
     project_group_id: i64,
+    source_workflow_run_id: Option<i64>,
+    trigger_kind: &str,
     run_parameters: &Value,
     max_concurrency: i64,
     projects: Vec<ManagedProject>,
@@ -490,6 +542,8 @@ async fn seed_workflow_run_and_children(
         &mut tx,
         workflow_definition_id,
         project_group_id,
+        source_workflow_run_id,
+        trigger_kind,
         run_parameters,
         max_concurrency,
     )
@@ -541,6 +595,150 @@ async fn mark_workflow_run_finished(
     .await?;
 
     Ok(())
+}
+
+async fn load_workflow_run_status(pool: &SqlitePool, workflow_run_id: i64) -> Result<String> {
+    sqlx::query_scalar::<_, String>(r#"SELECT status FROM workflow_runs WHERE id = ?1"#)
+        .bind(workflow_run_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| anyhow!("workflow run not found: {workflow_run_id}"))
+}
+
+async fn is_workflow_run_cancelling(pool: &SqlitePool, workflow_run_id: i64) -> Result<bool> {
+    Ok(load_workflow_run_status(pool, workflow_run_id).await? == "cancelling")
+}
+
+fn derive_run_final_status(has_failures: bool, has_cancelled: bool) -> &'static str {
+    if has_failures {
+        "partial_failed"
+    } else if has_cancelled {
+        "cancelled"
+    } else {
+        "completed"
+    }
+}
+
+fn derive_run_final_status_from_project_counts(
+    project_total: i64,
+    project_success: i64,
+    project_failures: i64,
+    project_cancelled: i64,
+    project_non_terminal: i64,
+) -> &'static str {
+    let has_failures = project_failures > 0;
+    let has_cancelled = project_total == 0
+        || project_cancelled > 0
+        || project_non_terminal > 0
+        || project_success != project_total;
+    derive_run_final_status(has_failures, has_cancelled)
+}
+
+pub async fn reconcile_stale_workflow_runs(pool: &SqlitePool) -> Result<usize> {
+    let stale_run_rows = sqlx::query_as::<_, (i64,)>(
+        r#"SELECT id
+       FROM workflow_runs
+       WHERE status IN ('running', 'cancelling')
+       ORDER BY id ASC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    if stale_run_rows.is_empty() {
+        return Ok(0);
+    }
+
+    let stale_summary = "reconciled stale in-flight run after process restart";
+    let now = now_rfc3339();
+    for (run_id,) in &stale_run_rows {
+        let mut tx = pool.begin().await?;
+
+        sqlx::query(
+            r#"UPDATE workflow_run_steps
+           SET status = 'cancelled',
+               summary_message = CASE
+                   WHEN trim(summary_message) = '' THEN ?1
+                   ELSE summary_message || '; ' || ?1
+               END,
+               finished_at = COALESCE(finished_at, ?2),
+               updated_at = ?3
+           WHERE status IN ('pending', 'running')
+             AND workflow_run_project_id IN (
+               SELECT id FROM workflow_run_projects WHERE workflow_run_id = ?4
+             )"#,
+        )
+        .bind(stale_summary)
+        .bind(&now)
+        .bind(&now)
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"UPDATE workflow_run_projects
+           SET status = 'cancelled',
+               summary_message = CASE
+                   WHEN trim(summary_message) = '' THEN ?1
+                   ELSE summary_message || '; ' || ?1
+               END,
+               finished_at = COALESCE(finished_at, ?2),
+               updated_at = ?3
+           WHERE workflow_run_id = ?4
+             AND status IN ('queued', 'running')"#,
+        )
+        .bind(stale_summary)
+        .bind(&now)
+        .bind(&now)
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let (project_total, project_success, project_failures, project_cancelled, project_non_terminal) =
+            sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+                r#"SELECT
+               COUNT(*) as project_total,
+               COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) as project_success,
+               COALESCE(SUM(CASE WHEN status IN ('failed', 'failed_precheck') THEN 1 ELSE 0 END), 0) as project_failures,
+               COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0) as project_cancelled,
+               COALESCE(SUM(CASE WHEN status IN ('queued', 'running') THEN 1 ELSE 0 END), 0) as project_non_terminal
+             FROM workflow_run_projects
+             WHERE workflow_run_id = ?1"#,
+            )
+            .bind(run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        let final_status = derive_run_final_status_from_project_counts(
+            project_total,
+            project_success,
+            project_failures,
+            project_cancelled,
+            project_non_terminal,
+        );
+
+        sqlx::query(
+            r#"UPDATE workflow_runs
+           SET status = ?1,
+               finished_at = COALESCE(finished_at, ?2),
+               updated_at = ?3
+           WHERE id = ?4
+             AND status IN ('running', 'cancelling')"#,
+        )
+        .bind(final_status)
+        .bind(&now)
+        .bind(&now)
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        tracing::warn!(
+            workflow_run_id = run_id,
+            final_status = final_status,
+            "reconciled stale in-flight workflow run"
+        );
+    }
+
+    Ok(stale_run_rows.len())
 }
 
 async fn mark_project_running(pool: &SqlitePool, run_project_id: i64) -> Result<()> {
@@ -668,6 +866,46 @@ async fn mark_remaining_steps_skipped(
     Ok(())
 }
 
+async fn mark_remaining_steps_cancelled(
+    pool: &SqlitePool,
+    steps: &[ProjectExecutionStep],
+    from_index: usize,
+    summary_message: &str,
+) -> Result<()> {
+    for step in steps.iter().skip(from_index) {
+        let status = load_step_status(pool, step.run_step_id).await?;
+        if status == "pending" || status == "running" {
+            mark_step_finished(
+                pool,
+                step.run_step_id,
+                "cancelled",
+                "",
+                "",
+                None,
+                summary_message,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn maybe_cancel_project(
+    pool: &SqlitePool,
+    workflow_run_id: i64,
+    plan: &ProjectExecutionPlan,
+    from_step_index: usize,
+    summary_message: &str,
+) -> Result<bool> {
+    if !is_workflow_run_cancelling(pool, workflow_run_id).await? {
+        return Ok(false);
+    }
+
+    mark_remaining_steps_cancelled(pool, &plan.steps, from_step_index, summary_message).await?;
+    mark_project_finished(pool, plan.run_project_id, "cancelled", summary_message).await?;
+    Ok(true)
+}
+
 async fn mark_project_internal_failure(
     pool: &SqlitePool,
     plan: &ProjectExecutionPlan,
@@ -702,11 +940,39 @@ async fn mark_project_internal_failure(
 
 async fn execute_project_plan(
     pool: &SqlitePool,
+    workflow_run_id: i64,
     plan: &ProjectExecutionPlan,
 ) -> Result<ProjectOutcome> {
+    let repo_lease = get_repo_lease(&plan.project.repo_path).await;
+    let _repo_guard = repo_lease.lock().await;
+
+    if maybe_cancel_project(
+        pool,
+        workflow_run_id,
+        plan,
+        0,
+        "cancelled before project execution",
+    )
+    .await?
+    {
+        return Ok(ProjectOutcome::Cancelled);
+    }
+
     mark_project_running(pool, plan.run_project_id).await?;
 
     if let Err(error) = run_repo_precheck(&plan.project).await {
+        if maybe_cancel_project(
+            pool,
+            workflow_run_id,
+            plan,
+            0,
+            "cancelled during repository precheck",
+        )
+        .await?
+        {
+            return Ok(ProjectOutcome::Cancelled);
+        }
+
         let summary = format!("repo precheck failed: {error}");
         if let Some(first_step) = plan.steps.first() {
             mark_step_running(pool, first_step.run_step_id).await?;
@@ -727,8 +993,44 @@ async fn execute_project_plan(
         return Ok(ProjectOutcome::FailedPrecheck);
     }
 
+    if maybe_cancel_project(
+        pool,
+        workflow_run_id,
+        plan,
+        0,
+        "cancelled before step execution",
+    )
+    .await?
+    {
+        return Ok(ProjectOutcome::Cancelled);
+    }
+
     for (step_index, step) in plan.steps.iter().enumerate() {
+        if maybe_cancel_project(
+            pool,
+            workflow_run_id,
+            plan,
+            step_index,
+            "cancelled before step execution",
+        )
+        .await?
+        {
+            return Ok(ProjectOutcome::Cancelled);
+        }
+
         mark_step_running(pool, step.run_step_id).await?;
+
+        if maybe_cancel_project(
+            pool,
+            workflow_run_id,
+            plan,
+            step_index,
+            "cancelled before step execution",
+        )
+        .await?
+        {
+            return Ok(ProjectOutcome::Cancelled);
+        }
 
         let operation = match build_step_operation(step, &plan.project) {
             Ok(operation) => operation,
@@ -750,6 +1052,18 @@ async fn execute_project_plan(
         };
 
         if let Err(error) = run_step_prechecks(&plan.project, &operation).await {
+            if maybe_cancel_project(
+                pool,
+                workflow_run_id,
+                plan,
+                step_index,
+                "cancelled during step precheck",
+            )
+            .await?
+            {
+                return Ok(ProjectOutcome::Cancelled);
+            }
+
             let summary = format!("step precheck failed: {error}");
             mark_step_finished(pool, step.run_step_id, "failed", "", "", None, &summary).await?;
             mark_remaining_steps_skipped(
@@ -763,7 +1077,20 @@ async fn execute_project_plan(
             return Ok(ProjectOutcome::FailedPrecheck);
         }
 
+        if maybe_cancel_project(
+            pool,
+            workflow_run_id,
+            plan,
+            step_index,
+            "cancelled before step execution",
+        )
+        .await?
+        {
+            return Ok(ProjectOutcome::Cancelled);
+        }
+
         let command_result = run_git(plan.project.repo_path.clone(), operation.to_args()).await?;
+
         if command_result.success {
             mark_step_finished(
                 pool,
@@ -775,6 +1102,20 @@ async fn execute_project_plan(
                 "step completed",
             )
             .await?;
+
+            if step_index + 1 < plan.steps.len() {
+                if maybe_cancel_project(
+                    pool,
+                    workflow_run_id,
+                    plan,
+                    step_index + 1,
+                    "cancelled after safe execution boundary",
+                )
+                .await?
+                {
+                    return Ok(ProjectOutcome::Cancelled);
+                }
+            }
         } else {
             let summary = format!("git command failed at step {}", step.step_type);
             mark_step_finished(
@@ -822,6 +1163,46 @@ fn render_steps_for_run(
     Ok(rendered_steps)
 }
 
+async fn mark_unscheduled_plans_cancelled(
+    pool: &SqlitePool,
+    plans: &[ProjectExecutionPlan],
+    from_index: usize,
+) -> Result<usize> {
+    let mut marked = 0usize;
+    for plan in plans.iter().skip(from_index) {
+        mark_remaining_steps_cancelled(
+            pool,
+            &plan.steps,
+            0,
+            "cancelled before project scheduling",
+        )
+        .await?;
+        mark_project_finished(
+            pool,
+            plan.run_project_id,
+            "cancelled",
+            "cancelled before project scheduling",
+        )
+        .await?;
+        marked += 1;
+    }
+    Ok(marked)
+}
+
+async fn stop_scheduling_and_cancel_unscheduled(
+    pool: &SqlitePool,
+    plans: &[ProjectExecutionPlan],
+    next_plan_index: &mut usize,
+) -> Result<bool> {
+    if *next_plan_index >= plans.len() {
+        return Ok(false);
+    }
+
+    let cancelled_count = mark_unscheduled_plans_cancelled(pool, plans, *next_plan_index).await?;
+    *next_plan_index = plans.len();
+    Ok(cancelled_count > 0)
+}
+
 async fn run_workflow_in_background(
     pool: SqlitePool,
     workflow_run_id: i64,
@@ -833,65 +1214,169 @@ async fn run_workflow_in_background(
         return Ok(());
     }
 
-    let semaphore = Arc::new(Semaphore::new(
-        usize::try_from(max_concurrency)
-            .map_err(|_| anyhow!("max_concurrency is out of range: {max_concurrency}"))?,
-    ));
-    let mut handles = Vec::with_capacity(plans.len());
-    for plan in plans {
-        let permit = semaphore.clone().acquire_owned().await?;
-        let pool_cloned = pool.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = permit;
-            match execute_project_plan(&pool_cloned, &plan).await {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    let message = format!("executor internal error: {error}");
-                    let _ = mark_project_internal_failure(&pool_cloned, &plan, &message).await;
-                    ProjectOutcome::Failed
-                }
-            }
-        }));
-    }
+    let max_concurrency_usize = usize::try_from(max_concurrency)
+        .map_err(|_| anyhow!("max_concurrency is out of range: {max_concurrency}"))?;
+    let mut join_set = JoinSet::new();
+    let mut next_plan_index = 0usize;
+    let mut cancellation_observed = false;
 
     let mut has_failures = false;
-    for handle in handles {
-        match handle.await {
-            Ok(ProjectOutcome::Success) => {}
-            Ok(ProjectOutcome::Failed | ProjectOutcome::FailedPrecheck) => {
-                has_failures = true;
+    let mut has_cancelled = false;
+
+    loop {
+        if !cancellation_observed {
+            match is_workflow_run_cancelling(&pool, workflow_run_id).await {
+                Ok(true) => {
+                    cancellation_observed = true;
+                    if stop_scheduling_and_cancel_unscheduled(
+                        &pool,
+                        &plans,
+                        &mut next_plan_index,
+                    )
+                    .await?
+                    {
+                        has_cancelled = true;
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(
+                        workflow_run_id = workflow_run_id,
+                        error = %error,
+                        "failed to read workflow run cancellation status; stopping scheduler to avoid queuing additional projects"
+                    );
+                    cancellation_observed = true;
+                    has_failures = true;
+                    if stop_scheduling_and_cancel_unscheduled(
+                        &pool,
+                        &plans,
+                        &mut next_plan_index,
+                    )
+                    .await?
+                    {
+                        has_cancelled = true;
+                    }
+                }
             }
-            Err(error) => {
-                tracing::error!(error = %error, "workflow project task join failed");
-                has_failures = true;
+        }
+
+        while !cancellation_observed
+            && join_set.len() < max_concurrency_usize
+            && next_plan_index < plans.len()
+        {
+            let plan = plans[next_plan_index].clone();
+            next_plan_index += 1;
+
+            let pool_cloned = pool.clone();
+            join_set.spawn(async move {
+                match execute_project_plan(&pool_cloned, workflow_run_id, &plan).await {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let message = format!("executor internal error: {error}");
+                        let _ = mark_project_internal_failure(&pool_cloned, &plan, &message).await;
+                        ProjectOutcome::Failed
+                    }
+                }
+            });
+        }
+
+        if join_set.is_empty() && (next_plan_index >= plans.len() || cancellation_observed) {
+            break;
+        }
+
+        if let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok(ProjectOutcome::Success) => {}
+                Ok(ProjectOutcome::Failed | ProjectOutcome::FailedPrecheck) => {
+                    has_failures = true;
+                }
+                Ok(ProjectOutcome::Cancelled) => {
+                    has_cancelled = true;
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "workflow project task join failed");
+                    has_failures = true;
+                }
             }
         }
     }
 
-    mark_workflow_run_finished(
-        &pool,
-        workflow_run_id,
-        if has_failures {
-            "partial_failed"
-        } else {
-            "completed"
-        },
-    )
-    .await?;
+    let final_status = derive_run_final_status(has_failures, has_cancelled);
+
+    mark_workflow_run_finished(&pool, workflow_run_id, final_status).await?;
     Ok(())
 }
 
-pub async fn execute_workflow_run(
+async fn load_retry_source_run(pool: &SqlitePool, source_workflow_run_id: i64) -> Result<RetrySourceRun> {
+    let (workflow_definition_id, project_group_id, status, run_parameters_json) =
+        sqlx::query_as::<_, (i64, i64, String, String)>(
+            r#"SELECT workflow_definition_id, project_group_id, status, run_parameters_json
+           FROM workflow_runs
+           WHERE id = ?1"#,
+        )
+        .bind(source_workflow_run_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| anyhow!("workflow run not found: {source_workflow_run_id}"))?;
+
+    if status == "pending" || status == "running" || status == "cancelling" {
+        return Err(anyhow!(
+            "workflow run is not in terminal status for retry: {source_workflow_run_id}, status={status}"
+        ));
+    }
+
+    let parsed_run_parameters =
+        serde_json::from_str::<Value>(&run_parameters_json).context("parse source run parameters")?;
+    let run_parameters = normalize_run_parameters(parsed_run_parameters)?;
+
+    Ok(RetrySourceRun {
+        workflow_definition_id,
+        project_group_id,
+        run_parameters,
+    })
+}
+
+async fn load_failed_project_ids_for_retry(
+    pool: &SqlitePool,
+    source_workflow_run_id: i64,
+) -> Result<Vec<i64>> {
+    let rows = sqlx::query_as::<_, (Option<i64>,)>(
+        r#"SELECT managed_project_id
+       FROM workflow_run_projects
+       WHERE workflow_run_id = ?1
+         AND status IN ('failed', 'failed_precheck')
+       ORDER BY id ASC"#,
+    )
+    .bind(source_workflow_run_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut seen = HashSet::<i64>::new();
+    let mut failed_project_ids = Vec::new();
+    for row in rows {
+        if let Some(managed_project_id) = row.0 {
+            if seen.insert(managed_project_id) {
+                failed_project_ids.push(managed_project_id);
+            }
+        }
+    }
+
+    Ok(failed_project_ids)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_workflow_run_with_projects(
     pool: &SqlitePool,
     workflow_definition_id: i64,
     project_group_id: i64,
     run_parameters: Value,
     max_concurrency_override: Option<i64>,
+    source_workflow_run_id: Option<i64>,
+    trigger_kind: &str,
+    projects: Vec<ManagedProject>,
 ) -> Result<i64> {
     let run_parameters = normalize_run_parameters(run_parameters)?;
     let workflow = db::load_workflow_definition_for_execution(pool, workflow_definition_id).await?;
-    let mut projects = db::list_project_group_projects(pool, project_group_id).await?;
-    projects.retain(|project| project.enabled);
 
     let max_concurrency = match max_concurrency_override {
         Some(value) if value >= 1 => value,
@@ -911,6 +1396,8 @@ pub async fn execute_workflow_run(
         pool,
         workflow.id,
         project_group_id,
+        source_workflow_run_id,
+        trigger_kind,
         &run_parameters,
         max_concurrency,
         projects,
@@ -942,11 +1429,170 @@ pub async fn execute_workflow_run(
     Ok(workflow_run_id)
 }
 
+pub async fn execute_workflow_run(
+    pool: &SqlitePool,
+    workflow_definition_id: i64,
+    project_group_id: i64,
+    run_parameters: Value,
+    max_concurrency_override: Option<i64>,
+) -> Result<i64> {
+    let mut projects = db::list_project_group_projects(pool, project_group_id).await?;
+    projects.retain(|project| project.enabled);
+
+    start_workflow_run_with_projects(
+        pool,
+        workflow_definition_id,
+        project_group_id,
+        run_parameters,
+        max_concurrency_override,
+        None,
+        "manual",
+        projects,
+    )
+    .await
+}
+
+pub async fn cancel_workflow_run(pool: &SqlitePool, workflow_run_id: i64) -> Result<()> {
+    let now = now_rfc3339();
+    let res = sqlx::query(
+        r#"UPDATE workflow_runs
+       SET status = 'cancelling',
+           updated_at = ?1
+       WHERE id = ?2 AND status IN ('running', 'pending')"#,
+    )
+    .bind(&now)
+    .bind(workflow_run_id)
+    .execute(pool)
+    .await?;
+
+    if res.rows_affected() > 0 {
+        return Ok(());
+    }
+
+    let status = sqlx::query_scalar::<_, String>(r#"SELECT status FROM workflow_runs WHERE id = ?1"#)
+        .bind(workflow_run_id)
+        .fetch_optional(pool)
+        .await?;
+
+    match status.as_deref() {
+        Some("cancelling") | Some("cancelled") => Ok(()),
+        Some("completed") | Some("partial_failed") => {
+            Err(anyhow!("workflow run already finished: {workflow_run_id}"))
+        }
+        Some(current) => Err(anyhow!(
+            "workflow run is not cancellable: {workflow_run_id}, status={current}"
+        )),
+        None => Err(anyhow!("workflow run not found: {workflow_run_id}")),
+    }
+}
+
+pub async fn retry_failed_workflow_run(
+    pool: &SqlitePool,
+    source_workflow_run_id: i64,
+    selected_managed_project_ids: Option<Vec<i64>>,
+    max_concurrency_override: Option<i64>,
+) -> Result<i64> {
+    // Intentional v1 semantics: retry uses the source run's parameters, but resolves
+    // workflow definition and managed project records from current database state.
+    tracing::info!(
+        source_workflow_run_id = source_workflow_run_id,
+        selected_managed_project_ids = ?selected_managed_project_ids,
+        "retry_failed_workflow_run uses current workflow/project state with source run parameters"
+    );
+
+    let source_run = load_retry_source_run(pool, source_workflow_run_id).await?;
+    let failed_project_ids =
+        load_failed_project_ids_for_retry(pool, source_workflow_run_id).await?;
+    if failed_project_ids.is_empty() {
+        return Err(anyhow!(
+            "workflow run has no failed projects to retry: {source_workflow_run_id}"
+        ));
+    }
+
+    let retry_project_ids = match selected_managed_project_ids {
+        Some(selected_ids) if !selected_ids.is_empty() => {
+            let eligible_failed = failed_project_ids.iter().copied().collect::<HashSet<_>>();
+            let mut seen = HashSet::new();
+            let mut selected_failed = Vec::new();
+            for selected_id in selected_ids {
+                if eligible_failed.contains(&selected_id) && seen.insert(selected_id) {
+                    selected_failed.push(selected_id);
+                }
+            }
+
+            if selected_failed.is_empty() {
+                return Err(anyhow!(
+                    "none of selected managed project IDs are eligible failed projects"
+                ));
+            }
+            selected_failed
+        }
+        _ => failed_project_ids,
+    };
+
+    let mut managed_projects_by_id = db::list_managed_projects(pool)
+        .await?
+        .into_iter()
+        .map(|project| (project.id, project))
+        .collect::<HashMap<_, _>>();
+
+    let mut missing_project_ids = Vec::new();
+    let mut disabled_project_ids = Vec::new();
+    let mut retry_projects = Vec::with_capacity(retry_project_ids.len());
+    for retry_project_id in retry_project_ids {
+        if let Some(project) = managed_projects_by_id.remove(&retry_project_id) {
+            if project.enabled {
+                retry_projects.push(project);
+            } else {
+                disabled_project_ids.push(retry_project_id);
+            }
+        } else {
+            missing_project_ids.push(retry_project_id);
+        }
+    }
+
+    if !missing_project_ids.is_empty() {
+        let missing = missing_project_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(anyhow!(
+            "failed managed projects no longer exist for retry: {missing}"
+        ));
+    }
+
+    if !disabled_project_ids.is_empty() {
+        let disabled = disabled_project_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(anyhow!(
+            "failed managed projects are currently disabled and cannot be retried: {disabled}"
+        ));
+    }
+
+    start_workflow_run_with_projects(
+        pool,
+        source_run.workflow_definition_id,
+        source_run.project_group_id,
+        source_run.run_parameters,
+        max_concurrency_override,
+        Some(source_workflow_run_id),
+        "retry_failed",
+        retry_projects,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_workflow_run, mark_project_internal_failure, ProjectExecutionPlan,
-        ProjectExecutionStep,
+        cancel_workflow_run, derive_run_final_status, derive_run_final_status_from_project_counts,
+        execute_workflow_run, execute_project_plan, mark_project_internal_failure,
+        reconcile_stale_workflow_runs, retry_failed_workflow_run, ProjectExecutionPlan,
+        ProjectExecutionStep, ProjectOutcome,
     };
     use crate::db;
     use crate::models::WorkflowStepInput;
@@ -954,6 +1600,10 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::str::FromStr;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     use tokio::time::{sleep, Duration};
 
     static MIGRATOR: Migrator = sqlx::migrate!();
@@ -1196,6 +1846,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_executor_treats_precheck_error_as_cancelled_when_run_is_cancelling() {
+        let pool = setup_test_pool().await;
+        let repo = setup_git_repo();
+        std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+        let managed = db::create_managed_project(
+            &pool,
+            70004,
+            "project-dirty-cancelling".to_string(),
+            "team/project-dirty-cancelling".to_string(),
+            repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+        let group = db::create_project_group(&pool, "group-dirty-cancelling".to_string())
+            .await
+            .expect("create project group");
+        db::add_projects_to_group(&pool, group.id, vec![managed.id])
+            .await
+            .expect("add project to group");
+
+        let workflow = db::create_workflow_definition(
+            &pool,
+            "precheck-cancel-flow".to_string(),
+            "test".to_string(),
+            true,
+            serde_json::json!({}),
+            1,
+            vec![WorkflowStepInput {
+                step_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+        )
+        .await
+        .expect("create workflow definition");
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let run_id = sqlx::query(
+            r#"INSERT INTO workflow_runs (
+             workflow_definition_id, project_group_id, source_workflow_run_id, trigger_kind,
+             status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)"#,
+        )
+        .bind(workflow.id)
+        .bind(group.id)
+        .bind("manual")
+        .bind("running")
+        .bind("{}")
+        .bind(1_i64)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert workflow run")
+        .last_insert_rowid();
+
+        let run_project_id = sqlx::query(
+            r#"INSERT INTO workflow_run_projects (
+             workflow_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path,
+             status, summary_message, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', NULL, NULL, ?8, ?9)"#,
+        )
+        .bind(run_id)
+        .bind(managed.id)
+        .bind(i64::try_from(managed.gitlab_project_id).expect("convert project id"))
+        .bind(&managed.name)
+        .bind(&managed.path_with_namespace)
+        .bind(&managed.repo_path)
+        .bind("queued")
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert workflow run project")
+        .last_insert_rowid();
+
+        let run_step_id = sqlx::query(
+            r#"INSERT INTO workflow_run_steps (
+             workflow_run_project_id, workflow_step_id, step_order, step_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, '', '', NULL, '', ?7, ?8)"#,
+        )
+        .bind(run_project_id)
+        .bind(Option::<i64>::None)
+        .bind(0_i64)
+        .bind("checkout_branch")
+        .bind(r#"{"branch":"main"}"#)
+        .bind("pending")
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert workflow run step")
+        .last_insert_rowid();
+
+        let cancel_pool = pool.clone();
+        let cancellation_updater = tokio::spawn(async move {
+            for _ in 0..40_u32 {
+                let _ = sqlx::query(
+                    r#"UPDATE workflow_runs SET status = 'cancelling', updated_at = ?1 WHERE id = ?2"#,
+                )
+                .bind(chrono::Utc::now().to_rfc3339())
+                .bind(run_id)
+                .execute(&cancel_pool)
+                .await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let plan = ProjectExecutionPlan {
+            run_project_id,
+            project: managed.clone(),
+            steps: vec![ProjectExecutionStep {
+                run_step_id,
+                step_type: "checkout_branch".to_string(),
+                rendered_parameters: serde_json::json!({ "branch": "main" }),
+            }],
+        };
+
+        let outcome = execute_project_plan(&pool, run_id, &plan)
+            .await
+            .expect("execute project plan");
+        cancellation_updater.await.expect("wait cancellation updater");
+        assert_eq!(outcome, ProjectOutcome::Cancelled);
+
+        let detail = db::get_workflow_run_detail(&pool, run_id)
+            .await
+            .expect("load run detail");
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "cancelled");
+        assert_eq!(detail.projects[0].steps.len(), 1);
+        assert_eq!(detail.projects[0].steps[0].status, "cancelled");
+    }
+
+    #[tokio::test]
     async fn internal_failure_fallback_preserves_finished_steps() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
@@ -1382,4 +2171,634 @@ mod tests {
             .contains("synthetic failure"));
         assert_eq!(detail.projects[0].steps[2].status, "skipped");
     }
+
+    #[tokio::test]
+    async fn workflow_executor_supports_cooperative_cancellation() {
+        let pool = setup_test_pool().await;
+        let repo = setup_git_repo();
+
+        let group = db::create_project_group(&pool, "group-cancel".to_string())
+            .await
+            .expect("create project group");
+
+        let mut managed_project_ids = Vec::new();
+        for idx in 0_u64..24_u64 {
+            let project = db::create_managed_project(
+                &pool,
+                72000 + idx,
+                format!("project-cancel-{idx}"),
+                format!("team/project-cancel-{idx}"),
+                repo.to_string_lossy().to_string(),
+                Some("main".to_string()),
+                Some("origin".to_string()),
+                true,
+            )
+            .await
+            .expect("create managed project for cancellation");
+            managed_project_ids.push(project.id);
+        }
+
+        db::add_projects_to_group(&pool, group.id, managed_project_ids)
+            .await
+            .expect("add projects to group");
+
+        let steps = (0..8)
+            .map(|_| WorkflowStepInput {
+                step_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            })
+            .collect::<Vec<_>>();
+
+        let workflow = db::create_workflow_definition(
+            &pool,
+            "cancel-flow".to_string(),
+            "test cancellation".to_string(),
+            true,
+            serde_json::json!({}),
+            1,
+            steps,
+        )
+        .await
+        .expect("create workflow definition");
+
+        let run_id = execute_workflow_run(&pool, workflow.id, group.id, serde_json::json!({}), Some(1))
+            .await
+            .expect("execute workflow run");
+
+        cancel_workflow_run(&pool, run_id)
+            .await
+            .expect("request cancellation");
+
+        let detail = wait_for_terminal_run_status(&pool, run_id, 30_000).await;
+        assert_eq!(detail.status, "cancelled");
+        assert!(detail.projects.iter().any(|project| project.status == "cancelled"));
+        assert!(detail
+            .projects
+            .iter()
+            .all(|project| project.status != "queued" && project.status != "running"));
+
+        let unscheduled_cancelled = detail
+            .projects
+            .iter()
+            .filter(|project| project.status == "cancelled" && project.started_at.is_none())
+            .collect::<Vec<_>>();
+        assert!(
+            !unscheduled_cancelled.is_empty(),
+            "expected at least one unscheduled project to be cancelled after cancellation"
+        );
+        assert!(unscheduled_cancelled
+            .iter()
+            .all(|project| project.steps.iter().all(|step| step.status == "cancelled")));
+        assert!(detail.projects.iter().all(|project| project.steps.iter().all(|step| {
+            !step
+                .summary_message
+                .contains("step cancelled while command was running")
+        })));
+    }
+
+    #[tokio::test]
+    async fn retry_failed_workflow_run_creates_new_run_with_failed_projects_only() {
+        let pool = setup_test_pool().await;
+        let clean_repo = setup_git_repo();
+        let dirty_repo = setup_git_repo();
+        std::fs::write(dirty_repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+        let clean_project = db::create_managed_project(
+            &pool,
+            73001,
+            "project-clean".to_string(),
+            "team/project-clean".to_string(),
+            clean_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create clean project");
+        let dirty_project = db::create_managed_project(
+            &pool,
+            73002,
+            "project-dirty".to_string(),
+            "team/project-dirty".to_string(),
+            dirty_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create dirty project");
+
+        let group = db::create_project_group(&pool, "group-retry".to_string())
+            .await
+            .expect("create retry project group");
+        db::add_projects_to_group(&pool, group.id, vec![clean_project.id, dirty_project.id])
+            .await
+            .expect("add projects to retry group");
+
+        let workflow = db::create_workflow_definition(
+            &pool,
+            "retry-flow".to_string(),
+            "test retry failed projects".to_string(),
+            true,
+            serde_json::json!({
+                "target_branch": {"type": "string"}
+            }),
+            1,
+            vec![WorkflowStepInput {
+                step_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "${target_branch}" }),
+            }],
+        )
+        .await
+        .expect("create workflow definition");
+
+        let source_run_id = execute_workflow_run(
+            &pool,
+            workflow.id,
+            group.id,
+            serde_json::json!({
+                "target_branch": "main"
+            }),
+            Some(1),
+        )
+        .await
+        .expect("execute source workflow run");
+
+        let source_detail = wait_for_terminal_run_status(&pool, source_run_id, 15_000).await;
+        assert_eq!(source_detail.status, "partial_failed");
+        let failed_project_ids = source_detail
+            .projects
+            .iter()
+            .filter(|project| project.status == "failed" || project.status == "failed_precheck")
+            .map(|project| project.managed_project_id.expect("failed project id"))
+            .collect::<Vec<_>>();
+        assert_eq!(failed_project_ids, vec![dirty_project.id]);
+
+        let retry_run_id = retry_failed_workflow_run(
+            &pool,
+            source_run_id,
+            Some(vec![dirty_project.id, clean_project.id]),
+            Some(1),
+        )
+            .await
+            .expect("retry failed workflow run");
+
+        let retry_seeded = db::get_workflow_run_detail(&pool, retry_run_id)
+            .await
+            .expect("load retry seeded detail");
+        assert_eq!(retry_seeded.source_workflow_run_id, Some(source_run_id));
+        assert_eq!(retry_seeded.trigger_kind, "retry_failed");
+        assert_eq!(retry_seeded.projects_total, 1);
+        assert_eq!(retry_seeded.projects.len(), 1);
+        assert_eq!(
+            retry_seeded.projects[0].managed_project_id,
+            Some(dirty_project.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_failed_workflow_run_retries_all_failed_when_selection_empty() {
+        let pool = setup_test_pool().await;
+        let clean_repo = setup_git_repo();
+        let dirty_repo_a = setup_git_repo();
+        std::fs::write(dirty_repo_a.join("dirty-a.txt"), "dirty\n").expect("write dirty file a");
+        let dirty_repo_b = setup_git_repo();
+        std::fs::write(dirty_repo_b.join("dirty-b.txt"), "dirty\n").expect("write dirty file b");
+
+        let clean_project = db::create_managed_project(
+            &pool,
+            73101,
+            "project-clean-all".to_string(),
+            "team/project-clean-all".to_string(),
+            clean_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create clean project");
+        let dirty_project_a = db::create_managed_project(
+            &pool,
+            73102,
+            "project-dirty-a".to_string(),
+            "team/project-dirty-a".to_string(),
+            dirty_repo_a.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create dirty project a");
+        let dirty_project_b = db::create_managed_project(
+            &pool,
+            73103,
+            "project-dirty-b".to_string(),
+            "team/project-dirty-b".to_string(),
+            dirty_repo_b.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create dirty project b");
+
+        let group = db::create_project_group(&pool, "group-retry-all-failed".to_string())
+            .await
+            .expect("create retry-all project group");
+        db::add_projects_to_group(
+            &pool,
+            group.id,
+            vec![clean_project.id, dirty_project_a.id, dirty_project_b.id],
+        )
+        .await
+        .expect("add projects to retry-all group");
+
+        let workflow = db::create_workflow_definition(
+            &pool,
+            "retry-flow-all-failed".to_string(),
+            "test retry all failed projects".to_string(),
+            true,
+            serde_json::json!({
+                "target_branch": {"type": "string"}
+            }),
+            1,
+            vec![WorkflowStepInput {
+                step_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "${target_branch}" }),
+            }],
+        )
+        .await
+        .expect("create workflow definition");
+
+        let source_run_id = execute_workflow_run(
+            &pool,
+            workflow.id,
+            group.id,
+            serde_json::json!({
+                "target_branch": "main"
+            }),
+            Some(1),
+        )
+        .await
+        .expect("execute source workflow run");
+
+        let source_detail = wait_for_terminal_run_status(&pool, source_run_id, 15_000).await;
+        assert_eq!(source_detail.status, "partial_failed");
+
+        let retry_run_id = retry_failed_workflow_run(&pool, source_run_id, Some(vec![]), Some(1))
+            .await
+            .expect("retry all failed workflow run");
+
+        let retry_seeded = db::get_workflow_run_detail(&pool, retry_run_id)
+            .await
+            .expect("load retry-all seeded detail");
+        assert_eq!(retry_seeded.projects_total, 2);
+        let retried_ids = retry_seeded
+            .projects
+            .iter()
+            .map(|project| project.managed_project_id.expect("retry project id"))
+            .collect::<Vec<_>>();
+        assert_eq!(retried_ids, vec![dirty_project_a.id, dirty_project_b.id]);
+    }
+
+    #[tokio::test]
+    async fn retry_failed_workflow_run_errors_when_selected_projects_not_failed() {
+        let pool = setup_test_pool().await;
+        let clean_repo = setup_git_repo();
+        let dirty_repo = setup_git_repo();
+        std::fs::write(dirty_repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+        let clean_project = db::create_managed_project(
+            &pool,
+            73201,
+            "project-clean-not-failed".to_string(),
+            "team/project-clean-not-failed".to_string(),
+            clean_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create clean project");
+        let dirty_project = db::create_managed_project(
+            &pool,
+            73202,
+            "project-dirty-failed".to_string(),
+            "team/project-dirty-failed".to_string(),
+            dirty_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create dirty project");
+
+        let group = db::create_project_group(&pool, "group-retry-selected-error".to_string())
+            .await
+            .expect("create retry selected-error project group");
+        db::add_projects_to_group(&pool, group.id, vec![clean_project.id, dirty_project.id])
+            .await
+            .expect("add projects to retry selected-error group");
+
+        let workflow = db::create_workflow_definition(
+            &pool,
+            "retry-flow-selected-error".to_string(),
+            "test retry selected failed projects".to_string(),
+            true,
+            serde_json::json!({
+                "target_branch": {"type": "string"}
+            }),
+            1,
+            vec![WorkflowStepInput {
+                step_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "${target_branch}" }),
+            }],
+        )
+        .await
+        .expect("create workflow definition");
+
+        let source_run_id = execute_workflow_run(
+            &pool,
+            workflow.id,
+            group.id,
+            serde_json::json!({
+                "target_branch": "main"
+            }),
+            Some(1),
+        )
+        .await
+        .expect("execute source workflow run");
+
+        let source_detail = wait_for_terminal_run_status(&pool, source_run_id, 15_000).await;
+        assert_eq!(source_detail.status, "partial_failed");
+
+        let retry_result = retry_failed_workflow_run(
+            &pool,
+            source_run_id,
+            Some(vec![clean_project.id]),
+            Some(1),
+        )
+        .await;
+        assert!(retry_result.is_err());
+        assert!(retry_result
+            .expect_err("retry should fail when no selected IDs are eligible")
+            .to_string()
+            .contains("none of selected managed project IDs are eligible failed projects"));
+    }
+
+    #[tokio::test]
+    async fn retry_failed_workflow_run_errors_when_failed_project_is_now_disabled() {
+        let pool = setup_test_pool().await;
+        let dirty_repo = setup_git_repo();
+        std::fs::write(dirty_repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+        let dirty_project = db::create_managed_project(
+            &pool,
+            73251,
+            "project-dirty-disabled".to_string(),
+            "team/project-dirty-disabled".to_string(),
+            dirty_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create dirty project");
+
+        let group = db::create_project_group(&pool, "group-retry-disabled".to_string())
+            .await
+            .expect("create group");
+        db::add_projects_to_group(&pool, group.id, vec![dirty_project.id])
+            .await
+            .expect("add project to group");
+
+        let workflow = db::create_workflow_definition(
+            &pool,
+            "retry-flow-disabled".to_string(),
+            "test retry disabled failed project".to_string(),
+            true,
+            serde_json::json!({
+                "target_branch": {"type": "string"}
+            }),
+            1,
+            vec![WorkflowStepInput {
+                step_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "${target_branch}" }),
+            }],
+        )
+        .await
+        .expect("create workflow definition");
+
+        let source_run_id = execute_workflow_run(
+            &pool,
+            workflow.id,
+            group.id,
+            serde_json::json!({
+                "target_branch": "main"
+            }),
+            Some(1),
+        )
+        .await
+        .expect("execute source run");
+
+        let source_detail = wait_for_terminal_run_status(&pool, source_run_id, 15_000).await;
+        assert_eq!(source_detail.status, "partial_failed");
+
+        db::update_managed_project(
+            &pool,
+            dirty_project.id,
+            dirty_project.gitlab_project_id,
+            dirty_project.name.clone(),
+            dirty_project.path_with_namespace.clone(),
+            dirty_project.repo_path.clone(),
+            dirty_project.default_branch.clone(),
+            dirty_project.default_remote.clone(),
+            false,
+        )
+        .await
+        .expect("disable dirty project");
+
+        let retry_result = retry_failed_workflow_run(
+            &pool,
+            source_run_id,
+            Some(vec![dirty_project.id]),
+            Some(1),
+        )
+        .await;
+
+        assert!(retry_result.is_err());
+        assert!(retry_result
+            .expect_err("retry should fail when failed project is disabled")
+            .to_string()
+            .contains("failed managed projects are currently disabled and cannot be retried"));
+    }
+
+    #[test]
+    fn derive_run_final_status_uses_failure_precedence_over_cancellation() {
+        assert_eq!(derive_run_final_status(false, false), "completed");
+        assert_eq!(derive_run_final_status(true, false), "partial_failed");
+        assert_eq!(derive_run_final_status(false, true), "cancelled");
+        assert_eq!(derive_run_final_status(true, true), "partial_failed");
+    }
+
+    #[test]
+    fn derive_run_final_status_from_project_counts_matches_live_logic() {
+        assert_eq!(
+            derive_run_final_status_from_project_counts(0, 0, 0, 0, 0),
+            "cancelled"
+        );
+        assert_eq!(
+            derive_run_final_status_from_project_counts(2, 2, 0, 0, 0),
+            "completed"
+        );
+        assert_eq!(
+            derive_run_final_status_from_project_counts(3, 1, 1, 1, 0),
+            "partial_failed"
+        );
+        assert_eq!(
+            derive_run_final_status_from_project_counts(3, 2, 0, 1, 0),
+            "cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_lease_blocks_concurrent_execution_for_same_repo_path() {
+        let lease_a = super::get_repo_lease(r"D:\Repos\Shared").await;
+        let lease_b = super::get_repo_lease("d:/repos/shared").await;
+        assert!(Arc::ptr_eq(&lease_a, &lease_b));
+
+        let guard = lease_a.lock().await;
+        let second_acquired = Arc::new(AtomicBool::new(false));
+        let second_acquired_task = Arc::clone(&second_acquired);
+        let lease_for_task = Arc::clone(&lease_b);
+        let join = tokio::spawn(async move {
+            let _guard = lease_for_task.lock().await;
+            second_acquired_task.store(true, Ordering::Relaxed);
+        });
+
+        sleep(Duration::from_millis(100)).await;
+        assert!(
+            !second_acquired.load(Ordering::Relaxed),
+            "second lock should block while first guard is held"
+        );
+
+        drop(guard);
+        join.await.expect("wait for second lease task");
+        assert!(second_acquired.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn reconcile_stale_running_workflow_marks_terminal_cancelled_rows() {
+        let pool = setup_test_pool().await;
+        let workflow = db::create_workflow_definition(
+            &pool,
+            "stale-reconcile-flow".to_string(),
+            "test stale run reconciliation".to_string(),
+            true,
+            serde_json::json!({}),
+            1,
+            vec![WorkflowStepInput {
+                step_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+        )
+        .await
+        .expect("create workflow definition");
+        let group = db::create_project_group(&pool, "stale-reconcile-group".to_string())
+            .await
+            .expect("create project group");
+        let managed = db::create_managed_project(
+            &pool,
+            73301,
+            "stale-project".to_string(),
+            "team/stale-project".to_string(),
+            "D:/repos/stale-project".to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let run_id = sqlx::query(
+            r#"INSERT INTO workflow_runs (
+             workflow_definition_id, project_group_id, source_workflow_run_id, trigger_kind,
+             status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)"#,
+        )
+        .bind(workflow.id)
+        .bind(group.id)
+        .bind("manual")
+        .bind("running")
+        .bind("{}")
+        .bind(1_i64)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert stale run")
+        .last_insert_rowid();
+
+        let run_project_id = sqlx::query(
+            r#"INSERT INTO workflow_run_projects (
+             workflow_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path,
+             status, summary_message, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, NULL, ?9, ?10)"#,
+        )
+        .bind(run_id)
+        .bind(managed.id)
+        .bind(i64::try_from(managed.gitlab_project_id).expect("convert project id"))
+        .bind(&managed.name)
+        .bind(&managed.path_with_namespace)
+        .bind(&managed.repo_path)
+        .bind("running")
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert stale run project")
+        .last_insert_rowid();
+
+        sqlx::query(
+            r#"INSERT INTO workflow_run_steps (
+             workflow_run_project_id, workflow_step_id, step_order, step_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
+           ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, NULL, '', '', NULL, '', ?7, ?8)"#,
+        )
+        .bind(run_project_id)
+        .bind(0_i64)
+        .bind("checkout_branch")
+        .bind(r#"{"branch":"main"}"#)
+        .bind("running")
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert stale run step");
+
+        let reconciled_count = reconcile_stale_workflow_runs(&pool)
+            .await
+            .expect("reconcile stale runs");
+        assert_eq!(reconciled_count, 1);
+
+        let detail = db::get_workflow_run_detail(&pool, run_id)
+            .await
+            .expect("load reconciled run detail");
+        assert_eq!(detail.status, "cancelled");
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "cancelled");
+        assert!(detail.projects[0]
+            .summary_message
+            .contains("reconciled stale in-flight run after process restart"));
+        assert_eq!(detail.projects[0].steps.len(), 1);
+        assert_eq!(detail.projects[0].steps[0].status, "cancelled");
+        assert!(detail.projects[0].steps[0]
+            .summary_message
+            .contains("reconciled stale in-flight run after process restart"));
+    }
+
 }

@@ -11,7 +11,10 @@ import type {
   WorkflowDefinitionDetail,
   WorkflowDefinitionListItem,
   WorkflowRunDetail,
+  WorkflowRunExecuteRequest,
+  WorkflowRunExecuteResult,
   WorkflowRunListItem,
+  WorkflowRunRetryFailedRequest,
   WorkflowStepInput,
 } from "@/lib/types";
 import { logger } from "@/lib/logger";
@@ -281,6 +284,33 @@ export async function deleteWorkflowDefinition(id: number) {
 
 export async function listWorkflowRuns() {
   return loggedInvoke<WorkflowRunListItem[]>("list_workflow_runs");
+}
+
+export async function executeWorkflowRun(request: WorkflowRunExecuteRequest) {
+  return loggedInvoke<WorkflowRunExecuteResult>("execute_workflow_run", {
+    request: {
+      workflowDefinitionId: request.workflowDefinitionId,
+      projectGroupId: request.projectGroupId,
+      runParameters: normalizeJsonObject(request.runParameters, "runParameters"),
+      maxConcurrencyOverride: request.maxConcurrencyOverride ?? null,
+    },
+  });
+}
+
+export async function cancelWorkflowRun(workflowRunId: number) {
+  return loggedInvoke<void>("cancel_workflow_run", {
+    workflow_run_id: workflowRunId,
+  });
+}
+
+export async function retryFailedWorkflowRun(request: WorkflowRunRetryFailedRequest) {
+  return loggedInvoke<WorkflowRunExecuteResult>("retry_failed_workflow_run", {
+    request: {
+      sourceWorkflowRunId: request.sourceWorkflowRunId,
+      selectedManagedProjectIds: request.selectedManagedProjectIds ?? null,
+      maxConcurrencyOverride: request.maxConcurrencyOverride ?? null,
+    },
+  });
 }
 
 export async function getWorkflowRunDetail(id: number) {

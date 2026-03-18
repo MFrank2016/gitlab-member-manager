@@ -10,7 +10,8 @@ use crate::models::{
     BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
     ProjectGroup, ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
     WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail,
-    WorkflowRunExecuteRequest, WorkflowRunExecuteResult, WorkflowRunListItem, WorkflowStepInput,
+    WorkflowRunExecuteRequest, WorkflowRunExecuteResult, WorkflowRunListItem,
+    WorkflowRunRetryFailedRequest, WorkflowStepInput,
 };
 use sqlx::SqlitePool;
 use std::sync::Mutex;
@@ -571,6 +572,52 @@ async fn execute_workflow_run(
 }
 
 #[tauri::command]
+async fn cancel_workflow_run(state: State<'_, AppState>, workflow_run_id: i64) -> Result<(), String> {
+    let result = workflows::cancel_workflow_run(&state.db, workflow_run_id)
+        .await
+        .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(_) => tracing::info!(
+            workflow_run_id = workflow_run_id,
+            "cancel_workflow_run success"
+        ),
+        Err(e) => tracing::error!(
+            workflow_run_id = workflow_run_id,
+            error = %e,
+            "cancel_workflow_run failed"
+        ),
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn retry_failed_workflow_run(
+    state: State<'_, AppState>,
+    request: WorkflowRunRetryFailedRequest,
+) -> Result<WorkflowRunExecuteResult, String> {
+    let run_id = workflows::retry_failed_workflow_run(
+        &state.db,
+        request.source_workflow_run_id,
+        request.selected_managed_project_ids,
+        request.max_concurrency_override,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tracing::info!(
+        source_workflow_run_id = request.source_workflow_run_id,
+        workflow_run_id = run_id,
+        "retry_failed_workflow_run success"
+    );
+
+    Ok(WorkflowRunExecuteResult {
+        workflow_run_id: run_id,
+    })
+}
+
+#[tauri::command]
 async fn get_workflow_run_detail(
     state: State<'_, AppState>,
     id: i64,
@@ -963,6 +1010,18 @@ fn main() {
             let db = tauri::async_runtime::block_on(db::init_db(&app.handle()))
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
 
+      match tauri::async_runtime::block_on(workflows::reconcile_stale_workflow_runs(&db)) {
+        Ok(0) => {}
+        Ok(reconciled_count) => tracing::warn!(
+          reconciled_count = reconciled_count,
+          "[setup] reconciled stale in-flight workflow runs on startup"
+        ),
+        Err(e) => tracing::error!(
+          error = %e,
+          "[setup] failed to reconcile stale in-flight workflow runs"
+        ),
+      }
+
       let gitlab = match tauri::async_runtime::block_on(db::get_gitlab_config(&db)) {
         Ok(Some((base_url, token))) => {
           tracing::info!("[setup] loaded GitLab config from database");
@@ -1005,6 +1064,8 @@ fn main() {
       update_workflow_definition,
       delete_workflow_definition,
       execute_workflow_run,
+      cancel_workflow_run,
+      retry_failed_workflow_run,
       list_workflow_runs,
       get_workflow_run_detail,
       sync_project_group_members,

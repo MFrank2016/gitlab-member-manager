@@ -95,6 +95,23 @@ export type WorkflowDefinitionDetail = {
   steps: WorkflowStep[];
 };
 
+export type WorkflowRunExecuteRequest = {
+  workflowDefinitionId: number;
+  projectGroupId: number;
+  runParameters?: Record<string, unknown>;
+  maxConcurrencyOverride?: number | null;
+};
+
+export type WorkflowRunExecuteResult = {
+  workflowRunId: number;
+};
+
+export type WorkflowRunRetryFailedRequest = {
+  sourceWorkflowRunId: number;
+  selectedManagedProjectIds?: number[] | null;
+  maxConcurrencyOverride?: number | null;
+};
+
 export type WorkflowRunStatus =
   | "pending"
   | "running"
