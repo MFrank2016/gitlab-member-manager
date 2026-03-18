@@ -77,7 +77,9 @@ fn normalize_json_object(value: Value, field_name: &str) -> Result<Value> {
 
 fn normalize_workflow_step_inputs(steps: Vec<WorkflowStepInput>) -> Result<Vec<WorkflowStepInput>> {
     if steps.is_empty() {
-        return Err(anyhow!("workflow definition must contain at least one step"));
+        return Err(anyhow!(
+            "workflow definition must contain at least one step"
+        ));
     }
 
     let mut normalized = Vec::with_capacity(steps.len());
@@ -165,6 +167,21 @@ struct WorkflowRunStepRow {
     summary_message: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct WorkflowExecutionStepDef {
+    pub id: i64,
+    pub step_order: i64,
+    pub step_type: String,
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowExecutionDefinition {
+    pub id: i64,
+    pub max_concurrency_default: i64,
+    pub steps: Vec<WorkflowExecutionStepDef>,
+}
+
 async fn insert_workflow_steps(
     tx: &mut Transaction<'_, Sqlite>,
     workflow_definition_id: i64,
@@ -174,8 +191,7 @@ async fn insert_workflow_steps(
     for (index, step) in steps.iter().enumerate() {
         let step_order = i64::try_from(index)
             .map_err(|_| anyhow!("workflow step index out of range: {index}"))?;
-        let parameters_json =
-            serialize_json(&step.parameters, "workflow_steps.parameters_json")?;
+        let parameters_json = serialize_json(&step.parameters, "workflow_steps.parameters_json")?;
 
         sqlx::query(
             r#"INSERT INTO workflow_steps (
@@ -220,6 +236,61 @@ async fn load_workflow_steps(
     }
 
     Ok(steps)
+}
+
+pub async fn load_workflow_definition_for_execution(
+    pool: &SqlitePool,
+    workflow_definition_id: i64,
+) -> Result<WorkflowExecutionDefinition> {
+    let (id, enabled, max_concurrency_default) = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"SELECT
+         id, enabled, max_concurrency_default
+       FROM workflow_definitions
+       WHERE id = ?1"#,
+    )
+    .bind(workflow_definition_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow!("workflow definition not found: {workflow_definition_id}"))?;
+
+    if enabled == 0 {
+        return Err(anyhow!(
+            "workflow definition is disabled: {workflow_definition_id}"
+        ));
+    }
+
+    let rows = sqlx::query_as::<_, (i64, i64, String, String)>(
+        r#"SELECT
+         id, step_order, step_type, parameters_json
+       FROM workflow_steps
+       WHERE workflow_definition_id = ?1
+       ORDER BY step_order ASC, id ASC"#,
+    )
+    .bind(workflow_definition_id)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Err(anyhow!(
+            "workflow definition has no steps: {workflow_definition_id}"
+        ));
+    }
+
+    let mut steps = Vec::with_capacity(rows.len());
+    for row in rows {
+        steps.push(WorkflowExecutionStepDef {
+            id: row.0,
+            step_order: row.1,
+            step_type: row.2,
+            parameters: deserialize_json_object(&row.3, "workflow step parameters")?,
+        });
+    }
+
+    Ok(WorkflowExecutionDefinition {
+        id,
+        max_concurrency_default,
+        steps,
+    })
 }
 
 pub async fn create_managed_project(
@@ -646,7 +717,9 @@ pub async fn create_workflow_definition(
     get_workflow_definition_detail(pool, workflow_definition_id).await
 }
 
-pub async fn list_workflow_definitions(pool: &SqlitePool) -> Result<Vec<WorkflowDefinitionListItem>> {
+pub async fn list_workflow_definitions(
+    pool: &SqlitePool,
+) -> Result<Vec<WorkflowDefinitionListItem>> {
     let rows = sqlx::query_as::<_, (i64, String, String, i64, String, i64, String, String, i64)>(
         r#"SELECT
          d.id, d.name, d.description, d.enabled, d.variables_schema, d.max_concurrency_default,
@@ -948,7 +1021,9 @@ pub async fn get_workflow_run_detail(pool: &SqlitePool, id: i64) -> Result<Workf
 
     let mut projects = Vec::with_capacity(project_rows.len());
     for project_row in project_rows {
-        let steps = steps_by_project_id.remove(&project_row.id).unwrap_or_default();
+        let steps = steps_by_project_id
+            .remove(&project_row.id)
+            .unwrap_or_default();
         projects.push(WorkflowRunProject {
             id: project_row.id,
             managed_project_id: project_row.managed_project_id,
@@ -978,7 +1053,10 @@ pub async fn get_workflow_run_detail(pool: &SqlitePool, id: i64) -> Result<Workf
         source_workflow_run_id: row.source_workflow_run_id,
         trigger_kind: row.trigger_kind,
         status: row.status,
-        run_parameters: deserialize_json_object(&row.run_parameters_json, "workflow run parameters")?,
+        run_parameters: deserialize_json_object(
+            &row.run_parameters_json,
+            "workflow run parameters",
+        )?,
         max_concurrency: row.max_concurrency,
         projects_total: row.projects_total,
         projects_queued: row.projects_queued,
@@ -2178,9 +2256,7 @@ mod tests {
         .await
         .expect("insert cancelled workflow run step");
 
-        let list = list_workflow_runs(&pool)
-            .await
-            .expect("list workflow runs");
+        let list = list_workflow_runs(&pool).await.expect("list workflow runs");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, run_id);
         assert_eq!(list[0].status, "partial_failed");
