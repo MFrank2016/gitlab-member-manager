@@ -6,6 +6,7 @@ import {
   Users,
   UserCircle,
   FolderOpen,
+  GitBranch,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
@@ -22,6 +23,7 @@ const navItems: NavItem[] = [
   { id: "members", label: "项目成员", icon: <Users className="h-5 w-5" /> },
   { id: "managedProjects", label: "Managed Projects", icon: <FolderOpen className="h-5 w-5" /> },
   { id: "projectGroups", label: "Project Groups", icon: <FolderOpen className="h-5 w-5" /> },
+  { id: "workflows", label: "Workflows", icon: <GitBranch className="h-5 w-5" /> },
   { id: "local", label: "本地成员", icon: <UserCircle className="h-5 w-5" /> },
   { id: "groups", label: "本地分组", icon: <FolderOpen className="h-5 w-5" /> },
 ];

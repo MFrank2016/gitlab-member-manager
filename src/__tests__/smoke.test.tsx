@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
 import { ProjectGroupsPage } from "@/pages/ProjectGroupsPage";
@@ -10,6 +10,28 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
+let consoleErrorSpy: ReturnType<typeof vi.spyOn> | null = null;
+let runtimeWarnings: string[] = [];
+
+beforeEach(() => {
+  runtimeWarnings = [];
+  consoleErrorSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
+    const message = args
+      .map((arg) => (typeof arg === "string" ? arg : String(arg)))
+      .join(" ");
+    runtimeWarnings.push(message);
+  });
+});
+
+afterEach(() => {
+  try {
+    expect(runtimeWarnings).toEqual([]);
+  } finally {
+    consoleErrorSpy?.mockRestore();
+    consoleErrorSpy = null;
+  }
+});
+
 describe("navigation smoke", () => {
   beforeEach(() => {
     invokeMock.mockReset();
@@ -18,6 +40,7 @@ describe("navigation smoke", () => {
       if (cmd === "list_project_groups") return [];
       if (cmd === "list_managed_projects") return [];
       if (cmd === "list_project_group_projects") return [];
+      if (cmd === "list_workflow_definitions") return [];
       return undefined;
     });
   });
@@ -27,6 +50,7 @@ describe("navigation smoke", () => {
 
     expect(await screen.findByTitle("Managed Projects")).toBeInTheDocument();
     expect(screen.getByTitle("Project Groups")).toBeInTheDocument();
+    expect(screen.getByTitle("Workflows")).toBeInTheDocument();
   });
 });
 
@@ -95,8 +119,11 @@ describe("project group interactions", () => {
     render(<ProjectGroupsPage />);
 
     expect(await screen.findByText("Add Managed Projects")).toBeInTheDocument();
-    const checkboxes = await screen.findAllByRole("checkbox");
-    fireEvent.click(checkboxes[0]);
+    const managedRow = screen.getByText("project-one").closest("tr");
+    if (!managedRow) {
+      throw new Error("Could not find managed project row for project-one");
+    }
+    fireEvent.click(within(managedRow).getByRole("checkbox"));
 
     fireEvent.click(screen.getByRole("button", { name: /add selected/i }));
 
@@ -111,5 +138,77 @@ describe("project group interactions", () => {
     });
 
     expect(await screen.findByText("(already added)")).toBeInTheDocument();
+  });
+});
+
+describe("workflow interactions", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("creates workflow definitions with editable and ordered steps", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "get_gitlab_config") return null;
+      if (cmd === "list_workflow_definitions") return [];
+      if (cmd === "create_workflow_definition") {
+        const steps = (args?.steps as Array<{ stepType: string; parameters: unknown }>) ?? [];
+        return {
+          id: 11,
+          name: String(args?.name ?? ""),
+          description: String(args?.description ?? ""),
+          enabled: Boolean(args?.enabled),
+          variablesSchema: args?.variables_schema ?? {},
+          maxConcurrencyDefault: Number(args?.max_concurrency_default ?? 1),
+          createdAt: "2026-03-18T00:00:00Z",
+          updatedAt: "2026-03-18T00:00:00Z",
+          steps: steps.map((step, index) => ({
+            stepOrder: index,
+            stepType: step.stepType,
+            parameters: step.parameters ?? {},
+          })),
+        };
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByTitle("Workflows"));
+    expect(await screen.findByText("Workflow Definitions")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /new workflow/i }));
+    fireEvent.change(screen.getByPlaceholderText("workflow name"), {
+      target: { value: "release-flow" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /add step/i }));
+    fireEvent.change(screen.getByLabelText("Step 2 Type"), {
+      target: { value: "git_push" },
+    });
+    fireEvent.change(screen.getByLabelText("Step 2 Remote"), {
+      target: { value: "upstream" },
+    });
+    fireEvent.click(screen.getByLabelText("Move step 2 up"));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Create$/i }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "create_workflow_definition",
+        expect.objectContaining({
+          name: "release-flow",
+          steps: [
+            {
+              stepType: "git_push",
+              parameters: { remote: "upstream" },
+            },
+            {
+              stepType: "checkout_branch",
+              parameters: { branch: "${source_branch}" },
+            },
+          ],
+        })
+      );
+    });
   });
 });
