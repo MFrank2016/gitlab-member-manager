@@ -4,6 +4,7 @@ import type {
   LocalGroup,
   LocalMember,
   ManagedProject,
+  ProjectGroup,
   ProjectMember,
   ProjectSummary,
 } from "@/lib/types";
@@ -163,6 +164,42 @@ export async function updateManagedProject(args: {
 
 export async function deleteManagedProject(id: number) {
   return loggedInvoke<void>("delete_managed_project", { id });
+}
+
+export async function createProjectGroup(name: string) {
+  return loggedInvoke<ProjectGroup>("create_project_group", { name });
+}
+
+export async function listProjectGroups() {
+  return loggedInvoke<ProjectGroup[]>("list_project_groups");
+}
+
+export async function updateProjectGroup(id: number, name: string) {
+  return loggedInvoke<void>("update_project_group", { id, name });
+}
+
+export async function deleteProjectGroup(id: number) {
+  return loggedInvoke<void>("delete_project_group", { id });
+}
+
+export async function addProjectsToGroup(projectGroupId: number, managedProjectIds: number[]) {
+  return loggedInvoke<void>("add_projects_to_group", {
+    project_group_id: projectGroupId,
+    managed_project_ids: managedProjectIds,
+  });
+}
+
+export async function removeProjectsFromGroup(projectGroupId: number, managedProjectIds: number[]) {
+  return loggedInvoke<void>("remove_projects_from_group", {
+    project_group_id: projectGroupId,
+    managed_project_ids: managedProjectIds,
+  });
+}
+
+export async function listProjectGroupProjects(projectGroupId: number) {
+  return loggedInvoke<ManagedProject[]>("list_project_group_projects", {
+    project_group_id: projectGroupId,
+  });
 }
 
 export async function upsertLocalMembers(members: Array<{

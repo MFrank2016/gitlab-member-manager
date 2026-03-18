@@ -7,7 +7,7 @@ use tauri::Manager;
 use crate::gitlab::GitLabConfig;
 use crate::models::{
   BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
-  ProjectMember, ProjectSummary,
+  ProjectGroup, ProjectMember, ProjectSummary,
 };
 use sqlx::SqlitePool;
 use std::sync::Mutex;
@@ -267,6 +267,115 @@ async fn delete_managed_project(state: State<'_, AppState>, id: i64) -> Result<(
   match &result {
     Ok(_) => tracing::info!(id = id, "delete_managed_project success"),
     Err(e) => tracing::error!(id = id, error = %e, "delete_managed_project failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn create_project_group(state: State<'_, AppState>, name: String) -> Result<ProjectGroup, String> {
+  let result = db::create_project_group(&state.db, name.trim().to_string())
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(group) => tracing::info!(id = group.id, "create_project_group success"),
+    Err(e) => tracing::error!(error = %e, "create_project_group failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn list_project_groups(state: State<'_, AppState>) -> Result<Vec<ProjectGroup>, String> {
+  let result = db::list_project_groups(&state.db)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(groups) => tracing::info!(count = groups.len(), "list_project_groups success"),
+    Err(e) => tracing::error!(error = %e, "list_project_groups failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn update_project_group(state: State<'_, AppState>, id: i64, name: String) -> Result<(), String> {
+  let result = db::update_project_group(&state.db, id, name.trim().to_string())
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(_) => tracing::info!(id = id, "update_project_group success"),
+    Err(e) => tracing::error!(id = id, error = %e, "update_project_group failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn delete_project_group(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+  let result = db::delete_project_group(&state.db, id)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(_) => tracing::info!(id = id, "delete_project_group success"),
+    Err(e) => tracing::error!(id = id, error = %e, "delete_project_group failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn add_projects_to_group(
+  state: State<'_, AppState>,
+  project_group_id: i64,
+  managed_project_ids: Vec<i64>,
+) -> Result<(), String> {
+  let result = db::add_projects_to_group(&state.db, project_group_id, managed_project_ids)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(_) => tracing::info!(project_group_id = project_group_id, "add_projects_to_group success"),
+    Err(e) => tracing::error!(project_group_id = project_group_id, error = %e, "add_projects_to_group failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn remove_projects_from_group(
+  state: State<'_, AppState>,
+  project_group_id: i64,
+  managed_project_ids: Vec<i64>,
+) -> Result<(), String> {
+  let result = db::remove_projects_from_group(&state.db, project_group_id, managed_project_ids)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(_) => tracing::info!(project_group_id = project_group_id, "remove_projects_from_group success"),
+    Err(e) => tracing::error!(project_group_id = project_group_id, error = %e, "remove_projects_from_group failed"),
+  }
+
+  result
+}
+
+#[tauri::command]
+async fn list_project_group_projects(
+  state: State<'_, AppState>,
+  project_group_id: i64,
+) -> Result<Vec<ManagedProject>, String> {
+  let result = db::list_project_group_projects(&state.db, project_group_id)
+    .await
+    .map_err(|e| e.to_string());
+
+  match &result {
+    Ok(projects) => tracing::info!(project_group_id = project_group_id, count = projects.len(), "list_project_group_projects success"),
+    Err(e) => tracing::error!(project_group_id = project_group_id, error = %e, "list_project_group_projects failed"),
   }
 
   result
@@ -575,6 +684,13 @@ fn main() {
       list_managed_projects,
       update_managed_project,
       delete_managed_project,
+      create_project_group,
+      list_project_groups,
+      update_project_group,
+      delete_project_group,
+      add_projects_to_group,
+      remove_projects_from_group,
+      list_project_group_projects,
       upsert_local_members,
       list_local_members,
       delete_local_members,

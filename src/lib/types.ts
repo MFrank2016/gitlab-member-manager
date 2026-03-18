@@ -52,6 +52,14 @@ export type ManagedProject = {
   updatedAt: string;
 };
 
+export type ProjectGroup = {
+  id: number;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  projectsCount: number;
+};
+
 export type BatchItemError = {
   userId: number;
   message: string;

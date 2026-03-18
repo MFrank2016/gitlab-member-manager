@@ -238,6 +238,159 @@ pub async fn list_project_groups(pool: &SqlitePool) -> Result<Vec<ProjectGroup>>
   )
 }
 
+pub async fn update_project_group(pool: &SqlitePool, id: i64, name: String) -> Result<()> {
+  let now = Utc::now().to_rfc3339();
+  let res = sqlx::query(
+    r#"UPDATE project_groups
+       SET name = ?1, updated_at = ?2
+       WHERE id = ?3"#,
+  )
+  .bind(&name)
+  .bind(&now)
+  .bind(id)
+  .execute(pool)
+  .await?;
+
+  if res.rows_affected() == 0 {
+    return Err(anyhow!("project group not found: {id}"));
+  }
+
+  Ok(())
+}
+
+pub async fn delete_project_group(pool: &SqlitePool, id: i64) -> Result<()> {
+  let res = sqlx::query(r#"DELETE FROM project_groups WHERE id = ?1"#)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+  if res.rows_affected() == 0 {
+    return Err(anyhow!("project group not found: {id}"));
+  }
+
+  Ok(())
+}
+
+pub async fn add_projects_to_group(
+  pool: &SqlitePool,
+  project_group_id: i64,
+  managed_project_ids: Vec<i64>,
+) -> Result<()> {
+  let group_exists = sqlx::query_scalar::<_, i64>(
+    r#"SELECT COUNT(*) FROM project_groups WHERE id = ?1"#,
+  )
+  .bind(project_group_id)
+  .fetch_one(pool)
+  .await?;
+  if group_exists == 0 {
+    return Err(anyhow!("project group not found: {project_group_id}"));
+  }
+
+  if managed_project_ids.is_empty() {
+    return Ok(());
+  }
+
+  let now = Utc::now().to_rfc3339();
+  let mut tx = pool.begin().await?;
+
+  for managed_project_id in managed_project_ids {
+    sqlx::query(
+      r#"INSERT OR IGNORE INTO project_group_items (project_group_id, managed_project_id, created_at)
+         VALUES (?1, ?2, ?3)"#,
+    )
+    .bind(project_group_id)
+    .bind(managed_project_id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+  }
+
+  sqlx::query(r#"UPDATE project_groups SET updated_at = ?1 WHERE id = ?2"#)
+    .bind(&now)
+    .bind(project_group_id)
+    .execute(&mut *tx)
+    .await?;
+
+  tx.commit().await?;
+  Ok(())
+}
+
+pub async fn remove_projects_from_group(
+  pool: &SqlitePool,
+  project_group_id: i64,
+  managed_project_ids: Vec<i64>,
+) -> Result<()> {
+  let group_exists = sqlx::query_scalar::<_, i64>(
+    r#"SELECT COUNT(*) FROM project_groups WHERE id = ?1"#,
+  )
+  .bind(project_group_id)
+  .fetch_one(pool)
+  .await?;
+  if group_exists == 0 {
+    return Err(anyhow!("project group not found: {project_group_id}"));
+  }
+
+  if managed_project_ids.is_empty() {
+    return Ok(());
+  }
+
+  let now = Utc::now().to_rfc3339();
+  let mut tx = pool.begin().await?;
+
+  for managed_project_id in managed_project_ids {
+    sqlx::query(
+      r#"DELETE FROM project_group_items
+         WHERE project_group_id = ?1 AND managed_project_id = ?2"#,
+    )
+    .bind(project_group_id)
+    .bind(managed_project_id)
+    .execute(&mut *tx)
+    .await?;
+  }
+
+  sqlx::query(r#"UPDATE project_groups SET updated_at = ?1 WHERE id = ?2"#)
+    .bind(&now)
+    .bind(project_group_id)
+    .execute(&mut *tx)
+    .await?;
+
+  tx.commit().await?;
+  Ok(())
+}
+
+pub async fn list_project_group_projects(pool: &SqlitePool, project_group_id: i64) -> Result<Vec<ManagedProject>> {
+  let rows = sqlx::query_as::<_, (i64, i64, String, String, String, String, String, i64, String, String)>(
+    r#"SELECT
+         p.id, p.gitlab_project_id, p.name, p.path_with_namespace, p.repo_path,
+         p.default_branch, p.default_remote, p.enabled, p.created_at, p.updated_at
+       FROM managed_projects p
+       INNER JOIN project_group_items i ON i.managed_project_id = p.id
+       WHERE i.project_group_id = ?1
+       ORDER BY p.id ASC"#,
+  )
+  .bind(project_group_id)
+  .fetch_all(pool)
+  .await?;
+
+  let mut items = Vec::with_capacity(rows.len());
+  for r in rows {
+    items.push(ManagedProject {
+      id: r.0,
+      gitlab_project_id: i64_to_u64_checked(r.1, "managed_projects.gitlab_project_id")?,
+      name: r.2,
+      path_with_namespace: r.3,
+      repo_path: r.4,
+      default_branch: r.5,
+      default_remote: r.6,
+      enabled: r.7 != 0,
+      created_at: r.8,
+      updated_at: r.9,
+    });
+  }
+
+  Ok(items)
+}
+
 pub async fn upsert_local_members(pool: &SqlitePool, members: Vec<LocalMemberUpsert>) -> Result<()> {
   let count = members.len();
   tracing::info!(count = count, "[db] upsert_local_members starting");
@@ -787,5 +940,138 @@ mod tests {
       .await
       .expect("list managed projects");
     assert!(items.is_empty());
+  }
+
+  #[tokio::test]
+  async fn project_group_update_and_delete() {
+    let pool = setup_test_pool().await;
+
+    let group = create_project_group(&pool, "group-before".to_string())
+      .await
+      .expect("create project group");
+
+    update_project_group(&pool, group.id, "group-after".to_string())
+      .await
+      .expect("update project group");
+
+    let listed = list_project_groups(&pool)
+      .await
+      .expect("list project groups after update");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "group-after");
+
+    delete_project_group(&pool, group.id)
+      .await
+      .expect("delete project group");
+
+    let listed_after_delete = list_project_groups(&pool)
+      .await
+      .expect("list project groups after delete");
+    assert!(listed_after_delete.is_empty());
+  }
+
+  #[tokio::test]
+  async fn project_group_membership_add_list_remove() {
+    let pool = setup_test_pool().await;
+
+    let p1 = create_managed_project(
+      &pool,
+      80001,
+      "project-1".to_string(),
+      "team/project-1".to_string(),
+      "D:/repos/project-1".to_string(),
+      None,
+      None,
+      true,
+    )
+    .await
+    .expect("create managed project 1");
+
+    let p2 = create_managed_project(
+      &pool,
+      80002,
+      "project-2".to_string(),
+      "team/project-2".to_string(),
+      "D:/repos/project-2".to_string(),
+      None,
+      None,
+      true,
+    )
+    .await
+    .expect("create managed project 2");
+
+    let group = create_project_group(&pool, "delivery".to_string())
+      .await
+      .expect("create project group");
+
+    add_projects_to_group(&pool, group.id, vec![p1.id, p2.id])
+      .await
+      .expect("add projects to group");
+
+    let grouped_projects = list_project_group_projects(&pool, group.id)
+      .await
+      .expect("list grouped projects");
+    assert_eq!(grouped_projects.len(), 2);
+
+    remove_projects_from_group(&pool, group.id, vec![p2.id])
+      .await
+      .expect("remove project from group");
+
+    let grouped_projects_after_remove = list_project_group_projects(&pool, group.id)
+      .await
+      .expect("list grouped projects after remove");
+    assert_eq!(grouped_projects_after_remove.len(), 1);
+    assert_eq!(grouped_projects_after_remove[0].id, p1.id);
+  }
+
+  #[tokio::test]
+  async fn add_projects_to_group_errors_when_group_not_found() {
+    let pool = setup_test_pool().await;
+
+    let empty_ids_result = add_projects_to_group(&pool, 99999, vec![]).await;
+    assert!(empty_ids_result.is_err());
+    assert!(empty_ids_result
+      .unwrap_err()
+      .to_string()
+      .contains("project group not found"));
+
+    let project = create_managed_project(
+      &pool,
+      81001,
+      "project-missing-group-add".to_string(),
+      "team/project-missing-group-add".to_string(),
+      "D:/repos/project-missing-group-add".to_string(),
+      None,
+      None,
+      true,
+    )
+    .await
+    .expect("create managed project");
+
+    let non_empty_ids_result = add_projects_to_group(&pool, 99999, vec![project.id]).await;
+    assert!(non_empty_ids_result.is_err());
+    assert!(non_empty_ids_result
+      .unwrap_err()
+      .to_string()
+      .contains("project group not found"));
+  }
+
+  #[tokio::test]
+  async fn remove_projects_from_group_errors_when_group_not_found() {
+    let pool = setup_test_pool().await;
+
+    let empty_ids_result = remove_projects_from_group(&pool, 99999, vec![]).await;
+    assert!(empty_ids_result.is_err());
+    assert!(empty_ids_result
+      .unwrap_err()
+      .to_string()
+      .contains("project group not found"));
+
+    let non_empty_ids_result = remove_projects_from_group(&pool, 99999, vec![12345]).await;
+    assert!(non_empty_ids_result.is_err());
+    assert!(non_empty_ids_result
+      .unwrap_err()
+      .to_string()
+      .contains("project group not found"));
   }
 }
