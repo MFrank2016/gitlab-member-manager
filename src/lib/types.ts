@@ -1,6 +1,9 @@
 export type GitLabConfig = {
   baseUrl: string;
   token: string;
+  localRepoRoot?: string | null;
+  defaultBranch?: string | null;
+  defaultRemote?: string | null;
 };
 
 export type ProjectSummary = {

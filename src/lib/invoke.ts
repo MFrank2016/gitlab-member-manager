@@ -96,14 +96,36 @@ async function loggedInvoke<T>(cmd: string, args?: Record<string, unknown>): Pro
   }
 }
 
-export async function getGitLabConfig(): Promise<{ baseUrl: string; token: string } | null> {
-  const v = await loggedInvoke<[string, string] | null>("get_gitlab_config");
-  if (!v) return null;
-  return { baseUrl: v[0], token: v[1] };
+export async function getGitLabConfig(): Promise<{
+  baseUrl: string;
+  token: string;
+  localRepoRoot?: string | null;
+  defaultBranch?: string | null;
+  defaultRemote?: string | null;
+} | null> {
+  return loggedInvoke<{
+    baseUrl: string;
+    token: string;
+    localRepoRoot?: string | null;
+    defaultBranch?: string | null;
+    defaultRemote?: string | null;
+  } | null>("get_gitlab_config");
 }
 
-export async function setGitLabConfig(baseUrl: string, token: string) {
-  return loggedInvoke<void>("set_gitlab_config", { baseUrl, token });
+export async function setGitLabConfig(args: {
+  baseUrl: string;
+  token: string;
+  localRepoRoot?: string | null;
+  defaultBranch?: string | null;
+  defaultRemote?: string | null;
+}) {
+  return loggedInvoke<void>("set_gitlab_config", {
+    baseUrl: args.baseUrl,
+    token: args.token,
+    local_repo_root: args.localRepoRoot ?? null,
+    default_branch: args.defaultBranch ?? null,
+    default_remote: args.defaultRemote ?? null,
+  });
 }
 
 export async function searchProjects(

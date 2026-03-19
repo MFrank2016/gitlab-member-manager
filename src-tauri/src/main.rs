@@ -7,8 +7,8 @@ use tauri::Manager;
 
 use crate::gitlab::GitLabConfig;
 use crate::models::{
-    BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
-    ProjectGroup, ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
+    AppSettings, BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert,
+    ManagedProject, ProjectGroup, ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
     WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail,
     WorkflowRunExecuteRequest, WorkflowRunExecuteResult, WorkflowRunListItem,
     WorkflowRunRetryFailedRequest, WorkflowStepInput,
@@ -92,7 +92,7 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 }
 
 #[tauri::command]
-async fn get_gitlab_config(state: State<'_, AppState>) -> Result<Option<(String, String)>, String> {
+async fn get_gitlab_config(state: State<'_, AppState>) -> Result<Option<AppSettings>, String> {
     let cfg = db::get_gitlab_config(&state.db)
         .await
         .map_err(|e| e.to_string())?;
@@ -104,8 +104,18 @@ async fn set_gitlab_config(
     state: State<'_, AppState>,
     base_url: String,
     token: String,
+    local_repo_root: Option<String>,
+    default_branch: Option<String>,
+    default_remote: Option<String>,
 ) -> Result<(), String> {
-    tracing::info!(base_url = %base_url, token_len = token.len(), "set_gitlab_config called");
+    tracing::info!(
+        base_url = %base_url,
+        token_len = token.len(),
+        local_repo_root = ?local_repo_root,
+        default_branch = ?default_branch,
+        default_remote = ?default_remote,
+        "set_gitlab_config called"
+    );
 
     if base_url.trim().is_empty() {
         tracing::warn!("set_gitlab_config failed: baseUrl is empty");
@@ -118,8 +128,18 @@ async fn set_gitlab_config(
 
     let base = base_url.trim().to_string();
     let tok = token.trim().to_string();
+    let local_repo_root = normalize_optional_text(local_repo_root);
+    let default_branch = normalize_optional_text(default_branch);
+    let default_remote = normalize_optional_text(default_remote);
 
-    db::set_gitlab_config(&state.db, &base, &tok)
+    db::set_gitlab_config(
+        &state.db,
+        &base,
+        &tok,
+        local_repo_root.as_deref(),
+        default_branch.as_deref(),
+        default_remote.as_deref(),
+    )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -999,6 +1019,7 @@ async fn batch_remove_members_from_project(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let _guard = init_logging(&app.handle())
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
@@ -1023,9 +1044,12 @@ fn main() {
       }
 
       let gitlab = match tauri::async_runtime::block_on(db::get_gitlab_config(&db)) {
-        Ok(Some((base_url, token))) => {
+        Ok(Some(cfg)) => {
           tracing::info!("[setup] loaded GitLab config from database");
-          Some(GitLabConfig { base_url, token })
+          Some(GitLabConfig {
+            base_url: cfg.base_url,
+            token: cfg.token,
+          })
         }
         Ok(None) => None,
         Err(e) => {

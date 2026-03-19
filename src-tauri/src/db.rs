@@ -1,5 +1,5 @@
 use crate::models::{
-    LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject, ProjectGroup,
+    AppSettings, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject, ProjectGroup,
     WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem,
     WorkflowRunProject, WorkflowRunStep, WorkflowStep, WorkflowStepInput,
 };
@@ -1458,7 +1458,7 @@ pub async fn list_group_members(pool: &SqlitePool, group_id: i64) -> Result<Vec<
 }
 
 /// 从 config 表读取 GitLab 配置，key = "gitlab"，value 为 JSON：{ "baseUrl": "...", "token": "..." }
-pub async fn get_gitlab_config(pool: &SqlitePool) -> Result<Option<(String, String)>> {
+pub async fn get_gitlab_config(pool: &SqlitePool) -> Result<Option<AppSettings>> {
     let row = sqlx::query_as::<_, (String,)>(r#"SELECT value FROM config WHERE key = 'gitlab'"#)
         .fetch_optional(pool)
         .await?;
@@ -1467,18 +1467,36 @@ pub async fn get_gitlab_config(pool: &SqlitePool) -> Result<Option<(String, Stri
         return Ok(None);
     };
 
-    #[derive(serde::Deserialize)]
-    struct Cfg {
-        base_url: String,
-        token: String,
-    }
-    let cfg: Cfg = serde_json::from_str(&json).context("parse gitlab config json")?;
-    Ok(Some((cfg.base_url, cfg.token)))
+    let cfg: AppSettings = serde_json::from_str(&json).context("parse gitlab config json")?;
+    Ok(Some(cfg))
 }
 
 /// 保存 GitLab 配置到 config 表
-pub async fn set_gitlab_config(pool: &SqlitePool, base_url: &str, token: &str) -> Result<()> {
-    let json = serde_json::json!({ "base_url": base_url, "token": token }).to_string();
+pub async fn set_gitlab_config(
+    pool: &SqlitePool,
+    base_url: &str,
+    token: &str,
+    local_repo_root: Option<&str>,
+    default_branch: Option<&str>,
+    default_remote: Option<&str>,
+) -> Result<()> {
+    let json = serde_json::to_string(&AppSettings {
+        base_url: base_url.trim().to_string(),
+        token: token.trim().to_string(),
+        local_repo_root: local_repo_root.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }),
+        default_branch: default_branch.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }),
+        default_remote: default_remote.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }),
+    })
+    .context("serialize gitlab config json")?;
     sqlx::query(
         r#"INSERT INTO config (key, value) VALUES ('gitlab', ?1)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
@@ -1504,6 +1522,53 @@ mod tests {
             .expect("connect in-memory sqlite");
         TEST_MIGRATOR.run(&pool).await.expect("run migrations");
         pool
+    }
+
+    #[tokio::test]
+    async fn gitlab_config_roundtrip_includes_managed_project_defaults() {
+        let pool = setup_test_pool().await;
+
+        set_gitlab_config(
+            &pool,
+            "https://gitlab.example.com",
+            "glpat-123",
+            Some("D:/repos"),
+            Some("release"),
+            Some("upstream"),
+        )
+        .await
+        .expect("save config");
+
+        let cfg = get_gitlab_config(&pool)
+            .await
+            .expect("load config")
+            .expect("config exists");
+        assert_eq!(cfg.base_url, "https://gitlab.example.com");
+        assert_eq!(cfg.token, "glpat-123");
+        assert_eq!(cfg.local_repo_root.as_deref(), Some("D:/repos"));
+        assert_eq!(cfg.default_branch.as_deref(), Some("release"));
+        assert_eq!(cfg.default_remote.as_deref(), Some("upstream"));
+    }
+
+    #[tokio::test]
+    async fn gitlab_config_loads_legacy_payload_without_new_defaults() {
+        let pool = setup_test_pool().await;
+
+        sqlx::query(r#"INSERT INTO config (key, value) VALUES ('gitlab', ?1)"#)
+            .bind(r#"{"base_url":"https://gitlab.example.com","token":"glpat-legacy"}"#)
+            .execute(&pool)
+            .await
+            .expect("insert legacy config");
+
+        let cfg = get_gitlab_config(&pool)
+            .await
+            .expect("load config")
+            .expect("config exists");
+        assert_eq!(cfg.base_url, "https://gitlab.example.com");
+        assert_eq!(cfg.token, "glpat-legacy");
+        assert_eq!(cfg.local_repo_root, None);
+        assert_eq!(cfg.default_branch, None);
+        assert_eq!(cfg.default_remote, None);
     }
 
     #[tokio::test]

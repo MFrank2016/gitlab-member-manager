@@ -3,6 +3,20 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    #[serde(alias = "base_url")]
+    pub base_url: String,
+    pub token: String,
+    #[serde(alias = "local_repo_root", default)]
+    pub local_repo_root: Option<String>,
+    #[serde(alias = "default_branch", default)]
+    pub default_branch: Option<String>,
+    #[serde(alias = "default_remote", default)]
+    pub default_remote: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectSummary {
     pub id: u64,
     pub name: String,

@@ -9,16 +9,21 @@ import { getGitLabConfig, setGitLabConfig } from "@/lib/invoke";
 export function SettingsPage() {
   const [baseUrl, setBaseUrl] = React.useState("https://gitlab.com");
   const [token, setToken] = React.useState("");
-  const [status, setStatus] = React.useState<string>("");
+  const [localRepoRoot, setLocalRepoRoot] = React.useState("");
+  const [defaultBranch, setDefaultBranch] = React.useState("master");
+  const [defaultRemote, setDefaultRemote] = React.useState("origin");
+  const [status, setStatus] = React.useState("");
   const [loading, setLoading] = React.useState(true);
 
   React.useEffect(() => {
     getGitLabConfig()
       .then((cfg) => {
-        if (cfg) {
-          setBaseUrl(cfg.baseUrl);
-          setToken(cfg.token);
-        }
+        if (!cfg) return;
+        setBaseUrl(cfg.baseUrl);
+        setToken(cfg.token);
+        setLocalRepoRoot(cfg.localRepoRoot ?? "");
+        setDefaultBranch(cfg.defaultBranch ?? "master");
+        setDefaultRemote(cfg.defaultRemote ?? "origin");
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -27,10 +32,16 @@ export function SettingsPage() {
   async function onSave() {
     setStatus("");
     try {
-      await setGitLabConfig(baseUrl.trim(), token.trim());
-      setStatus("✅ 已保存到数据库，下次启动将自动加载");
-    } catch (e) {
-      setStatus(`❌ 保存失败：${String(e)}`);
+      await setGitLabConfig({
+        baseUrl: baseUrl.trim(),
+        token: token.trim(),
+        localRepoRoot: localRepoRoot.trim() || null,
+        defaultBranch: defaultBranch.trim() || "master",
+        defaultRemote: defaultRemote.trim() || "origin",
+      });
+      setStatus("已保存到数据库，下次启动将自动加载。");
+    } catch (error) {
+      setStatus(`保存失败：${String(error)}`);
     }
   }
 
@@ -38,31 +49,83 @@ export function SettingsPage() {
     <div className="space-y-6">
       <Panel>
         <PanelHeader className="flex-col items-start gap-2">
-        <div className="space-y-2">
-                <h2 className="text-xl font-semibold">GitLab 配置</h2>
-                <p className="text-sm text-muted-foreground">
-                  请输入 GitLab Base URL（如 https://gitlab.example.com）和 Private Token。配置将保存到本地数据库，启动时自动加载。
-                </p>
-              </div>
+          <div className="space-y-2">
+            <h2 className="text-xl font-semibold">GitLab 配置</h2>
+            <p className="text-sm text-muted-foreground">
+              请输入 GitLab Base URL、Private Token，以及托管项目的本地默认路径和 git 默认值。
+            </p>
+          </div>
         </PanelHeader>
         <PanelBody>
-        <div className="grid gap-4 max-w-xl">
-                <div className="grid gap-2">
-                  <Label>Base URL</Label>
-                  <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://gitlab.example.com" disabled={loading} />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Private Token</Label>
-                  <Input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="glpat-..." disabled={loading} />
-                  <p className="text-xs text-muted-foreground">建议使用 Project/Group Access Token 或 Personal Access Token（至少具备 API 权限）。</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Button onClick={onSave} disabled={loading}>保存配置</Button>
-                  {status && <span className="text-sm">{status}</span>}
-                </div>
+          <div className="grid max-w-2xl gap-4">
+            <div className="grid gap-2">
+              <Label htmlFor="gitlab-base-url">Base URL</Label>
+              <Input
+                id="gitlab-base-url"
+                value={baseUrl}
+                onChange={(event) => setBaseUrl(event.target.value)}
+                placeholder="https://gitlab.example.com"
+                disabled={loading}
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="gitlab-token">Private Token</Label>
+              <Input
+                id="gitlab-token"
+                type="password"
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+                placeholder="glpat-..."
+                disabled={loading}
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="local-repo-root">本地仓库根目录</Label>
+              <Input
+                id="local-repo-root"
+                value={localRepoRoot}
+                onChange={(event) => setLocalRepoRoot(event.target.value)}
+                placeholder="D:/repos"
+                disabled={loading}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div className="grid gap-2">
+                <Label htmlFor="default-branch">默认分支</Label>
+                <Input
+                  id="default-branch"
+                  value={defaultBranch}
+                  onChange={(event) => setDefaultBranch(event.target.value)}
+                  placeholder="master"
+                  disabled={loading}
+                />
               </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="default-remote">默认远程</Label>
+                <Input
+                  id="default-remote"
+                  value={defaultRemote}
+                  onChange={(event) => setDefaultRemote(event.target.value)}
+                  placeholder="origin"
+                  disabled={loading}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <Button onClick={onSave} disabled={loading}>
+                保存配置
+              </Button>
+              {status && <span className="text-sm">{status}</span>}
+            </div>
+          </div>
         </PanelBody>
       </Panel>
     </div>
   );
 }
+

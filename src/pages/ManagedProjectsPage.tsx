@@ -1,6 +1,8 @@
 import * as React from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 
+import { ProjectCombobox } from "@/components/ProjectCombobox";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -19,31 +21,25 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import {
   createManagedProject,
   deleteManagedProject,
+  getGitLabConfig,
   listManagedProjects,
   updateManagedProject,
 } from "@/lib/invoke";
-import type { ManagedProject } from "@/lib/types";
+import {
+  createManagedProjectDraft,
+  type ManagedProjectDraft,
+  type ManagedProjectOnboardingDefaults,
+} from "@/lib/managed-project-onboarding";
+import type { GitLabConfig, ManagedProject, ProjectSummary } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 
-type ProjectDraft = {
-  gitlabProjectId: string;
-  name: string;
-  pathWithNamespace: string;
-  repoPath: string;
-  defaultBranch: string;
-  defaultRemote: string;
-  enabled: boolean;
-};
-
-const EMPTY_DRAFT: ProjectDraft = {
-  gitlabProjectId: "",
-  name: "",
-  pathWithNamespace: "",
-  repoPath: "",
-  defaultBranch: "",
-  defaultRemote: "",
-  enabled: true,
-};
+function normalizeDefaults(cfg: GitLabConfig | null): ManagedProjectOnboardingDefaults {
+  return {
+    localRepoRoot: cfg?.localRepoRoot ?? "",
+    defaultBranch: cfg?.defaultBranch ?? "master",
+    defaultRemote: cfg?.defaultRemote ?? "origin",
+  };
+}
 
 function toPositiveNumber(value: string): number | null {
   const parsed = Number(value);
@@ -51,71 +47,152 @@ function toPositiveNumber(value: string): number | null {
   return parsed;
 }
 
-function ProjectDraftForm({
+function toDraft(item: ManagedProject): ManagedProjectDraft {
+  return {
+    gitlabProjectId: String(item.gitlabProjectId),
+    name: item.name,
+    pathWithNamespace: item.pathWithNamespace,
+    repoPath: item.repoPath,
+    defaultBranch: item.defaultBranch,
+    defaultRemote: item.defaultRemote,
+    enabled: item.enabled,
+  };
+}
+
+function buildPayload(draft: ManagedProjectDraft) {
+  const gitlabProjectId = toPositiveNumber(draft.gitlabProjectId);
+  if (!gitlabProjectId) {
+    throw new Error("GitLab 项目 ID 必须是正整数。");
+  }
+
+  const name = draft.name.trim();
+  if (!name) throw new Error("名称不能为空。");
+
+  const pathWithNamespace = draft.pathWithNamespace.trim();
+  if (!pathWithNamespace) throw new Error("命名空间路径不能为空。");
+
+  const repoPath = draft.repoPath.trim();
+  if (!repoPath) throw new Error("本地仓库路径不能为空。");
+
+  return {
+    gitlabProjectId,
+    name,
+    pathWithNamespace,
+    repoPath,
+    defaultBranch: draft.defaultBranch.trim() || "master",
+    defaultRemote: draft.defaultRemote.trim() || "origin",
+    enabled: draft.enabled,
+  };
+}
+
+function ManagedProjectForm({
   draft,
   onChange,
+  defaults,
+  showProjectSearch,
+  selectedProject,
+  onProjectChange,
+  onPickRepoPath,
 }: {
-  draft: ProjectDraft;
-  onChange: (next: ProjectDraft) => void;
+  draft: ManagedProjectDraft;
+  onChange: (next: ManagedProjectDraft) => void;
+  defaults: ManagedProjectOnboardingDefaults;
+  showProjectSearch: boolean;
+  selectedProject: ProjectSummary | null;
+  onProjectChange?: (project: ProjectSummary | null) => void;
+  onPickRepoPath: () => Promise<void>;
 }) {
+  const repoPathId = showProjectSearch ? "create-managed-project-repo-path" : "edit-managed-project-repo-path";
+
   return (
-    <div className="grid gap-3">
-      <div className="grid gap-1">
-        <Label>GitLab 项目 ID</Label>
+    <div className="grid gap-4">
+      {showProjectSearch && (
+        <div className="grid gap-2">
+          <Label>GitLab 项目</Label>
+          <ProjectCombobox
+            value={selectedProject}
+            onChange={(project) => {
+              onProjectChange?.(project);
+              onChange(createManagedProjectDraft(defaults, project));
+            }}
+            placeholder="搜索 GitLab 项目"
+          />
+        </div>
+      )}
+
+      <div className="grid gap-2">
+        <Label htmlFor={`${repoPathId}-gitlab-project-id`}>GitLab 项目 ID</Label>
         <Input
+          id={`${repoPathId}-gitlab-project-id`}
           type="number"
           min={1}
           value={draft.gitlabProjectId}
-          onChange={(e) => onChange({ ...draft, gitlabProjectId: e.target.value })}
-          placeholder="例如：12345"
+          onChange={(event) => onChange({ ...draft, gitlabProjectId: event.target.value })}
+          placeholder="1234"
         />
       </div>
-      <div className="grid gap-1">
-        <Label>名称</Label>
+
+      <div className="grid gap-2">
+        <Label htmlFor={`${repoPathId}-name`}>名称</Label>
         <Input
+          id={`${repoPathId}-name`}
           value={draft.name}
-          onChange={(e) => onChange({ ...draft, name: e.target.value })}
+          onChange={(event) => onChange({ ...draft, name: event.target.value })}
           placeholder="项目名称"
         />
       </div>
-      <div className="grid gap-1">
-        <Label>命名空间路径</Label>
+
+      <div className="grid gap-2">
+        <Label htmlFor={`${repoPathId}-path`}>命名空间路径</Label>
         <Input
+          id={`${repoPathId}-path`}
           value={draft.pathWithNamespace}
-          onChange={(e) => onChange({ ...draft, pathWithNamespace: e.target.value })}
+          onChange={(event) => onChange({ ...draft, pathWithNamespace: event.target.value })}
           placeholder="group/project-name"
         />
       </div>
-      <div className="grid gap-1">
-        <Label>本地仓库路径</Label>
-        <Input
-          value={draft.repoPath}
-          onChange={(e) => onChange({ ...draft, repoPath: e.target.value })}
-          placeholder="D:/repos/project-name"
-        />
-      </div>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <div className="grid gap-1">
-          <Label>默认分支</Label>
+
+      <div className="grid gap-2">
+        <Label htmlFor={`${repoPathId}-repo-path`}>本地仓库路径</Label>
+        <div className="flex gap-2">
           <Input
+            id={`${repoPathId}-repo-path`}
+            className="flex-1"
+            value={draft.repoPath}
+            onChange={(event) => onChange({ ...draft, repoPath: event.target.value })}
+            placeholder="D:/repos/project-name"
+          />
+          <Button type="button" variant="secondary" onClick={() => void onPickRepoPath()}>
+            选择目录
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div className="grid gap-2">
+          <Label htmlFor={`${repoPathId}-default-branch`}>默认分支</Label>
+          <Input
+            id={`${repoPathId}-default-branch`}
             value={draft.defaultBranch}
-            onChange={(e) => onChange({ ...draft, defaultBranch: e.target.value })}
-            placeholder="main"
+            onChange={(event) => onChange({ ...draft, defaultBranch: event.target.value })}
+            placeholder="master"
           />
         </div>
-        <div className="grid gap-1">
-          <Label>默认远程</Label>
+        <div className="grid gap-2">
+          <Label htmlFor={`${repoPathId}-default-remote`}>默认远程</Label>
           <Input
+            id={`${repoPathId}-default-remote`}
             value={draft.defaultRemote}
-            onChange={(e) => onChange({ ...draft, defaultRemote: e.target.value })}
+            onChange={(event) => onChange({ ...draft, defaultRemote: event.target.value })}
             placeholder="origin"
           />
         </div>
       </div>
+
       <label className="flex items-center gap-2 text-sm">
         <Checkbox
           checked={draft.enabled}
-          onCheckedChange={(v) => onChange({ ...draft, enabled: Boolean(v) })}
+          onCheckedChange={(value) => onChange({ ...draft, enabled: Boolean(value) })}
         />
         启用
       </label>
@@ -126,14 +203,27 @@ function ProjectDraftForm({
 export function ManagedProjectsPage() {
   const [items, setItems] = React.useState<ManagedProject[]>([]);
   const [loading, setLoading] = React.useState(false);
+  const [projectDefaults, setProjectDefaults] = React.useState<ManagedProjectOnboardingDefaults>({
+    localRepoRoot: "",
+    defaultBranch: "master",
+    defaultRemote: "origin",
+  });
+
   const [createOpen, setCreateOpen] = React.useState(false);
-  const [createDraft, setCreateDraft] = React.useState<ProjectDraft>(EMPTY_DRAFT);
+  const [createProject, setCreateProject] = React.useState<ProjectSummary | null>(null);
+  const [createDraft, setCreateDraft] = React.useState<ManagedProjectDraft>(() =>
+    createManagedProjectDraft(projectDefaults, null)
+  );
+  const [creating, setCreating] = React.useState(false);
 
   const [editOpen, setEditOpen] = React.useState(false);
   const [editingItem, setEditingItem] = React.useState<ManagedProject | null>(null);
-  const [editDraft, setEditDraft] = React.useState<ProjectDraft>(EMPTY_DRAFT);
+  const [editDraft, setEditDraft] = React.useState<ManagedProjectDraft>(() =>
+    createManagedProjectDraft(projectDefaults, null)
+  );
+  const [saving, setSaving] = React.useState(false);
 
-  async function refresh() {
+  async function refreshProjects() {
     setLoading(true);
     try {
       setItems(await listManagedProjects());
@@ -145,84 +235,128 @@ export function ManagedProjectsPage() {
     }
   }
 
+  async function refreshDefaults() {
+    try {
+      const cfg = await getGitLabConfig();
+      const next = normalizeDefaults(cfg);
+      setProjectDefaults(next);
+      return next;
+    } catch {
+      const next = {
+        localRepoRoot: "",
+        defaultBranch: "master",
+        defaultRemote: "origin",
+      };
+      setProjectDefaults(next);
+      return next;
+    }
+  }
+
   React.useEffect(() => {
-    void refresh();
+    void refreshProjects();
+    void refreshDefaults();
   }, []);
 
+  async function handleCreateDirectoryPick() {
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: createDraft.repoPath || projectDefaults.localRepoRoot || undefined,
+    });
+
+    if (typeof picked === "string") {
+      setCreateDraft((prev) => ({ ...prev, repoPath: picked }));
+    }
+  }
+
+  async function handleEditDirectoryPick() {
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: editDraft.repoPath || projectDefaults.localRepoRoot || undefined,
+    });
+
+    if (typeof picked === "string") {
+      setEditDraft((prev) => ({ ...prev, repoPath: picked }));
+    }
+  }
+
+  function handleCreateOpenChange(nextOpen: boolean) {
+    setCreateOpen(nextOpen);
+    if (nextOpen) {
+      setCreateProject(null);
+      setCreateDraft(createManagedProjectDraft(projectDefaults, null));
+      void refreshDefaults().then((next) => {
+        setCreateProject(null);
+        setCreateDraft(createManagedProjectDraft(next, null));
+      });
+    }
+  }
+
   async function onCreate() {
-    const gitlabProjectId = toPositiveNumber(createDraft.gitlabProjectId);
-    if (!gitlabProjectId) {
-      toast.error("GitLab 项目 ID 必须是正整数。");
+    let payload: ReturnType<typeof buildPayload>;
+    try {
+      payload = buildPayload(createDraft);
+    } catch (error) {
+      toast.error(String(error));
       return;
     }
 
+    setCreating(true);
     try {
-      await createManagedProject({
-        gitlabProjectId,
-        name: createDraft.name,
-        pathWithNamespace: createDraft.pathWithNamespace,
-        repoPath: createDraft.repoPath,
-        defaultBranch: createDraft.defaultBranch || null,
-        defaultRemote: createDraft.defaultRemote || null,
-        enabled: createDraft.enabled,
-      });
-      setCreateDraft(EMPTY_DRAFT);
+      await createManagedProject(payload);
       setCreateOpen(false);
-      await refresh();
+      setCreateProject(null);
+      setCreateDraft(createManagedProjectDraft(projectDefaults, null));
+      await refreshProjects();
       toast.success("托管项目已创建。");
     } catch (error) {
       toast.error(`创建失败：${String(error)}`);
+    } finally {
+      setCreating(false);
     }
   }
 
   function startEdit(item: ManagedProject) {
     setEditingItem(item);
-    setEditDraft({
-      gitlabProjectId: String(item.gitlabProjectId),
-      name: item.name,
-      pathWithNamespace: item.pathWithNamespace,
-      repoPath: item.repoPath,
-      defaultBranch: item.defaultBranch,
-      defaultRemote: item.defaultRemote,
-      enabled: item.enabled,
-    });
+    setEditDraft(toDraft(item));
     setEditOpen(true);
   }
 
   async function onSaveEdit() {
     if (!editingItem) return;
 
-    const gitlabProjectId = toPositiveNumber(editDraft.gitlabProjectId);
-    if (!gitlabProjectId) {
-      toast.error("GitLab 项目 ID 必须是正整数。");
+    let payload: ReturnType<typeof buildPayload>;
+    try {
+      payload = buildPayload(editDraft);
+    } catch (error) {
+      toast.error(String(error));
       return;
     }
 
+    setSaving(true);
     try {
       await updateManagedProject({
         id: editingItem.id,
-        gitlabProjectId,
-        name: editDraft.name,
-        pathWithNamespace: editDraft.pathWithNamespace,
-        repoPath: editDraft.repoPath,
-        defaultBranch: editDraft.defaultBranch.trim() || "main",
-        defaultRemote: editDraft.defaultRemote.trim() || "origin",
-        enabled: editDraft.enabled,
+        ...payload,
       });
       setEditOpen(false);
       setEditingItem(null);
-      await refresh();
+      await refreshProjects();
       toast.success("托管项目已更新。");
     } catch (error) {
       toast.error(`更新失败：${String(error)}`);
+    } finally {
+      setSaving(false);
     }
   }
 
   async function onDelete(item: ManagedProject) {
-    if (!confirm(`确定删除托管项目“${item.name}”吗？`)) return;
+    if (!confirm(`确定删除托管项目「${item.name}」吗？`)) return;
+
     try {
       await deleteManagedProject(item.id);
-      await refresh();
+      await refreshProjects();
       toast.success("托管项目已删除。");
     } catch (error) {
       toast.error(`删除失败：${String(error)}`);
@@ -236,30 +370,40 @@ export function ManagedProjectsPage() {
           <div className="space-y-1">
             <h2 className="text-xl font-semibold">托管项目</h2>
             <p className="text-sm text-muted-foreground">
-              将 GitLab 项目与本地仓库路径绑定，用于后续分组和批量操作。
+              绑定 GitLab 项目和本地仓库路径，用于后续分组批量操作和 git 工作流。
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="secondary" onClick={() => void refresh()} disabled={loading}>
+            <Button variant="secondary" onClick={() => void refreshProjects()} disabled={loading}>
               刷新
             </Button>
-            <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+            <Dialog open={createOpen} onOpenChange={handleCreateOpenChange}>
               <DialogTrigger asChild>
                 <Button>新建托管项目</Button>
               </DialogTrigger>
-              <DialogContent>
+              <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
                 <DialogHeader>
                   <DialogTitle>新建托管项目</DialogTitle>
                   <DialogDescription>
-                    将一个 GitLab 项目绑定到本地仓库路径。
+                    先搜索 GitLab 项目，再回填项目名、命名空间路径、本地仓库路径和默认 git 配置。
                   </DialogDescription>
                 </DialogHeader>
-                <ProjectDraftForm draft={createDraft} onChange={setCreateDraft} />
+                <ManagedProjectForm
+                  draft={createDraft}
+                  onChange={setCreateDraft}
+                  defaults={projectDefaults}
+                  showProjectSearch
+                  selectedProject={createProject}
+                  onProjectChange={setCreateProject}
+                  onPickRepoPath={handleCreateDirectoryPick}
+                />
                 <DialogFooter>
-                  <Button variant="secondary" onClick={() => setCreateDraft(EMPTY_DRAFT)}>
-                    清空
+                  <Button variant="secondary" type="button" onClick={() => setCreateDraft(createManagedProjectDraft(projectDefaults, null))}>
+                    重置
                   </Button>
-                  <Button onClick={() => void onCreate()}>创建</Button>
+                  <Button type="button" onClick={() => void onCreate()} disabled={creating}>
+                    创建
+                  </Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
@@ -273,7 +417,7 @@ export function ManagedProjectsPage() {
                 <TableHead>GitLab ID</TableHead>
                 <TableHead>名称</TableHead>
                 <TableHead>命名空间路径</TableHead>
-                <TableHead>仓库路径</TableHead>
+                <TableHead>本地仓库路径</TableHead>
                 <TableHead>默认值</TableHead>
                 <TableHead>更新时间</TableHead>
                 <TableHead>操作</TableHead>
@@ -316,17 +460,26 @@ export function ManagedProjectsPage() {
       </Panel>
 
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent>
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>编辑托管项目</DialogTitle>
-            <DialogDescription>更新项目绑定关系和默认配置。</DialogDescription>
+            <DialogDescription>更新项目绑定信息、路径和默认 git 配置。</DialogDescription>
           </DialogHeader>
-          <ProjectDraftForm draft={editDraft} onChange={setEditDraft} />
+          <ManagedProjectForm
+            draft={editDraft}
+            onChange={setEditDraft}
+            defaults={projectDefaults}
+            showProjectSearch={false}
+            selectedProject={null}
+            onPickRepoPath={handleEditDirectoryPick}
+          />
           <DialogFooter>
-            <Button variant="secondary" onClick={() => setEditOpen(false)}>
+            <Button variant="secondary" type="button" onClick={() => setEditOpen(false)}>
               取消
             </Button>
-            <Button onClick={() => void onSaveEdit()}>保存</Button>
+            <Button type="button" onClick={() => void onSaveEdit()} disabled={saving}>
+              保存
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
