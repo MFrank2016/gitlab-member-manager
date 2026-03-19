@@ -11,6 +11,7 @@ import { GroupsPage } from "@/pages/GroupsPage";
 import { ManagedProjectsPage } from "@/pages/ManagedProjectsPage";
 import { ProjectGroupsPage } from "@/pages/ProjectGroupsPage";
 import { WorkflowsPage } from "@/pages/WorkflowsPage";
+import { WorkflowRunsPage } from "@/pages/WorkflowRunsPage";
 
 const pageTitles: Record<string, string> = {
   settings: "配置",
@@ -19,6 +20,7 @@ const pageTitles: Record<string, string> = {
   managedProjects: "Managed Projects",
   projectGroups: "Project Groups",
   workflows: "Workflows",
+  workflowRuns: "Workflow Runs",
   local: "本地成员",
   groups: "本地分组",
 };
@@ -58,6 +60,7 @@ export default function App() {
             {activeTab === "managedProjects" && <ManagedProjectsPage />}
             {activeTab === "projectGroups" && <ProjectGroupsPage />}
             {activeTab === "workflows" && <WorkflowsPage />}
+            {activeTab === "workflowRuns" && <WorkflowRunsPage />}
             {activeTab === "local" && <LocalMembersPage />}
             {activeTab === "groups" && <GroupsPage />}
           </div>
