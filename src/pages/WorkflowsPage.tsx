@@ -42,31 +42,35 @@ type BuiltinStepTypeDefinition = {
 const BUILTIN_STEP_TYPES: BuiltinStepTypeDefinition[] = [
   {
     value: "checkout_branch",
-    label: "checkout_branch",
-    fields: [{ key: "branch", label: "Branch", placeholder: "${source_branch}" }],
+    label: "切换分支",
+    fields: [{ key: "branch", label: "分支", placeholder: "${source_branch}" }],
     defaults: { branch: "${source_branch}" },
   },
   {
     value: "git_pull",
-    label: "git_pull",
-    fields: [{ key: "branch", label: "Branch", placeholder: "${target_branch}" }],
+    label: "拉取分支",
+    fields: [{ key: "branch", label: "分支", placeholder: "${target_branch}" }],
     defaults: { branch: "${target_branch}" },
   },
   {
     value: "git_merge",
-    label: "git_merge",
-    fields: [{ key: "from", label: "From", placeholder: "${source_branch}" }],
+    label: "合并分支",
+    fields: [{ key: "from", label: "来源分支", placeholder: "${source_branch}" }],
     defaults: { from: "${source_branch}" },
   },
   {
     value: "git_push",
-    label: "git_push",
-    fields: [{ key: "remote", label: "Remote", placeholder: "origin" }],
+    label: "推送分支",
+    fields: [{ key: "remote", label: "远程", placeholder: "origin" }],
     defaults: { remote: "origin" },
   },
 ];
 
 const BUILTIN_STEP_MAP = new Map(BUILTIN_STEP_TYPES.map((item) => [item.value, item]));
+
+function workflowStepTypeLabel(stepType: string) {
+  return BUILTIN_STEP_MAP.get(stepType)?.label ?? stepType;
+}
 
 type StepDraft = {
   id: string;
@@ -101,11 +105,11 @@ function parseJsonObject(raw: string, fieldName: string): Record<string, unknown
   try {
     parsed = JSON.parse(normalized);
   } catch {
-    throw new Error(`${fieldName} must be valid JSON.`);
+    throw new Error(`${fieldName} 必须是合法的 JSON。`);
   }
 
   if (!isRecord(parsed)) {
-    throw new Error(`${fieldName} must be a JSON object.`);
+    throw new Error(`${fieldName} 必须是 JSON 对象。`);
   }
 
   return parsed;
@@ -168,13 +172,13 @@ function toDraftFromDetail(detail: WorkflowDefinitionDetail): WorkflowDraft {
 
 function buildStepPayloads(steps: StepDraft[]) {
   if (steps.length === 0) {
-    throw new Error("At least one workflow step is required.");
+    throw new Error("至少需要一个工作流步骤。");
   }
 
   return steps.map((step, index) => {
     const stepType = step.stepType.trim();
     if (!stepType) {
-      throw new Error(`Step ${index + 1} type is required.`);
+      throw new Error(`步骤 ${index + 1} 的类型不能为空。`);
     }
 
     const builtin = BUILTIN_STEP_MAP.get(stepType);
@@ -257,26 +261,26 @@ function WorkflowDraftForm({
   return (
     <div className="grid gap-4">
       <div className="grid gap-1">
-        <Label>Name</Label>
+        <Label>名称</Label>
         <Input
           value={draft.name}
           onChange={(event) => onChange({ ...draft, name: event.target.value })}
-          placeholder="workflow name"
+          placeholder="工作流名称"
         />
       </div>
 
       <div className="grid gap-1">
-        <Label>Description</Label>
+        <Label>描述</Label>
         <Input
           value={draft.description}
           onChange={(event) => onChange({ ...draft, description: event.target.value })}
-          placeholder="optional description"
+          placeholder="可选描述"
         />
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <div className="grid gap-1">
-          <Label>Max Concurrency Default</Label>
+          <Label>默认最大并发数</Label>
           <Input
             type="number"
             min={1}
@@ -289,12 +293,12 @@ function WorkflowDraftForm({
             checked={draft.enabled}
             onCheckedChange={(value) => onChange({ ...draft, enabled: Boolean(value) })}
           />
-          Enabled
+          启用
         </label>
       </div>
 
       <div className="grid gap-1">
-        <Label>Variables Schema (JSON Object)</Label>
+        <Label>变量结构（JSON 对象）</Label>
         <textarea
           className="min-h-24 rounded-md border border-input bg-background px-3 py-2 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           value={draft.variablesSchemaText}
@@ -304,9 +308,9 @@ function WorkflowDraftForm({
 
       <div className="grid gap-3">
         <div className="flex items-center justify-between">
-          <Label>Workflow Steps</Label>
+          <Label>工作流步骤</Label>
           <Button type="button" size="sm" variant="secondary" onClick={addStep}>
-            Add Step
+            添加步骤
           </Button>
         </div>
 
@@ -317,7 +321,7 @@ function WorkflowDraftForm({
           return (
             <div key={step.id} className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
               <div className="flex items-center justify-between">
-                <h4 className="text-sm font-semibold">Step {index + 1}</h4>
+                <h4 className="text-sm font-semibold">步骤 {index + 1}</h4>
                 <div className="flex items-center gap-1">
                   <Button
                     type="button"
@@ -325,9 +329,9 @@ function WorkflowDraftForm({
                     size="sm"
                     onClick={() => moveStep(index, -1)}
                     disabled={index === 0}
-                    aria-label={`Move step ${index + 1} up`}
+                    aria-label={`步骤 ${index + 1} 上移`}
                   >
-                    Up
+                    上移
                   </Button>
                   <Button
                     type="button"
@@ -335,9 +339,9 @@ function WorkflowDraftForm({
                     size="sm"
                     onClick={() => moveStep(index, 1)}
                     disabled={index === draft.steps.length - 1}
-                    aria-label={`Move step ${index + 1} down`}
+                    aria-label={`步骤 ${index + 1} 下移`}
                   >
-                    Down
+                    下移
                   </Button>
                   <Button
                     type="button"
@@ -345,21 +349,21 @@ function WorkflowDraftForm({
                     size="sm"
                     className="text-destructive"
                     onClick={() => removeStep(index)}
-                    aria-label={`Remove step ${index + 1}`}
+                    aria-label={`删除步骤 ${index + 1}`}
                     disabled={draft.steps.length <= 1}
                   >
-                    Remove
+                    删除
                   </Button>
                 </div>
               </div>
 
               <div className="grid gap-1">
-                <Label>Step Type</Label>
+                <Label>步骤类型</Label>
                 <select
                   className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                   value={step.stepType}
                   onChange={(event) => updateStepType(index, event.target.value)}
-                  aria-label={`Step ${index + 1} Type`}
+                  aria-label={`步骤 ${index + 1} 类型`}
                 >
                   {BUILTIN_STEP_TYPES.map((item) => (
                     <option key={item.value} value={item.value}>
@@ -367,7 +371,7 @@ function WorkflowDraftForm({
                     </option>
                   ))}
                   {hasCustomOption && (
-                    <option value={step.stepType}>{step.stepType}</option>
+                    <option value={step.stepType}>{workflowStepTypeLabel(step.stepType)}</option>
                   )}
                 </select>
               </div>
@@ -387,19 +391,19 @@ function WorkflowDraftForm({
                           updateBuiltinField(index, field.key, event.target.value)
                         }
                         placeholder={field.placeholder}
-                        aria-label={`Step ${index + 1} ${field.label}`}
+                        aria-label={`步骤 ${index + 1} ${field.label}`}
                       />
                     </div>
                   ))}
                 </div>
               ) : (
                 <div className="grid gap-1">
-                  <Label>Parameters (JSON Object)</Label>
+                  <Label>参数（JSON 对象）</Label>
                   <textarea
                     className="min-h-24 rounded-md border border-input bg-background px-3 py-2 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     value={step.customParametersText}
                     onChange={(event) => updateCustomText(index, event.target.value)}
-                    aria-label={`Step ${index + 1} Parameters JSON`}
+                    aria-label={`步骤 ${index + 1} 参数 JSON`}
                   />
                 </div>
               )}
@@ -414,12 +418,12 @@ function WorkflowDraftForm({
 function buildWorkflowCreatePayload(draft: WorkflowDraft) {
   const name = draft.name.trim();
   if (!name) {
-    throw new Error("Workflow name cannot be empty.");
+    throw new Error("工作流名称不能为空。");
   }
 
   const maxConcurrencyDefault = Number(draft.maxConcurrencyDefault);
   if (!Number.isInteger(maxConcurrencyDefault) || maxConcurrencyDefault < 1) {
-    throw new Error("Max concurrency default must be an integer >= 1.");
+    throw new Error("默认最大并发数必须是大于等于 1 的整数。");
   }
 
   return {
@@ -453,7 +457,7 @@ export function WorkflowsPage() {
       return true;
     } catch (error) {
       if (!silent) {
-        toast.error(`Load workflows failed: ${String(error)}`);
+        toast.error(`加载工作流失败：${String(error)}`);
       }
       setItems([]);
       return false;
@@ -481,12 +485,12 @@ export function WorkflowsPage() {
       setCreateOpen(false);
       setCreateDraft(createEmptyWorkflowDraft());
       if (await refresh({ silent: true })) {
-        toast.success("Workflow created.");
+        toast.success("工作流已创建。");
       } else {
-        toast.error("Workflow created, but refreshing workflow list failed.");
+        toast.error("工作流已创建，但刷新工作流列表失败。");
       }
     } catch (error) {
-      toast.error(`Create workflow failed: ${String(error)}`);
+      toast.error(`创建工作流失败：${String(error)}`);
     } finally {
       setCreating(false);
     }
@@ -503,7 +507,7 @@ export function WorkflowsPage() {
       setEditOpen(true);
     } catch (error) {
       if (requestToken !== editRequestTokenRef.current) return;
-      toast.error(`Load workflow detail failed: ${String(error)}`);
+      toast.error(`加载工作流详情失败：${String(error)}`);
     }
   }
 
@@ -527,29 +531,29 @@ export function WorkflowsPage() {
       setEditOpen(false);
       setEditingItem(null);
       if (await refresh({ silent: true })) {
-        toast.success("Workflow updated.");
+        toast.success("工作流已更新。");
       } else {
-        toast.error("Workflow updated, but refreshing workflow list failed.");
+        toast.error("工作流已更新，但刷新工作流列表失败。");
       }
     } catch (error) {
-      toast.error(`Update workflow failed: ${String(error)}`);
+      toast.error(`更新工作流失败：${String(error)}`);
     } finally {
       setSaving(false);
     }
   }
 
   async function onDelete(item: WorkflowDefinitionListItem) {
-    if (!confirm(`Delete workflow "${item.name}"?`)) return;
+    if (!confirm(`确定删除工作流“${item.name}”吗？`)) return;
 
     try {
       await deleteWorkflowDefinition(item.id);
       if (await refresh({ silent: true })) {
-        toast.success("Workflow deleted.");
+        toast.success("工作流已删除。");
       } else {
-        toast.error("Workflow deleted, but refreshing workflow list failed.");
+        toast.error("工作流已删除，但刷新工作流列表失败。");
       }
     } catch (error) {
-      toast.error(`Delete workflow failed: ${String(error)}`);
+      toast.error(`删除工作流失败：${String(error)}`);
     }
   }
 
@@ -558,24 +562,24 @@ export function WorkflowsPage() {
       <Panel>
         <PanelHeader className="flex-wrap gap-3">
           <div className="space-y-1">
-            <h2 className="text-xl font-semibold">Workflow Definitions</h2>
+            <h2 className="text-xl font-semibold">工作流定义</h2>
             <p className="text-sm text-muted-foreground">
-              Define reusable ordered git workflows for project-group automation.
+              为项目分组自动化定义可复用的有序 Git 工作流。
             </p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="secondary" onClick={() => void refresh()} disabled={loading}>
-              Refresh
+              刷新
             </Button>
             <Dialog open={createOpen} onOpenChange={setCreateOpen}>
               <DialogTrigger asChild>
-                <Button>New Workflow</Button>
+                <Button>新建工作流</Button>
               </DialogTrigger>
               <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
                 <DialogHeader>
-                  <DialogTitle>Create Workflow Definition</DialogTitle>
+                  <DialogTitle>新建工作流定义</DialogTitle>
                   <DialogDescription>
-                    Add ordered git steps and configure workflow defaults.
+                    添加有序的 Git 步骤，并配置工作流默认值。
                   </DialogDescription>
                 </DialogHeader>
                 <WorkflowDraftForm draft={createDraft} onChange={setCreateDraft} />
@@ -585,10 +589,10 @@ export function WorkflowsPage() {
                     type="button"
                     onClick={() => setCreateDraft(createEmptyWorkflowDraft())}
                   >
-                    Clear
+                    清空
                   </Button>
                   <Button type="button" onClick={() => void onCreate()} disabled={creating}>
-                    Create
+                    创建
                   </Button>
                 </DialogFooter>
               </DialogContent>
@@ -600,12 +604,12 @@ export function WorkflowsPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>ID</TableHead>
-                <TableHead>Name</TableHead>
-                <TableHead>Enabled</TableHead>
-                <TableHead>Steps</TableHead>
-                <TableHead>Max Concurrency</TableHead>
-                <TableHead>Updated</TableHead>
-                <TableHead>Actions</TableHead>
+                <TableHead>名称</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead>步骤数</TableHead>
+                <TableHead>最大并发</TableHead>
+                <TableHead>更新时间</TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -613,14 +617,14 @@ export function WorkflowsPage() {
                 <TableRow key={item.id}>
                   <TableCell className="font-mono">{item.id}</TableCell>
                   <TableCell>{item.name}</TableCell>
-                  <TableCell>{item.enabled ? "Enabled" : "Disabled"}</TableCell>
+                  <TableCell>{item.enabled ? "启用" : "禁用"}</TableCell>
                   <TableCell>{item.stepsCount}</TableCell>
                   <TableCell>{item.maxConcurrencyDefault}</TableCell>
                   <TableCell className="font-mono text-xs">{formatDateTime(item.updatedAt)}</TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
                       <Button variant="ghost" size="sm" onClick={() => void startEdit(item)}>
-                        Edit
+                        编辑
                       </Button>
                       <Button
                         variant="ghost"
@@ -628,7 +632,7 @@ export function WorkflowsPage() {
                         className="text-destructive"
                         onClick={() => void onDelete(item)}
                       >
-                        Delete
+                        删除
                       </Button>
                     </div>
                   </TableCell>
@@ -636,8 +640,8 @@ export function WorkflowsPage() {
               ))}
               {items.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-muted-foreground">
-                    {loading ? "Loading..." : "No workflows defined yet."}
+                  <TableCell colSpan={6} className="text-center text-muted-foreground">
+                    {loading ? "加载中..." : "暂无工作流定义。"}
                   </TableCell>
                 </TableRow>
               )}
@@ -649,18 +653,18 @@ export function WorkflowsPage() {
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
           <DialogHeader>
-            <DialogTitle>Edit Workflow Definition</DialogTitle>
+            <DialogTitle>编辑工作流定义</DialogTitle>
             <DialogDescription>
-              Update metadata, step order, and built-in step parameters.
+              更新元数据、步骤顺序以及内置步骤参数。
             </DialogDescription>
           </DialogHeader>
           <WorkflowDraftForm draft={editDraft} onChange={setEditDraft} />
           <DialogFooter>
             <Button variant="secondary" type="button" onClick={() => setEditOpen(false)}>
-              Cancel
+              取消
             </Button>
             <Button type="button" onClick={() => void onSaveEdit()} disabled={saving}>
-              Save
+              保存
             </Button>
           </DialogFooter>
         </DialogContent>

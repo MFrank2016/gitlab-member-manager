@@ -22,10 +22,10 @@ const navItems: NavItem[] = [
   { id: "settings", label: "配置", icon: <Settings className="h-5 w-5" /> },
   { id: "projects", label: "项目搜索", icon: <Search className="h-5 w-5" /> },
   { id: "members", label: "项目成员", icon: <Users className="h-5 w-5" /> },
-  { id: "managedProjects", label: "Managed Projects", icon: <FolderOpen className="h-5 w-5" /> },
-  { id: "projectGroups", label: "Project Groups", icon: <FolderOpen className="h-5 w-5" /> },
-  { id: "workflows", label: "Workflows", icon: <GitBranch className="h-5 w-5" /> },
-  { id: "workflowRuns", label: "Workflow Runs", icon: <Activity className="h-5 w-5" /> },
+  { id: "managedProjects", label: "托管项目", icon: <FolderOpen className="h-5 w-5" /> },
+  { id: "projectGroups", label: "项目分组", icon: <FolderOpen className="h-5 w-5" /> },
+  { id: "workflows", label: "工作流定义", icon: <GitBranch className="h-5 w-5" /> },
+  { id: "workflowRuns", label: "工作流运行", icon: <Activity className="h-5 w-5" /> },
   { id: "local", label: "本地成员", icon: <UserCircle className="h-5 w-5" /> },
   { id: "groups", label: "本地分组", icon: <FolderOpen className="h-5 w-5" /> },
 ];
@@ -59,8 +59,8 @@ export function Sidebar({
           </div>
           {!collapsed && (
             <div className="leading-tight">
-              <div className="text-sm font-semibold tracking-tight">成员管理</div>
-              <div className="text-xs text-muted-foreground">GitLab Workspace</div>
+              <div className="text-sm font-semibold tracking-tight">Gitlab助手 By 清风</div>
+              <div className="text-xs text-muted-foreground">Gitlab Helper</div>
             </div>
           )}
         </div>

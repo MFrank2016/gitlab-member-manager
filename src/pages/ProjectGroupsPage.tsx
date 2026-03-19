@@ -81,7 +81,7 @@ export function ProjectGroupsPage() {
         refreshGroupProjects(nextActiveGroupId),
       ]);
     } catch (error) {
-      toast.error(`Load project groups failed: ${String(error)}`);
+      toast.error(`加载项目分组失败：${String(error)}`);
     } finally {
       setLoading(false);
     }
@@ -98,7 +98,7 @@ export function ProjectGroupsPage() {
 
   async function onCreateGroup() {
     if (!newGroupName.trim()) {
-      toast.error("Group name cannot be empty.");
+      toast.error("分组名称不能为空。");
       return;
     }
     try {
@@ -107,9 +107,9 @@ export function ProjectGroupsPage() {
       setNewGroupName("");
       await refreshGroups();
       setActiveGroupId(created.id);
-      toast.success("Project group created.");
+      toast.success("项目分组已创建。");
     } catch (error) {
-      toast.error(`Create group failed: ${String(error)}`);
+      toast.error(`创建分组失败：${String(error)}`);
     }
   }
 
@@ -122,7 +122,7 @@ export function ProjectGroupsPage() {
   async function onSaveEditGroup() {
     if (!editingGroup) return;
     if (!editGroupName.trim()) {
-      toast.error("Group name cannot be empty.");
+      toast.error("分组名称不能为空。");
       return;
     }
 
@@ -131,20 +131,20 @@ export function ProjectGroupsPage() {
       setEditOpen(false);
       setEditingGroup(null);
       await refreshGroups();
-      toast.success("Project group updated.");
+      toast.success("项目分组已更新。");
     } catch (error) {
-      toast.error(`Update group failed: ${String(error)}`);
+      toast.error(`更新分组失败：${String(error)}`);
     }
   }
 
   async function onDeleteGroup(group: ProjectGroup) {
-    if (!confirm(`Delete project group "${group.name}"?`)) return;
+    if (!confirm(`确定删除项目分组“${group.name}”吗？`)) return;
     try {
       await deleteProjectGroup(group.id);
       await refreshGroups();
-      toast.success("Project group deleted.");
+      toast.success("项目分组已删除。");
     } catch (error) {
-      toast.error(`Delete group failed: ${String(error)}`);
+      toast.error(`删除分组失败：${String(error)}`);
     }
   }
 
@@ -159,12 +159,12 @@ export function ProjectGroupsPage() {
 
   async function addSelectedProjects() {
     if (!activeGroupId) {
-      toast.error("Select a project group first.");
+      toast.error("请先选择项目分组。");
       return;
     }
     const idsToAdd = Array.from(selectedManagedIds).filter((id) => !groupProjectIds.has(id));
     if (idsToAdd.length === 0) {
-      toast.error("No projects selected to add.");
+      toast.error("没有可加入的项目。");
       return;
     }
 
@@ -172,9 +172,9 @@ export function ProjectGroupsPage() {
       await addProjectsToGroup(activeGroupId, idsToAdd);
       setSelectedManagedIds(new Set());
       await Promise.all([refreshGroups(), refreshGroupProjects(activeGroupId)]);
-      toast.success(`Added ${idsToAdd.length} project(s) to group.`);
+      toast.success(`已向分组中加入 ${idsToAdd.length} 个项目。`);
     } catch (error) {
-      toast.error(`Add projects failed: ${String(error)}`);
+      toast.error(`加入项目失败：${String(error)}`);
     }
   }
 
@@ -183,9 +183,9 @@ export function ProjectGroupsPage() {
     try {
       await removeProjectsFromGroup(activeGroupId, [projectId]);
       await Promise.all([refreshGroups(), refreshGroupProjects(activeGroupId)]);
-      toast.success("Project removed from group.");
+      toast.success("项目已移出分组。");
     } catch (error) {
-      toast.error(`Remove project failed: ${String(error)}`);
+      toast.error(`移出项目失败：${String(error)}`);
     }
   }
 
@@ -194,38 +194,38 @@ export function ProjectGroupsPage() {
       <Panel>
         <PanelHeader className="flex-wrap gap-3">
           <div className="space-y-1">
-            <h2 className="text-xl font-semibold">Project Groups</h2>
+            <h2 className="text-xl font-semibold">项目分组</h2>
             <p className="text-sm text-muted-foreground">
-              Organize managed projects into local groups for batch operations.
+              将托管项目组织成本地分组，用于后续批量操作。
             </p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="secondary" onClick={() => void refreshAll()} disabled={loading}>
-              Refresh
+              刷新
             </Button>
             <Dialog open={createOpen} onOpenChange={setCreateOpen}>
               <DialogTrigger asChild>
-                <Button>New Group</Button>
+                <Button>新建分组</Button>
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Create Project Group</DialogTitle>
-                  <DialogDescription>Use local project groups to drive batch actions.</DialogDescription>
+                  <DialogTitle>新建项目分组</DialogTitle>
+                  <DialogDescription>使用本地项目分组来组织后续批量操作。</DialogDescription>
                 </DialogHeader>
                 <div className="grid gap-2">
-                  <Label>Name</Label>
+                  <Label>名称</Label>
                   <Input
                     value={newGroupName}
                     onChange={(e) => setNewGroupName(e.target.value)}
-                    placeholder="e.g. release-train"
+                    placeholder="例如：release-train"
                     autoFocus
                   />
                 </div>
                 <DialogFooter>
                   <Button variant="secondary" onClick={() => setNewGroupName("")}>
-                    Clear
+                    清空
                   </Button>
-                  <Button onClick={() => void onCreateGroup()}>Create</Button>
+                  <Button onClick={() => void onCreateGroup()}>创建</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
@@ -236,16 +236,16 @@ export function ProjectGroupsPage() {
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-5">
         <Panel className="xl:col-span-2">
           <PanelHeader>
-            <h3 className="font-semibold">Groups</h3>
+            <h3 className="font-semibold">分组列表</h3>
           </PanelHeader>
           <PanelBody>
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>ID</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Projects</TableHead>
-                  <TableHead>Actions</TableHead>
+                  <TableHead>名称</TableHead>
+                  <TableHead>项目数</TableHead>
+                  <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -261,7 +261,7 @@ export function ProjectGroupsPage() {
                     <TableCell onClick={(event) => event.stopPropagation()}>
                       <div className="flex items-center gap-2">
                         <Button variant="ghost" size="sm" onClick={() => openEditGroup(group)}>
-                          Edit
+                          编辑
                         </Button>
                         <Button
                           variant="ghost"
@@ -269,7 +269,7 @@ export function ProjectGroupsPage() {
                           className="text-destructive"
                           onClick={() => void onDeleteGroup(group)}
                         >
-                          Delete
+                          删除
                         </Button>
                       </div>
                     </TableCell>
@@ -278,7 +278,7 @@ export function ProjectGroupsPage() {
                 {groups.length === 0 && (
                   <TableRow>
                     <TableCell colSpan={4} className="text-center text-muted-foreground">
-                      No project groups yet.
+                      暂无项目分组。
                     </TableCell>
                   </TableRow>
                 )}
@@ -292,10 +292,10 @@ export function ProjectGroupsPage() {
             <PanelHeader>
               <div className="space-y-1">
                 <h3 className="font-semibold">
-                  Group Projects {activeGroup ? `- ${activeGroup.name}` : ""}
+                  分组内项目 {activeGroup ? `- ${activeGroup.name}` : ""}
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  {activeGroup ? `Updated ${formatDateTime(activeGroup.updatedAt)}` : "Select a group to view projects."}
+                  {activeGroup ? `更新于 ${formatDateTime(activeGroup.updatedAt)}` : "请选择一个分组查看项目。"}
                 </p>
               </div>
             </PanelHeader>
@@ -304,10 +304,10 @@ export function ProjectGroupsPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>GitLab ID</TableHead>
-                    <TableHead>Path With Namespace</TableHead>
-                    <TableHead>Repository Path</TableHead>
-                    <TableHead>Enabled</TableHead>
-                    <TableHead>Actions</TableHead>
+                    <TableHead>命名空间路径</TableHead>
+                    <TableHead>仓库路径</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead>操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -316,7 +316,7 @@ export function ProjectGroupsPage() {
                       <TableCell className="font-mono">{project.gitlabProjectId}</TableCell>
                       <TableCell className="font-mono text-xs">{project.pathWithNamespace}</TableCell>
                       <TableCell className="font-mono text-xs">{project.repoPath}</TableCell>
-                      <TableCell>{project.enabled ? "Enabled" : "Disabled"}</TableCell>
+                      <TableCell>{project.enabled ? "启用" : "禁用"}</TableCell>
                       <TableCell>
                         <Button
                           variant="ghost"
@@ -324,7 +324,7 @@ export function ProjectGroupsPage() {
                           className="text-destructive"
                           onClick={() => void removeProjectFromActiveGroup(project.id)}
                         >
-                          Remove
+                          移除
                         </Button>
                       </TableCell>
                     </TableRow>
@@ -332,7 +332,7 @@ export function ProjectGroupsPage() {
                   {groupProjects.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={5} className="text-center text-muted-foreground">
-                        {activeGroup ? "This group has no projects yet." : "No group selected."}
+                        {activeGroup ? "当前分组还没有项目。" : "尚未选择分组。"}
                       </TableCell>
                     </TableRow>
                   )}
@@ -343,23 +343,23 @@ export function ProjectGroupsPage() {
 
           <Panel>
             <PanelHeader className="flex-wrap gap-2">
-              <h3 className="font-semibold">Add Managed Projects</h3>
+              <h3 className="font-semibold">添加托管项目</h3>
               <Button
                 size="sm"
                 onClick={() => void addSelectedProjects()}
                 disabled={!activeGroup || selectedManagedIds.size === 0}
               >
-                Add Selected ({selectedManagedIds.size})
+                添加所选（{selectedManagedIds.size}）
               </Button>
             </PanelHeader>
             <PanelBody>
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Select</TableHead>
+                    <TableHead>选择</TableHead>
                     <TableHead>GitLab ID</TableHead>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Path</TableHead>
+                    <TableHead>名称</TableHead>
+                    <TableHead>路径</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -378,7 +378,7 @@ export function ProjectGroupsPage() {
                         <TableCell>
                           {project.name}
                           {alreadyInGroup && (
-                            <span className="ml-2 text-xs text-muted-foreground">(already added)</span>
+                            <span className="ml-2 text-xs text-muted-foreground">（已加入）</span>
                           )}
                         </TableCell>
                         <TableCell className="font-mono text-xs">{project.pathWithNamespace}</TableCell>
@@ -388,7 +388,7 @@ export function ProjectGroupsPage() {
                   {managedProjects.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={4} className="text-center text-muted-foreground">
-                        No managed projects found.
+                        暂无托管项目。
                       </TableCell>
                     </TableRow>
                   )}
@@ -402,11 +402,11 @@ export function ProjectGroupsPage() {
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Edit Project Group</DialogTitle>
-            <DialogDescription>Update the local project group name.</DialogDescription>
+            <DialogTitle>编辑项目分组</DialogTitle>
+            <DialogDescription>更新本地项目分组名称。</DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
-            <Label>Name</Label>
+            <Label>名称</Label>
             <Input
               value={editGroupName}
               onChange={(e) => setEditGroupName(e.target.value)}
@@ -415,9 +415,9 @@ export function ProjectGroupsPage() {
           </div>
           <DialogFooter>
             <Button variant="secondary" onClick={() => setEditOpen(false)}>
-              Cancel
+              取消
             </Button>
-            <Button onClick={() => void onSaveEditGroup()}>Save</Button>
+            <Button onClick={() => void onSaveEditGroup()}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

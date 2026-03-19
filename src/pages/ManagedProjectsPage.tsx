@@ -61,25 +61,25 @@ function ProjectDraftForm({
   return (
     <div className="grid gap-3">
       <div className="grid gap-1">
-        <Label>GitLab Project ID</Label>
+        <Label>GitLab 项目 ID</Label>
         <Input
           type="number"
           min={1}
           value={draft.gitlabProjectId}
           onChange={(e) => onChange({ ...draft, gitlabProjectId: e.target.value })}
-          placeholder="e.g. 12345"
+          placeholder="例如：12345"
         />
       </div>
       <div className="grid gap-1">
-        <Label>Name</Label>
+        <Label>名称</Label>
         <Input
           value={draft.name}
           onChange={(e) => onChange({ ...draft, name: e.target.value })}
-          placeholder="project name"
+          placeholder="项目名称"
         />
       </div>
       <div className="grid gap-1">
-        <Label>Path With Namespace</Label>
+        <Label>命名空间路径</Label>
         <Input
           value={draft.pathWithNamespace}
           onChange={(e) => onChange({ ...draft, pathWithNamespace: e.target.value })}
@@ -87,7 +87,7 @@ function ProjectDraftForm({
         />
       </div>
       <div className="grid gap-1">
-        <Label>Local Repo Path</Label>
+        <Label>本地仓库路径</Label>
         <Input
           value={draft.repoPath}
           onChange={(e) => onChange({ ...draft, repoPath: e.target.value })}
@@ -96,7 +96,7 @@ function ProjectDraftForm({
       </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <div className="grid gap-1">
-          <Label>Default Branch</Label>
+          <Label>默认分支</Label>
           <Input
             value={draft.defaultBranch}
             onChange={(e) => onChange({ ...draft, defaultBranch: e.target.value })}
@@ -104,7 +104,7 @@ function ProjectDraftForm({
           />
         </div>
         <div className="grid gap-1">
-          <Label>Default Remote</Label>
+          <Label>默认远程</Label>
           <Input
             value={draft.defaultRemote}
             onChange={(e) => onChange({ ...draft, defaultRemote: e.target.value })}
@@ -117,7 +117,7 @@ function ProjectDraftForm({
           checked={draft.enabled}
           onCheckedChange={(v) => onChange({ ...draft, enabled: Boolean(v) })}
         />
-        Enabled
+        启用
       </label>
     </div>
   );
@@ -138,7 +138,7 @@ export function ManagedProjectsPage() {
     try {
       setItems(await listManagedProjects());
     } catch (error) {
-      toast.error(`Load managed projects failed: ${String(error)}`);
+      toast.error(`加载托管项目失败：${String(error)}`);
       setItems([]);
     } finally {
       setLoading(false);
@@ -152,7 +152,7 @@ export function ManagedProjectsPage() {
   async function onCreate() {
     const gitlabProjectId = toPositiveNumber(createDraft.gitlabProjectId);
     if (!gitlabProjectId) {
-      toast.error("GitLab Project ID must be a positive integer.");
+      toast.error("GitLab 项目 ID 必须是正整数。");
       return;
     }
 
@@ -169,9 +169,9 @@ export function ManagedProjectsPage() {
       setCreateDraft(EMPTY_DRAFT);
       setCreateOpen(false);
       await refresh();
-      toast.success("Managed project created.");
+      toast.success("托管项目已创建。");
     } catch (error) {
-      toast.error(`Create failed: ${String(error)}`);
+      toast.error(`创建失败：${String(error)}`);
     }
   }
 
@@ -194,7 +194,7 @@ export function ManagedProjectsPage() {
 
     const gitlabProjectId = toPositiveNumber(editDraft.gitlabProjectId);
     if (!gitlabProjectId) {
-      toast.error("GitLab Project ID must be a positive integer.");
+      toast.error("GitLab 项目 ID 必须是正整数。");
       return;
     }
 
@@ -212,20 +212,20 @@ export function ManagedProjectsPage() {
       setEditOpen(false);
       setEditingItem(null);
       await refresh();
-      toast.success("Managed project updated.");
+      toast.success("托管项目已更新。");
     } catch (error) {
-      toast.error(`Update failed: ${String(error)}`);
+      toast.error(`更新失败：${String(error)}`);
     }
   }
 
   async function onDelete(item: ManagedProject) {
-    if (!confirm(`Delete managed project "${item.name}"?`)) return;
+    if (!confirm(`确定删除托管项目“${item.name}”吗？`)) return;
     try {
       await deleteManagedProject(item.id);
       await refresh();
-      toast.success("Managed project deleted.");
+      toast.success("托管项目已删除。");
     } catch (error) {
-      toast.error(`Delete failed: ${String(error)}`);
+      toast.error(`删除失败：${String(error)}`);
     }
   }
 
@@ -234,32 +234,32 @@ export function ManagedProjectsPage() {
       <Panel>
         <PanelHeader className="flex-wrap gap-3">
           <div className="space-y-1">
-            <h2 className="text-xl font-semibold">Managed Projects</h2>
+            <h2 className="text-xl font-semibold">托管项目</h2>
             <p className="text-sm text-muted-foreground">
-              Register GitLab projects with local repository paths for group operations.
+              将 GitLab 项目与本地仓库路径绑定，用于后续分组和批量操作。
             </p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="secondary" onClick={() => void refresh()} disabled={loading}>
-              Refresh
+              刷新
             </Button>
             <Dialog open={createOpen} onOpenChange={setCreateOpen}>
               <DialogTrigger asChild>
-                <Button>New Managed Project</Button>
+                <Button>新建托管项目</Button>
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Create Managed Project</DialogTitle>
+                  <DialogTitle>新建托管项目</DialogTitle>
                   <DialogDescription>
-                    Bind a GitLab project to a local repository path.
+                    将一个 GitLab 项目绑定到本地仓库路径。
                   </DialogDescription>
                 </DialogHeader>
                 <ProjectDraftForm draft={createDraft} onChange={setCreateDraft} />
                 <DialogFooter>
                   <Button variant="secondary" onClick={() => setCreateDraft(EMPTY_DRAFT)}>
-                    Clear
+                    清空
                   </Button>
-                  <Button onClick={() => void onCreate()}>Create</Button>
+                  <Button onClick={() => void onCreate()}>创建</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
@@ -271,12 +271,12 @@ export function ManagedProjectsPage() {
               <TableRow>
                 <TableHead>ID</TableHead>
                 <TableHead>GitLab ID</TableHead>
-                <TableHead>Name</TableHead>
-                <TableHead>Namespace Path</TableHead>
-                <TableHead>Repo Path</TableHead>
-                <TableHead>Defaults</TableHead>
-                <TableHead>Updated</TableHead>
-                <TableHead>Actions</TableHead>
+                <TableHead>名称</TableHead>
+                <TableHead>命名空间路径</TableHead>
+                <TableHead>仓库路径</TableHead>
+                <TableHead>默认值</TableHead>
+                <TableHead>更新时间</TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -288,16 +288,16 @@ export function ManagedProjectsPage() {
                   <TableCell className="font-mono text-xs">{item.pathWithNamespace}</TableCell>
                   <TableCell className="font-mono text-xs">{item.repoPath}</TableCell>
                   <TableCell className="text-xs">
-                    {item.defaultBranch} / {item.defaultRemote} / {item.enabled ? "enabled" : "disabled"}
+                    {item.defaultBranch} / {item.defaultRemote} / {item.enabled ? "启用" : "禁用"}
                   </TableCell>
                   <TableCell className="font-mono text-xs">{formatDateTime(item.updatedAt)}</TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
                       <Button variant="ghost" size="sm" onClick={() => startEdit(item)}>
-                        Edit
+                        编辑
                       </Button>
                       <Button variant="ghost" size="sm" className="text-destructive" onClick={() => void onDelete(item)}>
-                        Delete
+                        删除
                       </Button>
                     </div>
                   </TableCell>
@@ -306,7 +306,7 @@ export function ManagedProjectsPage() {
               {items.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={8} className="text-center text-muted-foreground">
-                    {loading ? "Loading..." : "No managed projects yet."}
+                    {loading ? "加载中..." : "暂无托管项目。"}
                   </TableCell>
                 </TableRow>
               )}
@@ -318,15 +318,15 @@ export function ManagedProjectsPage() {
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Edit Managed Project</DialogTitle>
-            <DialogDescription>Update project binding and defaults.</DialogDescription>
+            <DialogTitle>编辑托管项目</DialogTitle>
+            <DialogDescription>更新项目绑定关系和默认配置。</DialogDescription>
           </DialogHeader>
           <ProjectDraftForm draft={editDraft} onChange={setEditDraft} />
           <DialogFooter>
             <Button variant="secondary" onClick={() => setEditOpen(false)}>
-              Cancel
+              取消
             </Button>
-            <Button onClick={() => void onSaveEdit()}>Save</Button>
+            <Button onClick={() => void onSaveEdit()}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

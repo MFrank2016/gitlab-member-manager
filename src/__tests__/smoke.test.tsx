@@ -49,10 +49,10 @@ describe("navigation smoke", () => {
   it("renders managed project navigation entries", async () => {
     render(<App />);
 
-    expect(await screen.findByTitle("Managed Projects")).toBeInTheDocument();
-    expect(screen.getByTitle("Project Groups")).toBeInTheDocument();
-    expect(screen.getByTitle("Workflows")).toBeInTheDocument();
-    expect(screen.getByTitle("Workflow Runs")).toBeInTheDocument();
+    expect(await screen.findByTitle("托管项目")).toBeInTheDocument();
+    expect(screen.getByTitle("项目分组")).toBeInTheDocument();
+    expect(screen.getByTitle("工作流定义")).toBeInTheDocument();
+    expect(screen.getByTitle("工作流运行")).toBeInTheDocument();
   });
 });
 
@@ -120,14 +120,14 @@ describe("project group interactions", () => {
 
     render(<ProjectGroupsPage />);
 
-    expect(await screen.findByText("Add Managed Projects")).toBeInTheDocument();
+    expect(await screen.findByText("添加托管项目")).toBeInTheDocument();
     const managedRow = screen.getByText("project-one").closest("tr");
     if (!managedRow) {
       throw new Error("Could not find managed project row for project-one");
     }
     fireEvent.click(within(managedRow).getByRole("checkbox"));
 
-    fireEvent.click(screen.getByRole("button", { name: /add selected/i }));
+    fireEvent.click(screen.getByRole("button", { name: /添加所选/i }));
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith(
@@ -139,7 +139,7 @@ describe("project group interactions", () => {
       );
     });
 
-    expect(await screen.findByText("(already added)")).toBeInTheDocument();
+    expect(await screen.findByText("（已加入）")).toBeInTheDocument();
   });
 });
 
@@ -175,24 +175,24 @@ describe("workflow interactions", () => {
 
     render(<App />);
 
-    fireEvent.click(await screen.findByTitle("Workflows"));
-    expect(await screen.findByText("Workflow Definitions")).toBeInTheDocument();
+    fireEvent.click(await screen.findByTitle("工作流定义"));
+    expect(await screen.findByRole("heading", { name: "工作流定义" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /new workflow/i }));
-    fireEvent.change(screen.getByPlaceholderText("workflow name"), {
+    fireEvent.click(screen.getByRole("button", { name: /新建工作流/i }));
+    fireEvent.change(screen.getByPlaceholderText("工作流名称"), {
       target: { value: "release-flow" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /add step/i }));
-    fireEvent.change(screen.getByLabelText("Step 2 Type"), {
+    fireEvent.click(screen.getByRole("button", { name: /添加步骤/i }));
+    fireEvent.change(screen.getByLabelText("步骤 2 类型"), {
       target: { value: "git_push" },
     });
-    fireEvent.change(screen.getByLabelText("Step 2 Remote"), {
+    fireEvent.change(screen.getByLabelText("步骤 2 远程"), {
       target: { value: "upstream" },
     });
-    fireEvent.click(screen.getByLabelText("Move step 2 up"));
+    fireEvent.click(screen.getByLabelText("步骤 2 上移"));
 
-    fireEvent.click(screen.getByRole("button", { name: /^Create$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^创建$/i }));
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith(
@@ -337,23 +337,23 @@ describe("workflow run monitoring interactions", () => {
 
     render(<App />);
 
-    fireEvent.click(await screen.findByTitle("Workflow Runs"));
+    fireEvent.click(await screen.findByTitle("工作流运行"));
 
-    expect(await screen.findByRole("heading", { name: "Workflow Runs" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "工作流运行" })).toBeInTheDocument();
     expect((await screen.findAllByText("release-flow")).length).toBeGreaterThan(0);
-    expect(await screen.findByText(/Run #301/)).toBeInTheDocument();
+    expect(await screen.findByText(/运行 #301/)).toBeInTheDocument();
     expect(screen.getAllByText("release-train").length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Project web-service" }));
-    expect(await screen.findByText("Step 2 - git_merge")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "项目 web-service" }));
+    expect(await screen.findByText("步骤 2 - 合并分支")).toBeInTheDocument();
     expect(screen.getByText("conflict on README.md")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /cancel run/i }));
+    fireEvent.click(screen.getByRole("button", { name: /取消运行/i }));
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("cancel_workflow_run", { workflow_run_id: 301 });
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /retry failed/i }));
+    fireEvent.click(screen.getByRole("button", { name: /重试失败项/i }));
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("retry_failed_workflow_run", {
         request: {
@@ -473,20 +473,20 @@ describe("workflow run monitoring interactions", () => {
 
     await screen.findByText("#301");
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /retry failed/i })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /重试失败项/i })).toBeEnabled();
     });
 
     fireEvent.click(screen.getByText("#302"));
-    expect(screen.getByRole("button", { name: /retry failed/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /重试失败项/i })).toBeDisabled();
 
-    fireEvent.click(screen.getByRole("button", { name: /cancel run/i }));
+    fireEvent.click(screen.getByRole("button", { name: /取消运行/i }));
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("cancel_workflow_run", { workflow_run_id: 302 });
     });
 
     resolveRun302?.(runDetail302);
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /retry failed/i })).toBeDisabled();
+      expect(screen.getByRole("button", { name: /重试失败项/i })).toBeDisabled();
     });
   });
 
@@ -571,17 +571,17 @@ describe("workflow run monitoring interactions", () => {
 
     await screen.findByText("#301");
     await waitFor(() => {
-      const retryButtons = screen.getAllByRole("button", { name: /retry failed/i });
+      const retryButtons = screen.getAllByRole("button", { name: /重试失败项/i });
       expect(retryButtons[retryButtons.length - 1]).toBeEnabled();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /^Refresh$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^刷新$/i }));
 
     await waitFor(() => {
       expect(detailCallCount).toBeGreaterThanOrEqual(2);
     });
     await waitFor(() => {
-      const retryButtons = screen.getAllByRole("button", { name: /retry failed/i });
+      const retryButtons = screen.getAllByRole("button", { name: /重试失败项/i });
       expect(retryButtons[retryButtons.length - 1]).toBeDisabled();
     });
   });
@@ -663,20 +663,20 @@ describe("workflow run monitoring interactions", () => {
 
     await screen.findByText("#301");
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Run #301" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "运行 #301" })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /^Refresh$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^刷新$/i }));
     fireEvent.click(screen.getByText("#302"));
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Run #302" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "运行 #302" })).toBeInTheDocument();
     });
 
     resolveDelayedRefresh?.(runList);
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Run #302" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "运行 #302" })).toBeInTheDocument();
     });
-    expect(screen.queryByRole("heading", { name: "Run #301" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "运行 #301" })).not.toBeInTheDocument();
   });
 
   it("ignores stale in-flight detail responses after selection is cleared", async () => {
@@ -742,13 +742,13 @@ describe("workflow run monitoring interactions", () => {
     await screen.findByText("#301");
 
     currentRunList = [];
-    fireEvent.click(screen.getByRole("button", { name: /^Refresh$/i }));
-    await screen.findByText("No workflow runs found.");
+    fireEvent.click(screen.getByRole("button", { name: /^刷新$/i }));
+    await screen.findByText("暂无工作流运行记录。");
 
     resolveDetail?.(lateDetail);
 
     await waitFor(() => {
-      expect(screen.getByText("Select a workflow run to inspect details.")).toBeInTheDocument();
+      expect(screen.getByText("请选择一个工作流运行查看详情。")).toBeInTheDocument();
     });
     expect(screen.queryByText("late-project")).not.toBeInTheDocument();
   });
