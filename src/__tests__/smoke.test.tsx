@@ -199,6 +199,10 @@ describe("workflow interactions", () => {
         "create_workflow_definition",
         expect.objectContaining({
           name: "release-flow",
+          variables_schema: {
+            source_branch: "",
+            target_branch: "",
+          },
           steps: [
             {
               stepType: "git_push",

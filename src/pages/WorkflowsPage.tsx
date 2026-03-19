@@ -23,6 +23,11 @@ import {
   listWorkflowDefinitions,
   updateWorkflowDefinition,
 } from "@/lib/invoke";
+import {
+  mergeDeclaredWorkflowVariables,
+  validateDeclaredWorkflowVariables,
+  type WorkflowStepLike,
+} from "@/lib/workflow-definition-variables";
 import type { WorkflowDefinitionDetail, WorkflowDefinitionListItem } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 
@@ -30,6 +35,7 @@ type StepFieldDefinition = {
   key: string;
   label: string;
   placeholder: string;
+  hint?: string;
 };
 
 type BuiltinStepTypeDefinition = {
@@ -54,8 +60,15 @@ const BUILTIN_STEP_TYPES: BuiltinStepTypeDefinition[] = [
   },
   {
     value: "git_merge",
-    label: "合并分支",
-    fields: [{ key: "from", label: "来源分支", placeholder: "${source_branch}" }],
+    label: "将来源分支合并到当前分支",
+    fields: [
+      {
+        key: "from",
+        label: "来源分支",
+        placeholder: "${source_branch}",
+        hint: "当前分支由前面的切换分支或拉取分支步骤决定。",
+      },
+    ],
     defaults: { from: "${source_branch}" },
   },
   {
@@ -68,9 +81,11 @@ const BUILTIN_STEP_TYPES: BuiltinStepTypeDefinition[] = [
 
 const BUILTIN_STEP_MAP = new Map(BUILTIN_STEP_TYPES.map((item) => [item.value, item]));
 
-function workflowStepTypeLabel(stepType: string) {
-  return BUILTIN_STEP_MAP.get(stepType)?.label ?? stepType;
-}
+type VariableDraft = {
+  id: string;
+  name: string;
+  defaultValue: string;
+};
 
 type StepDraft = {
   id: string;
@@ -84,15 +99,25 @@ type WorkflowDraft = {
   description: string;
   enabled: boolean;
   maxConcurrencyDefault: string;
-  variablesSchemaText: string;
+  variableRows: VariableDraft[];
   steps: StepDraft[];
 };
 
 let stepDraftCounter = 0;
+let variableDraftCounter = 0;
 
 function nextStepDraftId() {
   stepDraftCounter += 1;
   return `step-${stepDraftCounter}`;
+}
+
+function nextVariableDraftId() {
+  variableDraftCounter += 1;
+  return `variable-${variableDraftCounter}`;
+}
+
+function workflowStepTypeLabel(stepType: string) {
+  return BUILTIN_STEP_MAP.get(stepType)?.label ?? stepType;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -122,9 +147,12 @@ function normalizeBuiltinParameters(stepType: string, parameters: Record<string,
   const normalized: Record<string, unknown> = {};
   for (const field of builtin.fields) {
     const raw = parameters[field.key];
-    normalized[field.key] = typeof raw === "string"
-      ? raw
-      : (raw === undefined || raw === null ? (builtin.defaults[field.key] ?? "") : String(raw));
+    normalized[field.key] =
+      typeof raw === "string"
+        ? raw
+        : raw === undefined || raw === null
+          ? (builtin.defaults[field.key] ?? "")
+          : String(raw);
   }
   return normalized;
 }
@@ -141,33 +169,44 @@ function createStepDraft(stepType = "checkout_branch", parameters: unknown = und
   };
 }
 
-function createEmptyWorkflowDraft(): WorkflowDraft {
+function createVariableDraft(name: string, defaultValue = ""): VariableDraft {
   return {
-    name: "",
-    description: "",
-    enabled: true,
-    maxConcurrencyDefault: "2",
-    variablesSchemaText: "{}",
-    steps: [createStepDraft()],
+    id: nextVariableDraftId(),
+    name,
+    defaultValue,
   };
 }
 
-function toDraftFromDetail(detail: WorkflowDefinitionDetail): WorkflowDraft {
-  const sortedSteps = [...detail.steps].sort((a, b) => a.stepOrder - b.stepOrder);
-  return {
-    name: detail.name,
-    description: detail.description,
-    enabled: detail.enabled,
-    maxConcurrencyDefault: String(detail.maxConcurrencyDefault),
-    variablesSchemaText: JSON.stringify(
-      isRecord(detail.variablesSchema) ? detail.variablesSchema : {},
-      null,
-      2
-    ),
-    steps: sortedSteps.length > 0
-      ? sortedSteps.map((step) => createStepDraft(step.stepType, step.parameters))
-      : [createStepDraft()],
-  };
+function variableValueToDraftString(value: unknown) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+function variableRowsToObject(rows: VariableDraft[]) {
+  const result: Record<string, string> = {};
+  for (const row of rows) {
+    const name = row.name.trim();
+    if (!name) continue;
+    result[name] = row.defaultValue;
+  }
+  return result;
+}
+
+function ensureVariableRows(steps: WorkflowStepLike[], variableRows: VariableDraft[]) {
+  const merged = mergeDeclaredWorkflowVariables(variableRowsToObject(variableRows), steps);
+  const existingNames = new Set(
+    variableRows
+      .map((row) => row.name.trim())
+      .filter((name) => name.length > 0)
+  );
+
+  const appendedRows = Object.keys(merged)
+    .filter((name) => !existingNames.has(name))
+    .map((name) => createVariableDraft(name, merged[name] ?? ""));
+
+  return appendedRows.length > 0 ? [...variableRows, ...appendedRows] : variableRows;
 }
 
 function buildStepPayloads(steps: StepDraft[]) {
@@ -183,15 +222,98 @@ function buildStepPayloads(steps: StepDraft[]) {
 
     const builtin = BUILTIN_STEP_MAP.get(stepType);
     if (builtin) {
-      const normalized = normalizeBuiltinParameters(stepType, step.parameters);
-      return { stepType, parameters: normalized };
+      return {
+        stepType,
+        parameters: normalizeBuiltinParameters(stepType, step.parameters),
+      };
     }
 
     return {
       stepType,
-      parameters: parseJsonObject(step.customParametersText, `Step ${index + 1} parameters`),
+      parameters: parseJsonObject(step.customParametersText, `步骤 ${index + 1} 的参数`),
     };
   });
+}
+
+function createEmptyWorkflowDraft(): WorkflowDraft {
+  const steps = [createStepDraft()];
+  return {
+    name: "",
+    description: "",
+    enabled: true,
+    maxConcurrencyDefault: "2",
+    variableRows: ensureVariableRows(steps, []),
+    steps,
+  };
+}
+
+function toDraftFromDetail(detail: WorkflowDefinitionDetail): WorkflowDraft {
+  const sortedSteps = [...detail.steps].sort((a, b) => a.stepOrder - b.stepOrder);
+  const steps =
+    sortedSteps.length > 0
+      ? sortedSteps.map((step) => createStepDraft(step.stepType, step.parameters))
+      : [createStepDraft()];
+  const initialRows = isRecord(detail.variablesSchema)
+    ? Object.entries(detail.variablesSchema).map(([name, value]) =>
+        createVariableDraft(name, variableValueToDraftString(value))
+      )
+    : [];
+
+  return {
+    name: detail.name,
+    description: detail.description,
+    enabled: detail.enabled,
+    maxConcurrencyDefault: String(detail.maxConcurrencyDefault),
+    variableRows: ensureVariableRows(steps, initialRows),
+    steps,
+  };
+}
+
+function buildWorkflowVariables(variableRows: VariableDraft[]) {
+  const variables: Record<string, string> = {};
+  const seenNames = new Set<string>();
+
+  for (const row of variableRows) {
+    const name = row.name.trim();
+    if (!name) {
+      throw new Error("变量名不能为空。");
+    }
+    if (seenNames.has(name)) {
+      throw new Error(`变量名重复：${name}`);
+    }
+    seenNames.add(name);
+    variables[name] = row.defaultValue;
+  }
+
+  return variables;
+}
+
+function buildWorkflowCreatePayload(draft: WorkflowDraft) {
+  const name = draft.name.trim();
+  if (!name) {
+    throw new Error("工作流名称不能为空。");
+  }
+
+  const maxConcurrencyDefault = Number(draft.maxConcurrencyDefault);
+  if (!Number.isInteger(maxConcurrencyDefault) || maxConcurrencyDefault < 1) {
+    throw new Error("默认最大并发数必须是大于等于 1 的整数。");
+  }
+
+  const steps = buildStepPayloads(draft.steps);
+  const variablesSchema = buildWorkflowVariables(draft.variableRows);
+  const missingVariables = validateDeclaredWorkflowVariables(variablesSchema, steps);
+  if (missingVariables.length > 0) {
+    throw new Error(`工作流变量未声明：${missingVariables.join(", ")}`);
+  }
+
+  return {
+    name,
+    description: draft.description.trim(),
+    enabled: draft.enabled,
+    variablesSchema,
+    maxConcurrencyDefault,
+    steps,
+  };
 }
 
 function WorkflowDraftForm({
@@ -201,22 +323,35 @@ function WorkflowDraftForm({
   draft: WorkflowDraft;
   onChange: (next: WorkflowDraft) => void;
 }) {
-  function updateStep(index: number, updater: (step: StepDraft) => StepDraft) {
+  function updateDraft(next: WorkflowDraft, { syncVariables = true }: { syncVariables?: boolean } = {}) {
+    if (!syncVariables) {
+      onChange(next);
+      return;
+    }
+
+    const nextSteps = buildStepPayloadsForSync(next.steps);
     onChange({
+      ...next,
+      variableRows: ensureVariableRows(nextSteps, next.variableRows),
+    });
+  }
+
+  function updateStep(index: number, updater: (step: StepDraft) => StepDraft) {
+    updateDraft({
       ...draft,
       steps: draft.steps.map((step, stepIndex) => (stepIndex === index ? updater(step) : step)),
     });
   }
 
   function addStep() {
-    onChange({
+    updateDraft({
       ...draft,
       steps: [...draft.steps, createStepDraft("git_pull")],
     });
   }
 
   function removeStep(index: number) {
-    onChange({
+    updateDraft({
       ...draft,
       steps: draft.steps.filter((_, stepIndex) => stepIndex !== index),
     });
@@ -228,7 +363,7 @@ function WorkflowDraftForm({
 
     const nextSteps = [...draft.steps];
     [nextSteps[index], nextSteps[target]] = [nextSteps[target], nextSteps[index]];
-    onChange({ ...draft, steps: nextSteps });
+    updateDraft({ ...draft, steps: nextSteps });
   }
 
   function updateStepType(index: number, stepType: string) {
@@ -255,7 +390,50 @@ function WorkflowDraftForm({
   }
 
   function updateCustomText(index: number, value: string) {
-    updateStep(index, (step) => ({ ...step, customParametersText: value }));
+    updateStep(index, (step) => {
+      let parameters = step.parameters;
+      try {
+        parameters = parseJsonObject(value, "Step parameters");
+      } catch {
+        // Keep the last valid parsed object for auto-variable sync while the user edits invalid JSON.
+      }
+
+      return {
+        ...step,
+        parameters,
+        customParametersText: value,
+      };
+    });
+  }
+
+  function addVariable() {
+    updateDraft(
+      {
+        ...draft,
+        variableRows: [...draft.variableRows, createVariableDraft("")],
+      },
+      { syncVariables: false }
+    );
+  }
+
+  function updateVariableRow(index: number, updater: (row: VariableDraft) => VariableDraft) {
+    updateDraft(
+      {
+        ...draft,
+        variableRows: draft.variableRows.map((row, rowIndex) => (rowIndex === index ? updater(row) : row)),
+      },
+      { syncVariables: false }
+    );
+  }
+
+  function removeVariableRow(index: number) {
+    updateDraft(
+      {
+        ...draft,
+        variableRows: draft.variableRows.filter((_, rowIndex) => rowIndex !== index),
+      },
+      { syncVariables: false }
+    );
   }
 
   return (
@@ -297,13 +475,54 @@ function WorkflowDraftForm({
         </label>
       </div>
 
-      <div className="grid gap-1">
-        <Label>变量结构（JSON 对象）</Label>
-        <textarea
-          className="min-h-24 rounded-md border border-input bg-background px-3 py-2 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          value={draft.variablesSchemaText}
-          onChange={(event) => onChange({ ...draft, variablesSchemaText: event.target.value })}
-        />
+      <div className="grid gap-3">
+        <div className="flex items-center justify-between">
+          <Label>变量默认值</Label>
+          <Button type="button" size="sm" variant="secondary" onClick={addVariable}>
+            添加变量
+          </Button>
+        </div>
+
+        {draft.variableRows.length === 0 ? (
+          <p className="text-sm text-muted-foreground">当前步骤没有引用变量，你也可以手动添加变量默认值。</p>
+        ) : (
+          <div className="grid gap-2">
+            {draft.variableRows.map((row, index) => (
+              <div
+                key={row.id}
+                data-testid="workflow-variable-row"
+                className="grid gap-2 rounded-lg border border-border bg-muted/20 p-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
+              >
+                <Input
+                  aria-label={`变量 ${index + 1} 名称`}
+                  value={row.name}
+                  onChange={(event) =>
+                    updateVariableRow(index, (current) => ({ ...current, name: event.target.value }))
+                  }
+                  placeholder="变量名"
+                />
+                <Input
+                  aria-label={`变量 ${row.name || index + 1} 默认值`}
+                  value={row.defaultValue}
+                  onChange={(event) =>
+                    updateVariableRow(index, (current) => ({ ...current, defaultValue: event.target.value }))
+                  }
+                  placeholder="默认值"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="text-destructive"
+                  onClick={() => removeVariableRow(index)}
+                  aria-label={`删除变量 ${row.name || index + 1}`}
+                >
+                  删除
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="grid gap-3">
@@ -387,12 +606,13 @@ function WorkflowDraftForm({
                             ? String(step.parameters[field.key])
                             : ""
                         }
-                        onChange={(event) =>
-                          updateBuiltinField(index, field.key, event.target.value)
-                        }
+                        onChange={(event) => updateBuiltinField(index, field.key, event.target.value)}
                         placeholder={field.placeholder}
                         aria-label={`步骤 ${index + 1} ${field.label}`}
                       />
+                      {field.hint && (
+                        <p className="text-xs text-muted-foreground">{field.hint}</p>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -415,25 +635,21 @@ function WorkflowDraftForm({
   );
 }
 
-function buildWorkflowCreatePayload(draft: WorkflowDraft) {
-  const name = draft.name.trim();
-  if (!name) {
-    throw new Error("工作流名称不能为空。");
-  }
+function buildStepPayloadsForSync(steps: StepDraft[]) {
+  return steps.map((step) => {
+    const builtin = BUILTIN_STEP_MAP.get(step.stepType.trim());
+    if (builtin) {
+      return {
+        stepType: step.stepType.trim(),
+        parameters: normalizeBuiltinParameters(step.stepType, step.parameters),
+      };
+    }
 
-  const maxConcurrencyDefault = Number(draft.maxConcurrencyDefault);
-  if (!Number.isInteger(maxConcurrencyDefault) || maxConcurrencyDefault < 1) {
-    throw new Error("默认最大并发数必须是大于等于 1 的整数。");
-  }
-
-  return {
-    name,
-    description: draft.description.trim(),
-    enabled: draft.enabled,
-    variablesSchema: parseJsonObject(draft.variablesSchemaText, "Variables schema"),
-    maxConcurrencyDefault,
-    steps: buildStepPayloads(draft.steps),
-  };
+    return {
+      stepType: step.stepType.trim(),
+      parameters: step.parameters,
+    };
+  });
 }
 
 export function WorkflowsPage() {
@@ -672,3 +888,4 @@ export function WorkflowsPage() {
     </div>
   );
 }
+
