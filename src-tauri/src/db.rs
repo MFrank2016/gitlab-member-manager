@@ -1436,6 +1436,20 @@ pub async fn migrate_workflows_to_pipelines(
         .await?;
 
         for workflow_run in workflow_runs {
+            let source_pipeline_run_id = match workflow_run.3 {
+                Some(source_workflow_run_id) => {
+                    sqlx::query_scalar::<_, i64>(
+                        r#"SELECT id
+                       FROM pipeline_runs
+                       WHERE legacy_workflow_run_id = ?1"#,
+                    )
+                    .bind(source_workflow_run_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                }
+                None => None,
+            };
+
             let existing_pipeline_run_id = sqlx::query_scalar::<_, i64>(
                 r#"SELECT id
                FROM pipeline_runs
@@ -1446,22 +1460,22 @@ pub async fn migrate_workflows_to_pipelines(
             .await?;
 
             let pipeline_run_id = match existing_pipeline_run_id {
-                Some(id) => id,
+                Some(id) => {
+                    if source_pipeline_run_id.is_some() {
+                        sqlx::query(
+                            r#"UPDATE pipeline_runs
+                           SET source_pipeline_run_id = ?1
+                           WHERE id = ?2
+                             AND source_pipeline_run_id IS NULL"#,
+                        )
+                        .bind(source_pipeline_run_id)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    id
+                }
                 None => {
-                    let source_pipeline_run_id = match workflow_run.3 {
-                        Some(source_workflow_run_id) => {
-                            sqlx::query_scalar::<_, i64>(
-                                r#"SELECT id
-                               FROM pipeline_runs
-                               WHERE legacy_workflow_run_id = ?1"#,
-                            )
-                            .bind(source_workflow_run_id)
-                            .fetch_optional(&mut *tx)
-                            .await?
-                        }
-                        None => None,
-                    };
-
                     let result = sqlx::query(
                         r#"INSERT INTO pipeline_runs (
                          pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
@@ -3930,6 +3944,92 @@ mod tests {
         assert_eq!(count_rows(&pool, "pipeline_runs").await, 1);
         assert_eq!(count_rows(&pool, "pipeline_run_projects").await, 1);
         assert_eq!(count_rows(&pool, "pipeline_run_nodes").await, 2);
+
+        let pipeline_definition = sqlx::query_as::<_, (Option<i64>, String, i64)>(
+            r#"SELECT legacy_workflow_definition_id, name, max_concurrency_default
+               FROM pipeline_definitions
+               WHERE legacy_workflow_definition_id = ?1"#,
+        )
+        .bind(workflow_definition_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load migrated pipeline definition");
+        assert_eq!(pipeline_definition.0, Some(workflow_definition_id));
+        assert_eq!(pipeline_definition.1, "legacy-release-workflow");
+        assert_eq!(pipeline_definition.2, 3);
+
+        let pipeline_variables = sqlx::query_as::<_, (String, String, Option<String>, String)>(
+            r#"SELECT key, label, default_value, options_json
+               FROM pipeline_variables
+               ORDER BY variable_order ASC"#,
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load migrated pipeline variables");
+        assert_eq!(pipeline_variables.len(), 2);
+        assert_eq!(pipeline_variables[0].0, "source_branch");
+        assert_eq!(pipeline_variables[0].1, "Source Branch");
+        assert_eq!(pipeline_variables[0].2.as_deref(), Some("release"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&pipeline_variables[0].3).expect("parse options"),
+            serde_json::json!(["release", "hotfix"])
+        );
+        assert_eq!(pipeline_variables[1].0, "target_branch");
+        assert_eq!(pipeline_variables[1].1, "Target Branch");
+        assert_eq!(pipeline_variables[1].2.as_deref(), Some("main"));
+
+        let pipeline_nodes = sqlx::query_as::<_, (String, String)>(
+            r#"SELECT node_type, parameters_json
+               FROM pipeline_nodes
+               ORDER BY node_order ASC"#,
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load migrated pipeline nodes");
+        assert_eq!(pipeline_nodes.len(), 2);
+        assert_eq!(pipeline_nodes[0].0, "check_pipeline");
+        assert_eq!(
+            serde_json::from_str::<Value>(&pipeline_nodes[0].1).expect("parse node params"),
+            serde_json::json!({"project":"team/service-a","ref":"${source_branch}"})
+        );
+        assert_eq!(pipeline_nodes[1].0, "trigger_pipeline");
+
+        let pipeline_run = sqlx::query_as::<_, (Option<i64>, Option<i64>, String, String)>(
+            r#"SELECT legacy_workflow_run_id, source_pipeline_run_id, status, run_parameters_json
+               FROM pipeline_runs
+               WHERE legacy_workflow_run_id = ?1"#,
+        )
+        .bind(workflow_run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load migrated pipeline run");
+        assert_eq!(pipeline_run.0, Some(workflow_run_id));
+        assert_eq!(pipeline_run.1, None);
+        assert_eq!(pipeline_run.2, "partial_failed");
+        assert_eq!(
+            serde_json::from_str::<Value>(&pipeline_run.3).expect("parse run params"),
+            serde_json::json!({"source_branch":"release","target_branch":"main"})
+        );
+
+        let pipeline_run_nodes = sqlx::query_as::<_, (String, String, String, String)>(
+            r#"SELECT node_type, rendered_parameters_json, status, summary_message
+               FROM pipeline_run_nodes
+               ORDER BY node_order ASC"#,
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load migrated pipeline run nodes");
+        assert_eq!(pipeline_run_nodes.len(), 2);
+        assert_eq!(pipeline_run_nodes[0].0, "check_pipeline");
+        assert_eq!(
+            serde_json::from_str::<Value>(&pipeline_run_nodes[0].1)
+                .expect("parse run node params"),
+            serde_json::json!({"project":"team/service-a","ref":"release"})
+        );
+        assert_eq!(pipeline_run_nodes[0].2, "success");
+        assert_eq!(pipeline_run_nodes[0].3, "check passed");
+        assert_eq!(pipeline_run_nodes[1].2, "failed");
+        assert_eq!(pipeline_run_nodes[1].3, "trigger failed");
     }
 
     #[tokio::test]
@@ -3973,14 +4073,36 @@ mod tests {
             .await
             .expect("create project group");
 
+        let source_workflow_run_id = sqlx::query(
+            r#"INSERT INTO workflow_runs (
+             workflow_definition_id, project_group_id, source_workflow_run_id, trigger_kind,
+             status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        )
+        .bind(workflow_definition_id)
+        .bind(project_group.id)
+        .bind("manual")
+        .bind("completed")
+        .bind(r#"{"release_window":"nightly"}"#)
+        .bind(2_i64)
+        .bind("2026-04-13T09:01:00Z")
+        .bind("2026-04-13T09:02:00Z")
+        .bind("2026-04-13T09:01:00Z")
+        .bind("2026-04-13T09:02:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert source workflow run")
+        .last_insert_rowid();
+
         let workflow_run_id = sqlx::query(
             r#"INSERT INTO workflow_runs (
              workflow_definition_id, project_group_id, source_workflow_run_id, trigger_kind,
              status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
-           ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, NULL, NULL, ?7, ?8)"#,
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9)"#,
         )
         .bind(workflow_definition_id)
         .bind(project_group.id)
+        .bind(source_workflow_run_id)
         .bind("schedule")
         .bind("pending")
         .bind(r#"{"release_window":"nightly"}"#)
@@ -4030,11 +4152,43 @@ mod tests {
         .await
         .expect("insert workflow run step");
 
-        migrate_workflows_to_pipelines(&pool)
+        let first_summary = migrate_workflows_to_pipelines(&pool)
             .await
             .expect("first migration run");
+        assert_eq!(first_summary.definitions_migrated, 1);
+        assert_eq!(first_summary.runs_migrated, 2);
 
-        let counts_after_first = [
+        let source_pipeline_run_id = sqlx::query_scalar::<_, i64>(
+            r#"SELECT id
+               FROM pipeline_runs
+               WHERE legacy_workflow_run_id = ?1"#,
+        )
+        .bind(source_workflow_run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load source pipeline run");
+
+        let existing_pipeline_run_id = sqlx::query_scalar::<_, i64>(
+            r#"SELECT id
+               FROM pipeline_runs
+               WHERE legacy_workflow_run_id = ?1"#,
+        )
+        .bind(workflow_run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load child pipeline run");
+
+        sqlx::query(
+            r#"UPDATE pipeline_runs
+               SET source_pipeline_run_id = NULL
+               WHERE id = ?1"#,
+        )
+        .bind(existing_pipeline_run_id)
+        .execute(&pool)
+        .await
+        .expect("clear pipeline source link");
+
+        let counts_before_second = [
             count_rows(&pool, "pipeline_definitions").await,
             count_rows(&pool, "pipeline_variables").await,
             count_rows(&pool, "pipeline_nodes").await,
@@ -4063,7 +4217,49 @@ mod tests {
             count_rows(&pool, "pipeline_run_nodes").await,
         ];
 
-        assert_eq!(counts_after_second, counts_after_first);
+        assert_eq!(counts_after_second, counts_before_second);
+
+        let linked_source_pipeline_run_id = sqlx::query_scalar::<_, Option<i64>>(
+            r#"SELECT source_pipeline_run_id
+               FROM pipeline_runs
+               WHERE id = ?1"#,
+        )
+        .bind(existing_pipeline_run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load relinked source pipeline run id");
+        assert_eq!(linked_source_pipeline_run_id, Some(source_pipeline_run_id));
+
+        let pipeline_run_project = sqlx::query_as::<_, (String, String)>(
+            r#"SELECT status, summary_message
+               FROM pipeline_run_projects
+               WHERE pipeline_run_id = ?1"#,
+        )
+        .bind(existing_pipeline_run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load pipeline run project");
+        assert_eq!(pipeline_run_project.0, "queued");
+        assert_eq!(pipeline_run_project.1, "");
+
+        let pipeline_run_node = sqlx::query_as::<_, (String, String, String)>(
+            r#"SELECT rendered_parameters_json, status, summary_message
+               FROM pipeline_run_nodes
+               WHERE pipeline_run_project_id = (
+                 SELECT id FROM pipeline_run_projects WHERE pipeline_run_id = ?1
+               )"#,
+        )
+        .bind(existing_pipeline_run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load pipeline run node");
+        assert_eq!(
+            serde_json::from_str::<Value>(&pipeline_run_node.0)
+                .expect("parse migrated run node params"),
+            serde_json::json!({"project":"team/service-b","ref":"nightly"})
+        );
+        assert_eq!(pipeline_run_node.1, "pending");
+        assert_eq!(pipeline_run_node.2, "");
     }
 
     #[tokio::test]
