@@ -3215,6 +3215,131 @@ mod tests {
             .contains("pipeline schedule variables must be a JSON object"));
     }
 
+    #[tokio::test]
+    async fn pipeline_definition_rejects_non_object_node_parameters() {
+        let pool = setup_test_pool().await;
+
+        let result = create_pipeline_definition(
+            &pool,
+            "invalid-node-parameters".to_string(),
+            "invalid".to_string(),
+            true,
+            2,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!(["not-object"]),
+            }],
+            vec![],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pipeline node parameters must be a JSON object"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_definition_rejects_schedule_with_empty_cron_expr() {
+        let pool = setup_test_pool().await;
+
+        let result = create_pipeline_definition(
+            &pool,
+            "invalid-schedule-cron".to_string(),
+            "invalid".to_string(),
+            true,
+            2,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            vec![PipelineScheduleInput {
+                cron_expr: "   ".to_string(),
+                timezone: "Asia/Shanghai".to_string(),
+                branch: Some("main".to_string()),
+                enabled: true,
+                policy: "skip_if_running".to_string(),
+                variables: serde_json::json!({}),
+            }],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pipeline schedule cron_expr is empty"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_definition_rejects_schedule_with_empty_timezone() {
+        let pool = setup_test_pool().await;
+
+        let result = create_pipeline_definition(
+            &pool,
+            "invalid-schedule-timezone".to_string(),
+            "invalid".to_string(),
+            true,
+            2,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            vec![PipelineScheduleInput {
+                cron_expr: "0 9 * * *".to_string(),
+                timezone: "   ".to_string(),
+                branch: Some("main".to_string()),
+                enabled: true,
+                policy: "skip_if_running".to_string(),
+                variables: serde_json::json!({}),
+            }],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pipeline schedule timezone is empty"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_definition_rejects_schedule_with_empty_policy() {
+        let pool = setup_test_pool().await;
+
+        let result = create_pipeline_definition(
+            &pool,
+            "invalid-schedule-policy".to_string(),
+            "invalid".to_string(),
+            true,
+            2,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            vec![PipelineScheduleInput {
+                cron_expr: "0 9 * * *".to_string(),
+                timezone: "Asia/Shanghai".to_string(),
+                branch: Some("main".to_string()),
+                enabled: true,
+                policy: "   ".to_string(),
+                variables: serde_json::json!({}),
+            }],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pipeline schedule policy is empty"));
+    }
+
     #[test]
     fn pipeline_definition_schedule_input_defaults_enabled_to_true() {
         let schedule: PipelineScheduleInput = serde_json::from_value(serde_json::json!({
