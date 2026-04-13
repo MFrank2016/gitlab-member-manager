@@ -82,6 +82,16 @@ function normalizeJsonObject(value: unknown, fieldName: string): Record<string, 
   throw new Error(`${fieldName} must be an object`);
 }
 
+function normalizeJsonArray(value: unknown, fieldName: string): unknown[] {
+  if (value === null || value === undefined) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value;
+  }
+  throw new Error(`${fieldName} must be an array`);
+}
+
 /**
  * 带日志的 invoke 包装函数
  */
@@ -271,7 +281,7 @@ function toPipelineVariablePayload(variable: PipelineVariableInput) {
     defaultValue: variable.defaultValue ?? null,
     valueType: variable.valueType.trim(),
     required: variable.required ?? false,
-    options: Array.isArray(variable.options) ? variable.options : [],
+    options: normalizeJsonArray(variable.options, "pipeline variable options"),
   };
 }
 

@@ -4,9 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/App";
 import {
   createPipelineDefinition,
+  deletePipelineDefinition,
+  getPipelineDefinitionDetail,
   getPipelineRunDetail,
   listPipelineDefinitions,
   listPipelineRuns,
+  listWorkflowDefinitions,
+  updatePipelineDefinition,
 } from "@/lib/invoke";
 import { ProjectGroupsPage } from "@/pages/ProjectGroupsPage";
 import { WorkflowRunsPage } from "@/pages/WorkflowRunsPage";
@@ -275,13 +279,70 @@ describe("pipeline wrapper smoke", () => {
           projects: [],
         };
       }
+      if (cmd === "get_pipeline_definition_detail") {
+        return {
+          id: 11,
+          name: "release-pipeline",
+          description: "",
+          enabled: true,
+          maxConcurrencyDefault: 2,
+          legacyWorkflowDefinitionId: null,
+          createdAt: "2026-03-18T00:00:00Z",
+          updatedAt: "2026-03-18T00:00:00Z",
+          variables: [
+            {
+              variableOrder: 0,
+              key: "source_branch",
+              label: "Source Branch",
+              defaultValue: "main",
+              valueType: "string",
+              required: true,
+              options: [],
+            },
+          ],
+          nodes: [
+            {
+              nodeOrder: 0,
+              nodeType: "checkout_branch",
+              parameters: { branch: "${source_branch}" },
+            },
+          ],
+          schedules: [],
+        };
+      }
+      if (cmd === "update_pipeline_definition") return undefined;
+      if (cmd === "delete_pipeline_definition") return undefined;
+      if (cmd === "list_workflow_definitions") {
+        return [
+          {
+            id: 91,
+            name: "legacy-flow",
+            description: "workflow compatibility",
+            enabled: true,
+            variablesSchema: {},
+            maxConcurrencyDefault: 2,
+            createdAt: "2026-03-18T00:00:00Z",
+            updatedAt: "2026-03-18T00:00:00Z",
+            stepsCount: 1,
+          },
+        ];
+      }
       return undefined;
     });
 
-    await listPipelineDefinitions();
+    const pipelineList = await listPipelineDefinitions();
     await createPipelineDefinition({
       name: "release-pipeline",
-      variables: [],
+      variables: [
+        {
+          key: "source_branch",
+          label: "Source Branch",
+          defaultValue: "main",
+          valueType: "string",
+          required: true,
+          options: ["main", "release"],
+        },
+      ],
       nodes: [
         {
           nodeType: "checkout_branch",
@@ -290,18 +351,102 @@ describe("pipeline wrapper smoke", () => {
       ],
       schedules: [],
     });
-    await listPipelineRuns();
-    await getPipelineRunDetail(301);
+    const pipelineDetail = await getPipelineDefinitionDetail(11);
+    await updatePipelineDefinition({
+      id: 11,
+      name: "release-pipeline",
+      description: "",
+      enabled: true,
+      maxConcurrencyDefault: 2,
+      variables: [
+        {
+          key: "source_branch",
+          label: "Source Branch",
+          defaultValue: "main",
+          valueType: "string",
+          required: true,
+          options: ["main", "release"],
+        },
+      ],
+      nodes: [
+        {
+          nodeType: "checkout_branch",
+          parameters: { branch: "${source_branch}" },
+        },
+      ],
+      schedules: [],
+    });
+    await deletePipelineDefinition(11);
+    const pipelineRuns = await listPipelineRuns();
+    const runDetail = await getPipelineRunDetail(301);
+    const workflowList = await listWorkflowDefinitions();
+
+    expect(pipelineList).toEqual([]);
+    expect(pipelineDetail.nodes).toHaveLength(1);
+    expect(pipelineDetail.variables[0].options).toEqual([]);
+    expect(pipelineRuns).toEqual([]);
+    expect(runDetail.projects).toEqual([]);
+    expect(workflowList[0].name).toBe("legacy-flow");
 
     expect(invokeMock).toHaveBeenCalledWith("list_pipeline_definitions", undefined);
     expect(invokeMock).toHaveBeenCalledWith(
       "create_pipeline_definition",
       expect.objectContaining({
         name: "release-pipeline",
+        variables: [
+          expect.objectContaining({
+            key: "source_branch",
+            options: ["main", "release"],
+          }),
+        ],
       })
     );
+    expect(invokeMock).toHaveBeenCalledWith("get_pipeline_definition_detail", { id: 11 });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "update_pipeline_definition",
+      expect.objectContaining({
+        id: 11,
+        variables: [
+          expect.objectContaining({
+            key: "source_branch",
+            options: ["main", "release"],
+          }),
+        ],
+      })
+    );
+    expect(invokeMock).toHaveBeenCalledWith("delete_pipeline_definition", { id: 11 });
     expect(invokeMock).toHaveBeenCalledWith("list_pipeline_runs", undefined);
     expect(invokeMock).toHaveBeenCalledWith("get_pipeline_run_detail", { id: 301 });
+    expect(invokeMock).toHaveBeenCalledWith("list_workflow_definitions", undefined);
+  });
+
+  it("rejects invalid pipeline variable options before invoking the backend", async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await expect(
+      createPipelineDefinition({
+        name: "invalid-options-pipeline",
+        variables: [
+          {
+            key: "source_branch",
+            label: "Source Branch",
+            defaultValue: "main",
+            valueType: "string",
+            required: true,
+            options: { invalid: true },
+          },
+        ],
+        nodes: [
+          {
+            nodeType: "checkout_branch",
+            parameters: { branch: "${source_branch}" },
+          },
+        ],
+        schedules: [],
+      })
+    ).rejects.toThrow("pipeline variable options must be an array");
+
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 

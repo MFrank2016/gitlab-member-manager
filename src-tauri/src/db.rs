@@ -4534,6 +4534,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_run_detail_returns_nested_project_and_node_state() {
+        let pool = setup_test_pool().await;
+
+        let pipeline = create_pipeline_definition(
+            &pool,
+            "release-pipeline-detail".to_string(),
+            "pipeline run detail coverage".to_string(),
+            true,
+            2,
+            vec![PipelineVariableInput {
+                key: "source_branch".to_string(),
+                label: "Source Branch".to_string(),
+                default_value: Some("release".to_string()),
+                value_type: "string".to_string(),
+                required: true,
+                options: serde_json::json!(["release", "main"]),
+            }],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!({
+                    "project": "team/service-a",
+                    "ref": "${source_branch}"
+                }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let pipeline_node_id = sqlx::query_scalar::<_, i64>(
+            r#"SELECT id
+               FROM pipeline_nodes
+               WHERE pipeline_definition_id = ?1 AND node_order = 0"#,
+        )
+        .bind(pipeline.id)
+        .fetch_one(&pool)
+        .await
+        .expect("load pipeline node id");
+
+        let project_group = create_project_group(&pool, "pipeline-detail-group".to_string())
+            .await
+            .expect("create project group");
+
+        let managed_project = create_managed_project(
+            &pool,
+            99111,
+            "service-a".to_string(),
+            "team/service-a".to_string(),
+            "D:/repos/service-a".to_string(),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("create managed project");
+
+        let now = Utc::now().to_rfc3339();
+        let source_run_id = sqlx::query(
+            r#"INSERT INTO pipeline_runs (
+             pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+             trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        )
+        .bind(pipeline.id)
+        .bind(project_group.id)
+        .bind("manual")
+        .bind("completed")
+        .bind(r#"{"source_branch":"release"}"#)
+        .bind(2_i64)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert source pipeline run")
+        .last_insert_rowid();
+
+        let run_id = sqlx::query(
+            r#"INSERT INTO pipeline_runs (
+             pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+             trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+        )
+        .bind(pipeline.id)
+        .bind(project_group.id)
+        .bind(Option::<i64>::None)
+        .bind(source_run_id)
+        .bind("retry_failed")
+        .bind("partial_failed")
+        .bind(r#"{"source_branch":"release","target_branch":"main"}"#)
+        .bind(2_i64)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert pipeline run")
+        .last_insert_rowid();
+
+        let run_project_id = sqlx::query(
+            r#"INSERT INTO pipeline_run_projects (
+             pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path,
+             status, summary_message, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+        )
+        .bind(run_id)
+        .bind(managed_project.id)
+        .bind(
+            u64_to_i64_checked(managed_project.gitlab_project_id, "gitlab_project_id")
+                .expect("convert gitlab project id"),
+        )
+        .bind(&managed_project.name)
+        .bind(&managed_project.path_with_namespace)
+        .bind(&managed_project.repo_path)
+        .bind("failed")
+        .bind("downstream pipeline failed")
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert pipeline run project")
+        .last_insert_rowid();
+
+        sqlx::query(
+            r#"INSERT INTO pipeline_run_nodes (
+             pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+        )
+        .bind(run_project_id)
+        .bind(pipeline_node_id)
+        .bind(0_i64)
+        .bind("trigger_pipeline")
+        .bind(r#"{"project":"team/service-a","ref":"release"}"#)
+        .bind("failed")
+        .bind(&now)
+        .bind(&now)
+        .bind("stdout text")
+        .bind("stderr text")
+        .bind(1_i64)
+        .bind("downstream pipeline failed")
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert pipeline run node");
+
+        let detail = get_pipeline_run_detail(&pool, run_id)
+            .await
+            .expect("get pipeline run detail");
+
+        assert_eq!(detail.id, run_id);
+        assert_eq!(detail.legacy_workflow_run_id, None);
+        assert_eq!(detail.source_pipeline_run_id, Some(source_run_id));
+        assert_eq!(
+            detail.run_parameters,
+            serde_json::json!({"source_branch":"release","target_branch":"main"})
+        );
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].project_name, "service-a");
+        assert_eq!(detail.projects[0].status, "failed");
+        assert_eq!(detail.projects[0].nodes.len(), 1);
+        assert_eq!(detail.projects[0].nodes[0].pipeline_node_id, Some(pipeline_node_id));
+        assert_eq!(detail.projects[0].nodes[0].node_type, "trigger_pipeline");
+        assert_eq!(
+            detail.projects[0].nodes[0].rendered_parameters,
+            serde_json::json!({"project":"team/service-a","ref":"release"})
+        );
+        assert_eq!(detail.projects[0].nodes[0].status, "failed");
+        assert_eq!(
+            detail.projects[0].nodes[0].summary_message,
+            "downstream pipeline failed"
+        );
+    }
+
+    #[tokio::test]
     async fn workflow_run_history_queries_return_nested_project_and_step_state() {
         let pool = setup_test_pool().await;
 
