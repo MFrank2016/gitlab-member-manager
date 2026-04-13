@@ -191,6 +191,11 @@ export type PipelineRunNode = {
   stderr: string;
   exitCode?: number | null;
   summaryMessage: string;
+  errorCode?: string | null;
+  titleZh?: string | null;
+  detailZh?: string | null;
+  suggestionZh?: string | null;
+  evidence?: string | null;
 };
 
 export type PipelineRunProject = {

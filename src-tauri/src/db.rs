@@ -388,6 +388,11 @@ struct PipelineRunNodeRow {
     stderr: String,
     exit_code: Option<i64>,
     summary_message: String,
+    error_code: Option<String>,
+    title_zh: Option<String>,
+    detail_zh: Option<String>,
+    suggestion_zh: Option<String>,
+    evidence: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1721,27 +1726,33 @@ pub async fn migrate_workflows_to_pipelines(
                     .fetch_optional(&mut *tx)
                     .await?;
 
-                    let insert_result = sqlx::query(
-                        r#"INSERT OR IGNORE INTO pipeline_run_nodes (
-                         pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
-                         status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
-                       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
-                    )
-                    .bind(pipeline_run_project_id)
-                    .bind(pipeline_node_id)
+                        let insert_result = sqlx::query(
+                            r#"INSERT OR IGNORE INTO pipeline_run_nodes (
+                             pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
+                         status, started_at, finished_at, stdout, stderr, exit_code, summary_message,
+                         error_code, title_zh, detail_zh, suggestion_zh, evidence, created_at, updated_at
+                       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"#,
+                        )
+                        .bind(pipeline_run_project_id)
+                        .bind(pipeline_node_id)
                     .bind(workflow_run_step.1)
                     .bind(&workflow_run_step.2)
                     .bind(&workflow_run_step.3)
                     .bind(&workflow_run_step.4)
                     .bind(&workflow_run_step.5)
                     .bind(&workflow_run_step.6)
-                    .bind(&workflow_run_step.7)
-                    .bind(&workflow_run_step.8)
-                    .bind(workflow_run_step.9)
-                    .bind(&workflow_run_step.10)
-                    .bind(&workflow_run_step.11)
-                    .bind(&workflow_run_step.12)
-                    .execute(&mut *tx)
+                        .bind(&workflow_run_step.7)
+                        .bind(&workflow_run_step.8)
+                        .bind(workflow_run_step.9)
+                        .bind(&workflow_run_step.10)
+                        .bind(Option::<String>::None)
+                        .bind(Option::<String>::None)
+                        .bind(Option::<String>::None)
+                        .bind(Option::<String>::None)
+                        .bind(Option::<String>::None)
+                        .bind(&workflow_run_step.11)
+                        .bind(&workflow_run_step.12)
+                        .execute(&mut *tx)
                     .await?;
                     summary.run_nodes_migrated += i64::try_from(insert_result.rows_affected())
                         .map_err(|_| anyhow!("pipeline run node count out of range"))?;
@@ -1962,7 +1973,12 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
          n.stdout,
          n.stderr,
          n.exit_code,
-         n.summary_message
+         n.summary_message,
+         n.error_code,
+         n.title_zh,
+         n.detail_zh,
+         n.suggestion_zh,
+         n.evidence
        FROM pipeline_run_nodes n
        INNER JOIN pipeline_run_projects p ON p.id = n.pipeline_run_project_id
        WHERE p.pipeline_run_id = ?1
@@ -1990,6 +2006,11 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
             stderr: node_row.stderr,
             exit_code: node_row.exit_code,
             summary_message: node_row.summary_message,
+            error_code: node_row.error_code,
+            title_zh: node_row.title_zh,
+            detail_zh: node_row.detail_zh,
+            suggestion_zh: node_row.suggestion_zh,
+            evidence: node_row.evidence,
         };
         nodes_by_project_id
             .entry(node_row.pipeline_run_project_id)
@@ -4664,8 +4685,9 @@ mod tests {
         sqlx::query(
             r#"INSERT INTO pipeline_run_nodes (
              pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
-             status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message,
+             error_code, title_zh, detail_zh, suggestion_zh, evidence, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"#,
         )
         .bind(run_project_id)
         .bind(pipeline_node_id)
@@ -4679,6 +4701,11 @@ mod tests {
         .bind("stderr text")
         .bind(1_i64)
         .bind("downstream pipeline failed")
+        .bind("gitlab.pipeline_failed")
+        .bind("下游流水线失败")
+        .bind("目标项目的下游流水线执行失败。")
+        .bind("请检查下游流水线日志并修复失败后重试。")
+        .bind("job=deploy status=failed")
         .bind(&now)
         .bind(&now)
         .execute(&pool)
@@ -4711,6 +4738,148 @@ mod tests {
             detail.projects[0].nodes[0].summary_message,
             "downstream pipeline failed"
         );
+        assert_eq!(
+            detail.projects[0].nodes[0].error_code.as_deref(),
+            Some("gitlab.pipeline_failed")
+        );
+        assert_eq!(
+            detail.projects[0].nodes[0].title_zh.as_deref(),
+            Some("下游流水线失败")
+        );
+        assert_eq!(
+            detail.projects[0].nodes[0].detail_zh.as_deref(),
+            Some("目标项目的下游流水线执行失败。")
+        );
+        assert_eq!(
+            detail.projects[0].nodes[0].suggestion_zh.as_deref(),
+            Some("请检查下游流水线日志并修复失败后重试。")
+        );
+        assert_eq!(
+            detail.projects[0].nodes[0].evidence.as_deref(),
+            Some("job=deploy status=failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_run_detail_returns_none_for_absent_failure_envelope_fields() {
+        let pool = setup_test_pool().await;
+
+        let pipeline = create_pipeline_definition(
+            &pool,
+            "release-with-null-envelope".to_string(),
+            "pipeline run detail null envelope coverage".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({"branch":"main"}),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let project_group = create_project_group(&pool, "group-null-envelope".to_string())
+            .await
+            .expect("create project group");
+        let managed_project = create_managed_project(
+            &pool,
+            99222,
+            "service-b".to_string(),
+            "team/service-b".to_string(),
+            "D:/repos/service-b".to_string(),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("create managed project");
+
+        let now = Utc::now().to_rfc3339();
+        let run_id = sqlx::query(
+            r#"INSERT INTO pipeline_runs (
+             pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+             trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        )
+        .bind(pipeline.id)
+        .bind(project_group.id)
+        .bind("manual")
+        .bind("completed")
+        .bind(r#"{}"#)
+        .bind(1_i64)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert pipeline run")
+        .last_insert_rowid();
+
+        let run_project_id = sqlx::query(
+            r#"INSERT INTO pipeline_run_projects (
+             pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path,
+             status, summary_message, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+        )
+        .bind(run_id)
+        .bind(managed_project.id)
+        .bind(
+            u64_to_i64_checked(managed_project.gitlab_project_id, "gitlab_project_id")
+                .expect("convert gitlab project id"),
+        )
+        .bind(&managed_project.name)
+        .bind(&managed_project.path_with_namespace)
+        .bind(&managed_project.repo_path)
+        .bind("success")
+        .bind("step completed")
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert pipeline run project")
+        .last_insert_rowid();
+
+        sqlx::query(
+            r#"INSERT INTO pipeline_run_nodes (
+             pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message,
+             error_code, title_zh, detail_zh, suggestion_zh, evidence, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, NULL, NULL, NULL, NULL, ?13, ?14)"#,
+        )
+        .bind(run_project_id)
+        .bind(Option::<i64>::None)
+        .bind(0_i64)
+        .bind("checkout_branch")
+        .bind(r#"{"branch":"main"}"#)
+        .bind("success")
+        .bind(&now)
+        .bind(&now)
+        .bind("")
+        .bind("")
+        .bind(0_i64)
+        .bind("step completed")
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert pipeline run node");
+
+        let detail = get_pipeline_run_detail(&pool, run_id)
+            .await
+            .expect("get pipeline run detail");
+
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].nodes.len(), 1);
+        assert_eq!(detail.projects[0].nodes[0].error_code, None);
+        assert_eq!(detail.projects[0].nodes[0].title_zh, None);
+        assert_eq!(detail.projects[0].nodes[0].detail_zh, None);
+        assert_eq!(detail.projects[0].nodes[0].suggestion_zh, None);
+        assert_eq!(detail.projects[0].nodes[0].evidence, None);
     }
 
     #[tokio::test]

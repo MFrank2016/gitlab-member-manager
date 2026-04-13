@@ -269,6 +269,11 @@ pub struct PipelineRunNode {
     pub stderr: String,
     pub exit_code: Option<i64>,
     pub summary_message: String,
+    pub error_code: Option<String>,
+    pub title_zh: Option<String>,
+    pub detail_zh: Option<String>,
+    pub suggestion_zh: Option<String>,
+    pub evidence: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
