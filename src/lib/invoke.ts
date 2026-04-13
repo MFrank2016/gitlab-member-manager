@@ -4,6 +4,13 @@ import type {
   LocalGroup,
   LocalMember,
   ManagedProject,
+  PipelineDefinitionDetail,
+  PipelineDefinitionListItem,
+  PipelineNodeInput,
+  PipelineRunDetail,
+  PipelineRunListItem,
+  PipelineScheduleInput,
+  PipelineVariableInput,
   ProjectGroup,
   ProjectGroupMemberSyncRow,
   ProjectMember,
@@ -250,6 +257,35 @@ function toWorkflowStepPayload(step: WorkflowStepInput) {
   };
 }
 
+function toPipelineNodePayload(node: PipelineNodeInput) {
+  return {
+    nodeType: node.nodeType.trim(),
+    parameters: normalizeJsonObject(node.parameters, "pipeline node parameters"),
+  };
+}
+
+function toPipelineVariablePayload(variable: PipelineVariableInput) {
+  return {
+    key: variable.key.trim(),
+    label: variable.label.trim(),
+    defaultValue: variable.defaultValue ?? null,
+    valueType: variable.valueType.trim(),
+    required: variable.required ?? false,
+    options: Array.isArray(variable.options) ? variable.options : [],
+  };
+}
+
+function toPipelineSchedulePayload(schedule: PipelineScheduleInput) {
+  return {
+    cronExpr: schedule.cronExpr.trim(),
+    timezone: schedule.timezone.trim(),
+    branch: schedule.branch?.trim() ? schedule.branch.trim() : null,
+    enabled: schedule.enabled ?? true,
+    policy: schedule.policy.trim(),
+    variables: normalizeJsonObject(schedule.variables, "pipeline schedule variables"),
+  };
+}
+
 export async function createWorkflowDefinition(args: {
   name: string;
   description?: string | null;
@@ -270,12 +306,42 @@ export async function createWorkflowDefinition(args: {
   });
 }
 
+export async function createPipelineDefinition(args: {
+  name: string;
+  description?: string | null;
+  enabled?: boolean;
+  maxConcurrencyDefault?: number;
+  variables?: PipelineVariableInput[];
+  nodes: PipelineNodeInput[];
+  schedules?: PipelineScheduleInput[];
+}) {
+  const normalizedDescription = args.description?.trim();
+
+  return loggedInvoke<PipelineDefinitionDetail>("create_pipeline_definition", {
+    name: args.name,
+    description: normalizedDescription ?? "",
+    enabled: args.enabled ?? true,
+    max_concurrency_default: args.maxConcurrencyDefault ?? 2,
+    variables: (args.variables ?? []).map(toPipelineVariablePayload),
+    nodes: args.nodes.map(toPipelineNodePayload),
+    schedules: (args.schedules ?? []).map(toPipelineSchedulePayload),
+  });
+}
+
 export async function listWorkflowDefinitions() {
   return loggedInvoke<WorkflowDefinitionListItem[]>("list_workflow_definitions");
 }
 
+export async function listPipelineDefinitions() {
+  return loggedInvoke<PipelineDefinitionListItem[]>("list_pipeline_definitions");
+}
+
 export async function getWorkflowDefinitionDetail(id: number) {
   return loggedInvoke<WorkflowDefinitionDetail>("get_workflow_definition_detail", { id });
+}
+
+export async function getPipelineDefinitionDetail(id: number) {
+  return loggedInvoke<PipelineDefinitionDetail>("get_pipeline_definition_detail", { id });
 }
 
 export async function updateWorkflowDefinition(args: {
@@ -300,12 +366,44 @@ export async function updateWorkflowDefinition(args: {
   });
 }
 
+export async function updatePipelineDefinition(args: {
+  id: number;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  maxConcurrencyDefault: number;
+  variables: PipelineVariableInput[];
+  nodes: PipelineNodeInput[];
+  schedules: PipelineScheduleInput[];
+}) {
+  const normalizedDescription = args.description?.trim();
+
+  return loggedInvoke<void>("update_pipeline_definition", {
+    id: args.id,
+    name: args.name,
+    description: normalizedDescription ?? "",
+    enabled: args.enabled,
+    max_concurrency_default: args.maxConcurrencyDefault,
+    variables: args.variables.map(toPipelineVariablePayload),
+    nodes: args.nodes.map(toPipelineNodePayload),
+    schedules: args.schedules.map(toPipelineSchedulePayload),
+  });
+}
+
 export async function deleteWorkflowDefinition(id: number) {
   return loggedInvoke<void>("delete_workflow_definition", { id });
 }
 
+export async function deletePipelineDefinition(id: number) {
+  return loggedInvoke<void>("delete_pipeline_definition", { id });
+}
+
 export async function listWorkflowRuns() {
   return loggedInvoke<WorkflowRunListItem[]>("list_workflow_runs");
+}
+
+export async function listPipelineRuns() {
+  return loggedInvoke<PipelineRunListItem[]>("list_pipeline_runs");
 }
 
 export async function executeWorkflowRun(request: WorkflowRunExecuteRequest) {
@@ -337,6 +435,10 @@ export async function retryFailedWorkflowRun(request: WorkflowRunRetryFailedRequ
 
 export async function getWorkflowRunDetail(id: number) {
   return loggedInvoke<WorkflowRunDetail>("get_workflow_run_detail", { id });
+}
+
+export async function getPipelineRunDetail(id: number) {
+  return loggedInvoke<PipelineRunDetail>("get_pipeline_run_detail", { id });
 }
 
 export async function syncProjectGroupMembers(args: {

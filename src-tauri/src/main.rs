@@ -8,7 +8,9 @@ use tauri::Manager;
 use crate::gitlab::GitLabConfig;
 use crate::models::{
     AppSettings, BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert,
-    ManagedProject, ProjectGroup, ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
+    ManagedProject, PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineNodeInput,
+    PipelineRunDetail, PipelineRunListItem, PipelineScheduleInput, PipelineVariableInput,
+    ProjectGroup, ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
     WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail,
     WorkflowRunExecuteRequest, WorkflowRunExecuteResult, WorkflowRunListItem,
     WorkflowRunRetryFailedRequest, WorkflowStepInput,
@@ -474,6 +476,38 @@ async fn create_workflow_definition(
 }
 
 #[tauri::command]
+async fn create_pipeline_definition(
+    state: State<'_, AppState>,
+    name: String,
+    description: String,
+    enabled: bool,
+    max_concurrency_default: i64,
+    variables: Vec<PipelineVariableInput>,
+    nodes: Vec<PipelineNodeInput>,
+    schedules: Vec<PipelineScheduleInput>,
+) -> Result<PipelineDefinitionDetail, String> {
+    let result = db::create_pipeline_definition(
+        &state.db,
+        name.trim().to_string(),
+        description.trim().to_string(),
+        enabled,
+        max_concurrency_default,
+        variables,
+        nodes,
+        schedules,
+    )
+    .await
+    .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(pipeline) => tracing::info!(id = pipeline.id, "create_pipeline_definition success"),
+        Err(e) => tracing::error!(error = %e, "create_pipeline_definition failed"),
+    }
+
+    result
+}
+
+#[tauri::command]
 async fn list_workflow_definitions(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkflowDefinitionListItem>, String> {
@@ -492,6 +526,24 @@ async fn list_workflow_definitions(
 }
 
 #[tauri::command]
+async fn list_pipeline_definitions(
+    state: State<'_, AppState>,
+) -> Result<Vec<PipelineDefinitionListItem>, String> {
+    let result = db::list_pipeline_definitions(&state.db)
+        .await
+        .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(pipelines) => {
+            tracing::info!(count = pipelines.len(), "list_pipeline_definitions success")
+        }
+        Err(e) => tracing::error!(error = %e, "list_pipeline_definitions failed"),
+    }
+
+    result
+}
+
+#[tauri::command]
 async fn get_workflow_definition_detail(
     state: State<'_, AppState>,
     id: i64,
@@ -503,6 +555,23 @@ async fn get_workflow_definition_detail(
     match &result {
         Ok(_) => tracing::info!(id = id, "get_workflow_definition_detail success"),
         Err(e) => tracing::error!(id = id, error = %e, "get_workflow_definition_detail failed"),
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn get_pipeline_definition_detail(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<PipelineDefinitionDetail, String> {
+    let result = db::get_pipeline_definition_detail(&state.db, id)
+        .await
+        .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(_) => tracing::info!(id = id, "get_pipeline_definition_detail success"),
+        Err(e) => tracing::error!(id = id, error = %e, "get_pipeline_definition_detail failed"),
     }
 
     result
@@ -541,6 +610,40 @@ async fn update_workflow_definition(
 }
 
 #[tauri::command]
+async fn update_pipeline_definition(
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+    description: String,
+    enabled: bool,
+    max_concurrency_default: i64,
+    variables: Vec<PipelineVariableInput>,
+    nodes: Vec<PipelineNodeInput>,
+    schedules: Vec<PipelineScheduleInput>,
+) -> Result<(), String> {
+    let result = db::update_pipeline_definition(
+        &state.db,
+        id,
+        name.trim().to_string(),
+        description.trim().to_string(),
+        enabled,
+        max_concurrency_default,
+        variables,
+        nodes,
+        schedules,
+    )
+    .await
+    .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(_) => tracing::info!(id = id, "update_pipeline_definition success"),
+        Err(e) => tracing::error!(id = id, error = %e, "update_pipeline_definition failed"),
+    }
+
+    result
+}
+
+#[tauri::command]
 async fn delete_workflow_definition(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let result = db::delete_workflow_definition(&state.db, id)
         .await
@@ -549,6 +652,20 @@ async fn delete_workflow_definition(state: State<'_, AppState>, id: i64) -> Resu
     match &result {
         Ok(_) => tracing::info!(id = id, "delete_workflow_definition success"),
         Err(e) => tracing::error!(id = id, error = %e, "delete_workflow_definition failed"),
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn delete_pipeline_definition(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let result = db::delete_pipeline_definition(&state.db, id)
+        .await
+        .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(_) => tracing::info!(id = id, "delete_pipeline_definition success"),
+        Err(e) => tracing::error!(id = id, error = %e, "delete_pipeline_definition failed"),
     }
 
     result
@@ -565,6 +682,20 @@ async fn list_workflow_runs(
     match &result {
         Ok(runs) => tracing::info!(count = runs.len(), "list_workflow_runs success"),
         Err(e) => tracing::error!(error = %e, "list_workflow_runs failed"),
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn list_pipeline_runs(state: State<'_, AppState>) -> Result<Vec<PipelineRunListItem>, String> {
+    let result = db::list_pipeline_runs(&state.db)
+        .await
+        .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(runs) => tracing::info!(count = runs.len(), "list_pipeline_runs success"),
+        Err(e) => tracing::error!(error = %e, "list_pipeline_runs failed"),
     }
 
     result
@@ -649,6 +780,23 @@ async fn get_workflow_run_detail(
     match &result {
         Ok(_) => tracing::info!(id = id, "get_workflow_run_detail success"),
         Err(e) => tracing::error!(id = id, error = %e, "get_workflow_run_detail failed"),
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn get_pipeline_run_detail(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<PipelineRunDetail, String> {
+    let result = db::get_pipeline_run_detail(&state.db, id)
+        .await
+        .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(_) => tracing::info!(id = id, "get_pipeline_run_detail success"),
+        Err(e) => tracing::error!(id = id, error = %e, "get_pipeline_run_detail failed"),
     }
 
     result
@@ -1094,16 +1242,23 @@ fn main() {
       add_projects_to_group,
       remove_projects_from_group,
       list_project_group_projects,
-      create_workflow_definition,
-      list_workflow_definitions,
-      get_workflow_definition_detail,
-      update_workflow_definition,
-      delete_workflow_definition,
-      execute_workflow_run,
-      cancel_workflow_run,
-      retry_failed_workflow_run,
-      list_workflow_runs,
-      get_workflow_run_detail,
+	      create_workflow_definition,
+	      create_pipeline_definition,
+	      list_workflow_definitions,
+	      list_pipeline_definitions,
+	      get_workflow_definition_detail,
+	      get_pipeline_definition_detail,
+	      update_workflow_definition,
+	      update_pipeline_definition,
+	      delete_workflow_definition,
+	      delete_pipeline_definition,
+	      execute_workflow_run,
+	      cancel_workflow_run,
+	      retry_failed_workflow_run,
+	      list_workflow_runs,
+	      list_pipeline_runs,
+	      get_workflow_run_detail,
+	      get_pipeline_run_detail,
       sync_project_group_members,
       upsert_local_members,
       list_local_members,

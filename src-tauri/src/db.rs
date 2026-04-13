@@ -1,10 +1,11 @@
 use crate::models::{
     AppSettings, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
     PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineNode, PipelineNodeInput,
-    PipelineMigrationSummary, PipelineRunListItem, PipelineSchedule, PipelineScheduleInput,
-    PipelineVariable, PipelineVariableInput, ProjectGroup, WorkflowDefinitionDetail,
-    WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem, WorkflowRunProject,
-    WorkflowRunStep, WorkflowStep, WorkflowStepInput,
+    PipelineMigrationSummary, PipelineRunDetail, PipelineRunListItem, PipelineRunNode,
+    PipelineRunProject, PipelineSchedule, PipelineScheduleInput, PipelineVariable,
+    PipelineVariableInput, ProjectGroup, WorkflowDefinitionDetail, WorkflowDefinitionListItem,
+    WorkflowRunDetail, WorkflowRunListItem, WorkflowRunProject, WorkflowRunStep, WorkflowStep,
+    WorkflowStepInput,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -309,6 +310,7 @@ struct PipelineRunSummaryRow {
     project_group_id: i64,
     project_group_name: String,
     legacy_workflow_run_id: Option<i64>,
+    source_pipeline_run_id: Option<i64>,
     trigger_kind: String,
     status: String,
     run_parameters_json: String,
@@ -347,6 +349,37 @@ struct WorkflowRunStepRow {
     workflow_step_id: Option<i64>,
     step_order: i64,
     step_type: String,
+    rendered_parameters_json: String,
+    status: String,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i64>,
+    summary_message: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PipelineRunProjectRow {
+    id: i64,
+    managed_project_id: Option<i64>,
+    gitlab_project_id: i64,
+    project_name: String,
+    project_path_with_namespace: String,
+    repo_path: String,
+    status: String,
+    summary_message: String,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PipelineRunNodeRow {
+    id: i64,
+    pipeline_run_project_id: i64,
+    pipeline_node_id: Option<i64>,
+    node_order: i64,
+    node_type: String,
     rendered_parameters_json: String,
     status: String,
     started_at: Option<String>,
@@ -1302,6 +1335,89 @@ pub async fn get_pipeline_definition_detail(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn update_pipeline_definition(
+    pool: &SqlitePool,
+    id: i64,
+    name: String,
+    description: String,
+    enabled: bool,
+    max_concurrency_default: i64,
+    variables: Vec<PipelineVariableInput>,
+    nodes: Vec<PipelineNodeInput>,
+    schedules: Vec<PipelineScheduleInput>,
+) -> Result<()> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(anyhow!("pipeline definition name is empty"));
+    }
+    if max_concurrency_default < 1 {
+        return Err(anyhow!("max_concurrency_default must be >= 1"));
+    }
+
+    let variables = normalize_pipeline_variable_inputs(variables)?;
+    let nodes = normalize_pipeline_node_inputs(nodes)?;
+    let schedules = normalize_pipeline_schedule_inputs(schedules)?;
+    let description = description.trim().to_string();
+    let enabled_value = if enabled { 1_i64 } else { 0_i64 };
+    let now = Utc::now().to_rfc3339();
+
+    let mut tx = pool.begin().await?;
+    let res = sqlx::query(
+        r#"UPDATE pipeline_definitions
+       SET name = ?1,
+           description = ?2,
+           enabled = ?3,
+           max_concurrency_default = ?4,
+           updated_at = ?5
+       WHERE id = ?6"#,
+    )
+    .bind(&name)
+    .bind(&description)
+    .bind(enabled_value)
+    .bind(max_concurrency_default)
+    .bind(&now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
+    if res.rows_affected() == 0 {
+        return Err(anyhow!("pipeline definition not found: {id}"));
+    }
+
+    sqlx::query(r#"DELETE FROM pipeline_variables WHERE pipeline_definition_id = ?1"#)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(r#"DELETE FROM pipeline_nodes WHERE pipeline_definition_id = ?1"#)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(r#"DELETE FROM pipeline_schedules WHERE pipeline_definition_id = ?1"#)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    insert_pipeline_variables(&mut tx, id, &variables, &now).await?;
+    insert_pipeline_nodes(&mut tx, id, &nodes, &now).await?;
+    insert_pipeline_schedules(&mut tx, id, &schedules, &now).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn delete_pipeline_definition(pool: &SqlitePool, id: i64) -> Result<()> {
+    let res = sqlx::query(r#"DELETE FROM pipeline_definitions WHERE id = ?1"#)
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    if res.rows_affected() == 0 {
+        return Err(anyhow!("pipeline definition not found: {id}"));
+    }
+
+    Ok(())
+}
+
 pub async fn migrate_workflows_to_pipelines(
     pool: &SqlitePool,
 ) -> Result<PipelineMigrationSummary> {
@@ -1721,6 +1837,7 @@ pub async fn list_pipeline_runs(pool: &SqlitePool) -> Result<Vec<PipelineRunList
          r.project_group_id,
          g.name as project_group_name,
          r.legacy_workflow_run_id,
+         r.source_pipeline_run_id,
          r.trigger_kind,
          r.status,
          r.run_parameters_json,
@@ -1755,6 +1872,7 @@ pub async fn list_pipeline_runs(pool: &SqlitePool) -> Result<Vec<PipelineRunList
             project_group_id: row.project_group_id,
             project_group_name: row.project_group_name,
             legacy_workflow_run_id: row.legacy_workflow_run_id,
+            source_pipeline_run_id: row.source_pipeline_run_id,
             trigger_kind: row.trigger_kind,
             status: row.status,
             run_parameters: deserialize_json_object(
@@ -1777,6 +1895,159 @@ pub async fn list_pipeline_runs(pool: &SqlitePool) -> Result<Vec<PipelineRunList
     }
 
     Ok(items)
+}
+
+pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<PipelineRunDetail> {
+    let mut tx = pool.begin().await?;
+
+    let row = sqlx::query_as::<_, PipelineRunSummaryRow>(
+        r#"SELECT
+         r.id,
+         r.pipeline_definition_id,
+         d.name as pipeline_definition_name,
+         r.project_group_id,
+         g.name as project_group_name,
+         r.legacy_workflow_run_id,
+         r.source_pipeline_run_id,
+         r.trigger_kind,
+         r.status,
+         r.run_parameters_json,
+         r.max_concurrency,
+         COUNT(p.id) as projects_total,
+         COALESCE(SUM(CASE WHEN p.status = 'queued' THEN 1 ELSE 0 END), 0) as projects_queued,
+         COALESCE(SUM(CASE WHEN p.status = 'running' THEN 1 ELSE 0 END), 0) as projects_running,
+         COALESCE(SUM(CASE WHEN p.status = 'success' THEN 1 ELSE 0 END), 0) as projects_success,
+         COALESCE(SUM(CASE WHEN p.status = 'failed' THEN 1 ELSE 0 END), 0) as projects_failed,
+         COALESCE(SUM(CASE WHEN p.status = 'cancelled' THEN 1 ELSE 0 END), 0) as projects_cancelled,
+         COALESCE(SUM(CASE WHEN p.status = 'failed_precheck' THEN 1 ELSE 0 END), 0) as projects_failed_precheck,
+         r.started_at,
+         r.finished_at,
+         r.created_at,
+         r.updated_at
+       FROM pipeline_runs r
+       INNER JOIN pipeline_definitions d ON d.id = r.pipeline_definition_id
+       INNER JOIN project_groups g ON g.id = r.project_group_id
+       LEFT JOIN pipeline_run_projects p ON p.pipeline_run_id = r.id
+       WHERE r.id = ?1
+       GROUP BY r.id"#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| anyhow!("pipeline run not found: {id}"))?;
+
+    let project_rows = sqlx::query_as::<_, PipelineRunProjectRow>(
+        r#"SELECT
+         id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path,
+         status, summary_message, started_at, finished_at
+       FROM pipeline_run_projects
+       WHERE pipeline_run_id = ?1
+       ORDER BY id ASC"#,
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let node_rows = sqlx::query_as::<_, PipelineRunNodeRow>(
+        r#"SELECT
+         n.id,
+         n.pipeline_run_project_id,
+         n.pipeline_node_id,
+         n.node_order,
+         n.node_type,
+         n.rendered_parameters_json,
+         n.status,
+         n.started_at,
+         n.finished_at,
+         n.stdout,
+         n.stderr,
+         n.exit_code,
+         n.summary_message
+       FROM pipeline_run_nodes n
+       INNER JOIN pipeline_run_projects p ON p.id = n.pipeline_run_project_id
+       WHERE p.pipeline_run_id = ?1
+       ORDER BY n.pipeline_run_project_id ASC, n.node_order ASC, n.id ASC"#,
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut nodes_by_project_id = HashMap::<i64, Vec<PipelineRunNode>>::new();
+    for node_row in node_rows {
+        let node = PipelineRunNode {
+            id: node_row.id,
+            pipeline_node_id: node_row.pipeline_node_id,
+            node_order: node_row.node_order,
+            node_type: node_row.node_type,
+            rendered_parameters: deserialize_json_object(
+                &node_row.rendered_parameters_json,
+                "pipeline run node rendered parameters",
+            )?,
+            status: node_row.status,
+            started_at: node_row.started_at,
+            finished_at: node_row.finished_at,
+            stdout: node_row.stdout,
+            stderr: node_row.stderr,
+            exit_code: node_row.exit_code,
+            summary_message: node_row.summary_message,
+        };
+        nodes_by_project_id
+            .entry(node_row.pipeline_run_project_id)
+            .or_default()
+            .push(node);
+    }
+
+    let mut projects = Vec::with_capacity(project_rows.len());
+    for project_row in project_rows {
+        let nodes = nodes_by_project_id.remove(&project_row.id).unwrap_or_default();
+        projects.push(PipelineRunProject {
+            id: project_row.id,
+            managed_project_id: project_row.managed_project_id,
+            gitlab_project_id: i64_to_u64_checked(
+                project_row.gitlab_project_id,
+                "pipeline_run_projects.gitlab_project_id",
+            )?,
+            project_name: project_row.project_name,
+            project_path_with_namespace: project_row.project_path_with_namespace,
+            repo_path: project_row.repo_path,
+            status: project_row.status,
+            summary_message: project_row.summary_message,
+            started_at: project_row.started_at,
+            finished_at: project_row.finished_at,
+            nodes,
+        });
+    }
+
+    tx.commit().await?;
+
+    Ok(PipelineRunDetail {
+        id: row.id,
+        pipeline_definition_id: row.pipeline_definition_id,
+        pipeline_definition_name: row.pipeline_definition_name,
+        project_group_id: row.project_group_id,
+        project_group_name: row.project_group_name,
+        legacy_workflow_run_id: row.legacy_workflow_run_id,
+        source_pipeline_run_id: row.source_pipeline_run_id,
+        trigger_kind: row.trigger_kind,
+        status: row.status,
+        run_parameters: deserialize_json_object(
+            &row.run_parameters_json,
+            "pipeline run parameters",
+        )?,
+        max_concurrency: row.max_concurrency,
+        projects_total: row.projects_total,
+        projects_queued: row.projects_queued,
+        projects_running: row.projects_running,
+        projects_success: row.projects_success,
+        projects_failed: row.projects_failed,
+        projects_cancelled: row.projects_cancelled,
+        projects_failed_precheck: row.projects_failed_precheck,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        projects,
+    })
 }
 
 pub async fn list_workflow_runs(pool: &SqlitePool) -> Result<Vec<WorkflowRunListItem>> {

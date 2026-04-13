@@ -2,6 +2,12 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
+import {
+  createPipelineDefinition,
+  getPipelineRunDetail,
+  listPipelineDefinitions,
+  listPipelineRuns,
+} from "@/lib/invoke";
 import { ProjectGroupsPage } from "@/pages/ProjectGroupsPage";
 import { WorkflowRunsPage } from "@/pages/WorkflowRunsPage";
 
@@ -216,6 +222,86 @@ describe("workflow interactions", () => {
         })
       );
     });
+  });
+});
+
+describe("pipeline wrapper smoke", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("exposes pipeline-named invoke wrappers while keeping workflow wrappers intact", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_pipeline_definitions") return [];
+      if (cmd === "create_pipeline_definition") {
+        return {
+          id: 11,
+          name: "release-pipeline",
+          description: "",
+          enabled: true,
+          maxConcurrencyDefault: 2,
+          legacyWorkflowDefinitionId: null,
+          createdAt: "2026-03-18T00:00:00Z",
+          updatedAt: "2026-03-18T00:00:00Z",
+          variables: [],
+          nodes: [],
+          schedules: [],
+        };
+      }
+      if (cmd === "list_pipeline_runs") return [];
+      if (cmd === "get_pipeline_run_detail") {
+        return {
+          id: 301,
+          pipelineDefinitionId: 11,
+          pipelineDefinitionName: "release-pipeline",
+          projectGroupId: 5,
+          projectGroupName: "release-train",
+          legacyWorkflowRunId: null,
+          triggerKind: "manual",
+          status: "running",
+          runParameters: {},
+          maxConcurrency: 2,
+          projectsTotal: 0,
+          projectsQueued: 0,
+          projectsRunning: 0,
+          projectsSuccess: 0,
+          projectsFailed: 0,
+          projectsCancelled: 0,
+          projectsFailedPrecheck: 0,
+          startedAt: null,
+          finishedAt: null,
+          createdAt: "2026-03-18T00:00:00Z",
+          updatedAt: "2026-03-18T00:00:00Z",
+          projects: [],
+        };
+      }
+      return undefined;
+    });
+
+    await listPipelineDefinitions();
+    await createPipelineDefinition({
+      name: "release-pipeline",
+      variables: [],
+      nodes: [
+        {
+          nodeType: "checkout_branch",
+          parameters: { branch: "${source_branch}" },
+        },
+      ],
+      schedules: [],
+    });
+    await listPipelineRuns();
+    await getPipelineRunDetail(301);
+
+    expect(invokeMock).toHaveBeenCalledWith("list_pipeline_definitions", undefined);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "create_pipeline_definition",
+      expect.objectContaining({
+        name: "release-pipeline",
+      })
+    );
+    expect(invokeMock).toHaveBeenCalledWith("list_pipeline_runs", undefined);
+    expect(invokeMock).toHaveBeenCalledWith("get_pipeline_run_detail", { id: 301 });
   });
 });
 

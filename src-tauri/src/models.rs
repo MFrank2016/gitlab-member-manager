@@ -236,6 +236,7 @@ pub struct PipelineRunListItem {
     pub project_group_id: i64,
     pub project_group_name: String,
     pub legacy_workflow_run_id: Option<i64>,
+    pub source_pipeline_run_id: Option<i64>,
     pub trigger_kind: String,
     pub status: String,
     pub run_parameters: Value,
@@ -255,6 +256,39 @@ pub struct PipelineRunListItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PipelineRunNode {
+    pub id: i64,
+    pub pipeline_node_id: Option<i64>,
+    pub node_order: i64,
+    pub node_type: String,
+    pub rendered_parameters: Value,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i64>,
+    pub summary_message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunProject {
+    pub id: i64,
+    pub managed_project_id: Option<i64>,
+    pub gitlab_project_id: u64,
+    pub project_name: String,
+    pub project_path_with_namespace: String,
+    pub repo_path: String,
+    pub status: String,
+    pub summary_message: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub nodes: Vec<PipelineRunNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PipelineRunDetail {
     pub id: i64,
     pub pipeline_definition_id: i64,
@@ -262,6 +296,7 @@ pub struct PipelineRunDetail {
     pub project_group_id: i64,
     pub project_group_name: String,
     pub legacy_workflow_run_id: Option<i64>,
+    pub source_pipeline_run_id: Option<i64>,
     pub trigger_kind: String,
     pub status: String,
     pub run_parameters: Value,
@@ -277,6 +312,7 @@ pub struct PipelineRunDetail {
     pub finished_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub projects: Vec<PipelineRunProject>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
