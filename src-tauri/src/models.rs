@@ -124,6 +124,159 @@ pub struct WorkflowStepInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PipelineVariableInput {
+    pub key: String,
+    pub label: String,
+    pub default_value: Option<String>,
+    pub value_type: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub options: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineVariable {
+    pub variable_order: i64,
+    pub key: String,
+    pub label: String,
+    pub default_value: Option<String>,
+    pub value_type: String,
+    pub required: bool,
+    pub options: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineNodeInput {
+    #[serde(alias = "node_type")]
+    pub node_type: String,
+    #[serde(default)]
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineNode {
+    pub node_order: i64,
+    pub node_type: String,
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineScheduleInput {
+    #[serde(alias = "cron_expr")]
+    pub cron_expr: String,
+    pub timezone: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
+    pub policy: String,
+    #[serde(default)]
+    pub variables: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineSchedule {
+    pub schedule_order: i64,
+    pub cron_expr: String,
+    pub timezone: String,
+    pub branch: Option<String>,
+    pub enabled: bool,
+    pub policy: String,
+    pub variables: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineDefinitionListItem {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub max_concurrency_default: i64,
+    pub legacy_workflow_definition_id: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub variables_count: i64,
+    pub nodes_count: i64,
+    pub schedules_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineDefinitionDetail {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub max_concurrency_default: i64,
+    pub legacy_workflow_definition_id: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub variables: Vec<PipelineVariable>,
+    pub nodes: Vec<PipelineNode>,
+    pub schedules: Vec<PipelineSchedule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunListItem {
+    pub id: i64,
+    pub pipeline_definition_id: i64,
+    pub pipeline_definition_name: String,
+    pub project_group_id: i64,
+    pub project_group_name: String,
+    pub legacy_workflow_run_id: Option<i64>,
+    pub trigger_kind: String,
+    pub status: String,
+    pub run_parameters: Value,
+    pub max_concurrency: i64,
+    pub projects_total: i64,
+    pub projects_queued: i64,
+    pub projects_running: i64,
+    pub projects_success: i64,
+    pub projects_failed: i64,
+    pub projects_cancelled: i64,
+    pub projects_failed_precheck: i64,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunDetail {
+    pub id: i64,
+    pub pipeline_definition_id: i64,
+    pub pipeline_definition_name: String,
+    pub project_group_id: i64,
+    pub project_group_name: String,
+    pub legacy_workflow_run_id: Option<i64>,
+    pub trigger_kind: String,
+    pub status: String,
+    pub run_parameters: Value,
+    pub max_concurrency: i64,
+    pub projects_total: i64,
+    pub projects_queued: i64,
+    pub projects_running: i64,
+    pub projects_success: i64,
+    pub projects_failed: i64,
+    pub projects_cancelled: i64,
+    pub projects_failed_precheck: i64,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowStep {
     pub step_order: i64,
     pub step_type: String,

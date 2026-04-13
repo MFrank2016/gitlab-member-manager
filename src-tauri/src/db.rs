@@ -1,7 +1,10 @@
 use crate::models::{
-    AppSettings, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject, ProjectGroup,
-    WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem,
-    WorkflowRunProject, WorkflowRunStep, WorkflowStep, WorkflowStepInput,
+    AppSettings, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
+    PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineNode, PipelineNodeInput,
+    PipelineRunListItem, PipelineSchedule, PipelineScheduleInput,
+    PipelineVariable, PipelineVariableInput, ProjectGroup, WorkflowDefinitionDetail,
+    WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem, WorkflowRunProject,
+    WorkflowRunStep, WorkflowStep, WorkflowStepInput,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -98,6 +101,116 @@ fn normalize_workflow_step_inputs(steps: Vec<WorkflowStepInput>) -> Result<Vec<W
     Ok(normalized)
 }
 
+fn normalize_json_array(value: Value, field_name: &str) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Array(vec![])),
+        Value::Array(_) => Ok(value),
+        _ => Err(anyhow!("{field_name} must be a JSON array")),
+    }
+}
+
+fn normalize_pipeline_variable_inputs(
+    variables: Vec<PipelineVariableInput>,
+) -> Result<Vec<PipelineVariableInput>> {
+    let mut normalized = Vec::with_capacity(variables.len());
+    let mut keys = BTreeSet::new();
+
+    for variable in variables {
+        let key = variable.key.trim().to_string();
+        if key.is_empty() {
+            return Err(anyhow!("pipeline variable key is empty"));
+        }
+        if !keys.insert(key.clone()) {
+            return Err(anyhow!("duplicate pipeline variable key: {key}"));
+        }
+
+        let value_type = variable.value_type.trim().to_string();
+        if value_type.is_empty() {
+            return Err(anyhow!("pipeline variable value_type is empty"));
+        }
+
+        let label = variable.label.trim().to_string();
+        let default_value = variable.default_value.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        });
+        let options = normalize_json_array(variable.options, "pipeline variable options")?;
+
+        normalized.push(PipelineVariableInput {
+            key,
+            label,
+            default_value,
+            value_type,
+            required: variable.required,
+            options,
+        });
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_pipeline_node_inputs(nodes: Vec<PipelineNodeInput>) -> Result<Vec<PipelineNodeInput>> {
+    if nodes.is_empty() {
+        return Err(anyhow!("pipeline definition must contain at least one node"));
+    }
+
+    let mut normalized = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let node_type = node.node_type.trim().to_string();
+        if node_type.is_empty() {
+            return Err(anyhow!("pipeline node type is empty"));
+        }
+        let parameters = normalize_json_object(node.parameters, "pipeline node parameters")?;
+        normalized.push(PipelineNodeInput {
+            node_type,
+            parameters,
+        });
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_pipeline_schedule_inputs(
+    schedules: Vec<PipelineScheduleInput>,
+) -> Result<Vec<PipelineScheduleInput>> {
+    let mut normalized = Vec::with_capacity(schedules.len());
+
+    for schedule in schedules {
+        let cron_expr = schedule.cron_expr.trim().to_string();
+        if cron_expr.is_empty() {
+            return Err(anyhow!("pipeline schedule cron_expr is empty"));
+        }
+
+        let timezone = schedule.timezone.trim().to_string();
+        if timezone.is_empty() {
+            return Err(anyhow!("pipeline schedule timezone is empty"));
+        }
+
+        let policy = schedule.policy.trim().to_string();
+        if policy.is_empty() {
+            return Err(anyhow!("pipeline schedule policy is empty"));
+        }
+
+        let branch = schedule.branch.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        });
+        let variables =
+            normalize_json_object(schedule.variables, "pipeline schedule variables")?;
+
+        normalized.push(PipelineScheduleInput {
+            cron_expr,
+            timezone,
+            branch,
+            enabled: schedule.enabled,
+            policy,
+            variables,
+        });
+    }
+
+    Ok(normalized)
+}
+
 fn serialize_json(value: &Value, field_name: &str) -> Result<String> {
     serde_json::to_string(value).with_context(|| format!("serialize {field_name} json"))
 }
@@ -119,6 +232,31 @@ struct WorkflowRunSummaryRow {
     project_group_id: i64,
     project_group_name: String,
     source_workflow_run_id: Option<i64>,
+    trigger_kind: String,
+    status: String,
+    run_parameters_json: String,
+    max_concurrency: i64,
+    projects_total: i64,
+    projects_queued: i64,
+    projects_running: i64,
+    projects_success: i64,
+    projects_failed: i64,
+    projects_cancelled: i64,
+    projects_failed_precheck: i64,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PipelineRunSummaryRow {
+    id: i64,
+    pipeline_definition_id: i64,
+    pipeline_definition_name: String,
+    project_group_id: i64,
+    project_group_name: String,
+    legacy_workflow_run_id: Option<i64>,
     trigger_kind: String,
     status: String,
     run_parameters_json: String,
@@ -779,6 +917,339 @@ pub async fn get_workflow_definition_detail(
     })
 }
 
+async fn insert_pipeline_variables(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_definition_id: i64,
+    variables: &[PipelineVariableInput],
+    now: &str,
+) -> Result<()> {
+    for (index, variable) in variables.iter().enumerate() {
+        let variable_order = i64::try_from(index)
+            .map_err(|_| anyhow!("pipeline variable index out of range: {index}"))?;
+        let options_json = serialize_json(&variable.options, "pipeline_variables.options_json")?;
+
+        sqlx::query(
+            r#"INSERT INTO pipeline_variables (
+             pipeline_definition_id, variable_order, key, label, default_value, value_type,
+             required, options_json, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        )
+        .bind(pipeline_definition_id)
+        .bind(variable_order)
+        .bind(&variable.key)
+        .bind(&variable.label)
+        .bind(&variable.default_value)
+        .bind(&variable.value_type)
+        .bind(if variable.required { 1_i64 } else { 0_i64 })
+        .bind(&options_json)
+        .bind(now)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn insert_pipeline_nodes(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_definition_id: i64,
+    nodes: &[PipelineNodeInput],
+    now: &str,
+) -> Result<()> {
+    for (index, node) in nodes.iter().enumerate() {
+        let node_order =
+            i64::try_from(index).map_err(|_| anyhow!("pipeline node index out of range: {index}"))?;
+        let parameters_json = serialize_json(&node.parameters, "pipeline_nodes.parameters_json")?;
+
+        sqlx::query(
+            r#"INSERT INTO pipeline_nodes (
+             pipeline_definition_id, node_order, node_type, parameters_json, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+        )
+        .bind(pipeline_definition_id)
+        .bind(node_order)
+        .bind(&node.node_type)
+        .bind(&parameters_json)
+        .bind(now)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn insert_pipeline_schedules(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_definition_id: i64,
+    schedules: &[PipelineScheduleInput],
+    now: &str,
+) -> Result<()> {
+    for (index, schedule) in schedules.iter().enumerate() {
+        let schedule_order = i64::try_from(index)
+            .map_err(|_| anyhow!("pipeline schedule index out of range: {index}"))?;
+        let variables_json =
+            serialize_json(&schedule.variables, "pipeline_schedules.variables_json")?;
+
+        sqlx::query(
+            r#"INSERT INTO pipeline_schedules (
+             pipeline_definition_id, schedule_order, cron_expr, timezone, branch, enabled, policy,
+             variables_json, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        )
+        .bind(pipeline_definition_id)
+        .bind(schedule_order)
+        .bind(&schedule.cron_expr)
+        .bind(&schedule.timezone)
+        .bind(&schedule.branch)
+        .bind(if schedule.enabled { 1_i64 } else { 0_i64 })
+        .bind(&schedule.policy)
+        .bind(&variables_json)
+        .bind(now)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn load_pipeline_variables(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+) -> Result<Vec<PipelineVariable>> {
+    let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, String, i64, String)>(
+        r#"SELECT
+         variable_order, key, label, default_value, value_type, required, options_json
+       FROM pipeline_variables
+       WHERE pipeline_definition_id = ?1
+       ORDER BY variable_order ASC, id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut variables = Vec::with_capacity(rows.len());
+    for row in rows {
+        variables.push(PipelineVariable {
+            variable_order: row.0,
+            key: row.1,
+            label: row.2,
+            default_value: row.3,
+            value_type: row.4,
+            required: row.5 != 0,
+            options: normalize_json_array(
+                deserialize_json(&row.6, "pipeline variable options")?,
+                "pipeline variable options",
+            )?,
+        });
+    }
+
+    Ok(variables)
+}
+
+async fn load_pipeline_nodes(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+) -> Result<Vec<PipelineNode>> {
+    let rows = sqlx::query_as::<_, (i64, String, String)>(
+        r#"SELECT
+         node_order, node_type, parameters_json
+       FROM pipeline_nodes
+       WHERE pipeline_definition_id = ?1
+       ORDER BY node_order ASC, id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut nodes = Vec::with_capacity(rows.len());
+    for row in rows {
+        nodes.push(PipelineNode {
+            node_order: row.0,
+            node_type: row.1,
+            parameters: deserialize_json_object(&row.2, "pipeline node parameters")?,
+        });
+    }
+
+    Ok(nodes)
+}
+
+async fn load_pipeline_schedules(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+) -> Result<Vec<PipelineSchedule>> {
+    let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, i64, String, String)>(
+        r#"SELECT
+         schedule_order, cron_expr, timezone, branch, enabled, policy, variables_json
+       FROM pipeline_schedules
+       WHERE pipeline_definition_id = ?1
+       ORDER BY schedule_order ASC, id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut schedules = Vec::with_capacity(rows.len());
+    for row in rows {
+        schedules.push(PipelineSchedule {
+            schedule_order: row.0,
+            cron_expr: row.1,
+            timezone: row.2,
+            branch: row.3,
+            enabled: row.4 != 0,
+            policy: row.5,
+            variables: deserialize_json_object(&row.6, "pipeline schedule variables")?,
+        });
+    }
+
+    Ok(schedules)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_pipeline_definition(
+    pool: &SqlitePool,
+    name: String,
+    description: String,
+    enabled: bool,
+    max_concurrency_default: i64,
+    variables: Vec<PipelineVariableInput>,
+    nodes: Vec<PipelineNodeInput>,
+    schedules: Vec<PipelineScheduleInput>,
+) -> Result<PipelineDefinitionDetail> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(anyhow!("pipeline definition name is empty"));
+    }
+    if max_concurrency_default < 1 {
+        return Err(anyhow!("max_concurrency_default must be >= 1"));
+    }
+
+    let variables = normalize_pipeline_variable_inputs(variables)?;
+    let nodes = normalize_pipeline_node_inputs(nodes)?;
+    let schedules = normalize_pipeline_schedule_inputs(schedules)?;
+    let description = description.trim().to_string();
+    let enabled_value = if enabled { 1_i64 } else { 0_i64 };
+    let now = Utc::now().to_rfc3339();
+
+    let mut tx = pool.begin().await?;
+    let res = sqlx::query(
+        r#"INSERT INTO pipeline_definitions (
+         name, description, enabled, max_concurrency_default, created_at, updated_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+    )
+    .bind(&name)
+    .bind(&description)
+    .bind(enabled_value)
+    .bind(max_concurrency_default)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    let pipeline_definition_id = res.last_insert_rowid();
+
+    insert_pipeline_variables(&mut tx, pipeline_definition_id, &variables, &now).await?;
+    insert_pipeline_nodes(&mut tx, pipeline_definition_id, &nodes, &now).await?;
+    insert_pipeline_schedules(&mut tx, pipeline_definition_id, &schedules, &now).await?;
+    tx.commit().await?;
+
+    get_pipeline_definition_detail(pool, pipeline_definition_id).await
+}
+
+pub async fn list_pipeline_definitions(
+    pool: &SqlitePool,
+) -> Result<Vec<PipelineDefinitionListItem>> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            String,
+            String,
+            i64,
+            i64,
+            Option<i64>,
+            String,
+            String,
+            i64,
+            i64,
+            i64,
+        ),
+    >(
+        r#"SELECT
+         d.id,
+         d.name,
+         d.description,
+         d.enabled,
+         d.max_concurrency_default,
+         d.legacy_workflow_definition_id,
+         d.created_at,
+         d.updated_at,
+         (SELECT COUNT(*) FROM pipeline_variables v WHERE v.pipeline_definition_id = d.id) as variables_count,
+         (SELECT COUNT(*) FROM pipeline_nodes n WHERE n.pipeline_definition_id = d.id) as nodes_count,
+         (SELECT COUNT(*) FROM pipeline_schedules s WHERE s.pipeline_definition_id = d.id) as schedules_count
+       FROM pipeline_definitions d
+       ORDER BY d.id DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(PipelineDefinitionListItem {
+            id: row.0,
+            name: row.1,
+            description: row.2,
+            enabled: row.3 != 0,
+            max_concurrency_default: row.4,
+            legacy_workflow_definition_id: row.5,
+            created_at: row.6,
+            updated_at: row.7,
+            variables_count: row.8,
+            nodes_count: row.9,
+            schedules_count: row.10,
+        });
+    }
+
+    Ok(items)
+}
+
+pub async fn get_pipeline_definition_detail(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<PipelineDefinitionDetail> {
+    let row =
+        sqlx::query_as::<_, (i64, String, String, i64, i64, Option<i64>, String, String)>(
+            r#"SELECT
+             id, name, description, enabled, max_concurrency_default, legacy_workflow_definition_id,
+             created_at, updated_at
+           FROM pipeline_definitions
+           WHERE id = ?1"#,
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| anyhow!("pipeline definition not found: {id}"))?;
+
+    let variables = load_pipeline_variables(pool, id).await?;
+    let nodes = load_pipeline_nodes(pool, id).await?;
+    let schedules = load_pipeline_schedules(pool, id).await?;
+
+    Ok(PipelineDefinitionDetail {
+        id: row.0,
+        name: row.1,
+        description: row.2,
+        enabled: row.3 != 0,
+        max_concurrency_default: row.4,
+        legacy_workflow_definition_id: row.5,
+        created_at: row.6,
+        updated_at: row.7,
+        variables,
+        nodes,
+        schedules,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn update_workflow_definition(
     pool: &SqlitePool,
@@ -851,6 +1322,73 @@ pub async fn delete_workflow_definition(pool: &SqlitePool, id: i64) -> Result<()
     }
 
     Ok(())
+}
+
+pub async fn list_pipeline_runs(pool: &SqlitePool) -> Result<Vec<PipelineRunListItem>> {
+    let rows = sqlx::query_as::<_, PipelineRunSummaryRow>(
+        r#"SELECT
+         r.id,
+         r.pipeline_definition_id,
+         d.name as pipeline_definition_name,
+         r.project_group_id,
+         g.name as project_group_name,
+         r.legacy_workflow_run_id,
+         r.trigger_kind,
+         r.status,
+         r.run_parameters_json,
+         r.max_concurrency,
+         COUNT(p.id) as projects_total,
+         COALESCE(SUM(CASE WHEN p.status = 'queued' THEN 1 ELSE 0 END), 0) as projects_queued,
+         COALESCE(SUM(CASE WHEN p.status = 'running' THEN 1 ELSE 0 END), 0) as projects_running,
+         COALESCE(SUM(CASE WHEN p.status = 'success' THEN 1 ELSE 0 END), 0) as projects_success,
+         COALESCE(SUM(CASE WHEN p.status = 'failed' THEN 1 ELSE 0 END), 0) as projects_failed,
+         COALESCE(SUM(CASE WHEN p.status = 'cancelled' THEN 1 ELSE 0 END), 0) as projects_cancelled,
+         COALESCE(SUM(CASE WHEN p.status = 'failed_precheck' THEN 1 ELSE 0 END), 0) as projects_failed_precheck,
+         r.started_at,
+         r.finished_at,
+         r.created_at,
+         r.updated_at
+       FROM pipeline_runs r
+       INNER JOIN pipeline_definitions d ON d.id = r.pipeline_definition_id
+       INNER JOIN project_groups g ON g.id = r.project_group_id
+       LEFT JOIN pipeline_run_projects p ON p.pipeline_run_id = r.id
+       GROUP BY r.id
+       ORDER BY r.created_at DESC, r.id DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(PipelineRunListItem {
+            id: row.id,
+            pipeline_definition_id: row.pipeline_definition_id,
+            pipeline_definition_name: row.pipeline_definition_name,
+            project_group_id: row.project_group_id,
+            project_group_name: row.project_group_name,
+            legacy_workflow_run_id: row.legacy_workflow_run_id,
+            trigger_kind: row.trigger_kind,
+            status: row.status,
+            run_parameters: deserialize_json_object(
+                &row.run_parameters_json,
+                "pipeline run parameters",
+            )?,
+            max_concurrency: row.max_concurrency,
+            projects_total: row.projects_total,
+            projects_queued: row.projects_queued,
+            projects_running: row.projects_running,
+            projects_success: row.projects_success,
+            projects_failed: row.projects_failed,
+            projects_cancelled: row.projects_cancelled,
+            projects_failed_precheck: row.projects_failed_precheck,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        });
+    }
+
+    Ok(items)
 }
 
 pub async fn list_workflow_runs(pool: &SqlitePool) -> Result<Vec<WorkflowRunListItem>> {
@@ -2187,6 +2725,136 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("workflow step parameters must be a JSON object"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_definition_list_returns_empty_on_fresh_database() {
+        let pool = setup_test_pool().await;
+
+        let listed = list_pipeline_definitions(&pool)
+            .await
+            .expect("list pipeline definitions");
+
+        assert!(listed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pipeline_definition_run_list_returns_empty_on_fresh_database() {
+        let pool = setup_test_pool().await;
+
+        let listed = list_pipeline_runs(&pool)
+            .await
+            .expect("list pipeline runs");
+
+        assert!(listed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pipeline_definition_create_list_detail_persists_variables_nodes_and_schedules() {
+        let pool = setup_test_pool().await;
+
+        let created = create_pipeline_definition(
+            &pool,
+            "release-pipeline".to_string(),
+            "release pipeline".to_string(),
+            true,
+            3,
+            vec![
+                PipelineVariableInput {
+                    key: "source_branch".to_string(),
+                    label: "Source Branch".to_string(),
+                    default_value: Some("release".to_string()),
+                    value_type: "string".to_string(),
+                    required: true,
+                    options: serde_json::json!([]),
+                },
+                PipelineVariableInput {
+                    key: "target_branch".to_string(),
+                    label: "Target Branch".to_string(),
+                    default_value: Some("main".to_string()),
+                    value_type: "string".to_string(),
+                    required: true,
+                    options: serde_json::json!([]),
+                },
+            ],
+            vec![
+                PipelineNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service",
+                        "ref": "${source_branch}"
+                    }),
+                },
+                PipelineNodeInput {
+                    node_type: "trigger_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service",
+                        "ref": "${target_branch}"
+                    }),
+                },
+            ],
+            vec![
+                PipelineScheduleInput {
+                    cron_expr: "0 9 * * 1-5".to_string(),
+                    timezone: "Asia/Shanghai".to_string(),
+                    branch: Some("main".to_string()),
+                    enabled: true,
+                    policy: "skip_if_running".to_string(),
+                    variables: serde_json::json!({
+                        "target_branch": "main"
+                    }),
+                },
+                PipelineScheduleInput {
+                    cron_expr: "30 18 * * 5".to_string(),
+                    timezone: "UTC".to_string(),
+                    branch: Some("release".to_string()),
+                    enabled: false,
+                    policy: "allow_parallel".to_string(),
+                    variables: serde_json::json!({
+                        "source_branch": "release"
+                    }),
+                },
+            ],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let listed = list_pipeline_definitions(&pool)
+            .await
+            .expect("list pipeline definitions");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+        assert_eq!(listed[0].variables_count, 2);
+        assert_eq!(listed[0].nodes_count, 2);
+        assert_eq!(listed[0].schedules_count, 2);
+
+        let detail = get_pipeline_definition_detail(&pool, created.id)
+            .await
+            .expect("get pipeline definition detail");
+        assert_eq!(detail.id, created.id);
+        assert_eq!(detail.variables.len(), 2);
+        assert_eq!(detail.variables[0].key, "source_branch");
+        assert_eq!(detail.variables[1].key, "target_branch");
+        assert_eq!(detail.nodes.len(), 2);
+        assert_eq!(detail.nodes[0].node_type, "check_pipeline");
+        assert_eq!(detail.nodes[1].node_type, "trigger_pipeline");
+        assert_eq!(
+            detail.nodes[0].parameters,
+            serde_json::json!({
+                "project": "team/service",
+                "ref": "${source_branch}"
+            })
+        );
+        assert_eq!(detail.schedules.len(), 2);
+        assert_eq!(detail.schedules[0].cron_expr, "0 9 * * 1-5");
+        assert_eq!(detail.schedules[0].timezone, "Asia/Shanghai");
+        assert_eq!(detail.schedules[1].policy, "allow_parallel");
+        assert_eq!(
+            detail.schedules[1].variables,
+            serde_json::json!({
+                "source_branch": "release"
+            })
+        );
     }
 
     #[tokio::test]
