@@ -213,7 +213,7 @@ fn read_optional_string_param(parameters: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn build_step_operation(
+fn build_execution_step_operation(
     step: &ProjectExecutionStep,
     project: &ManagedProject,
 ) -> Result<StepOperation> {
@@ -239,7 +239,7 @@ fn build_step_operation(
     }
 }
 
-async fn run_git(repo_path: String, args: Vec<String>) -> Result<CommandResult> {
+async fn execute_git_command(repo_path: String, args: Vec<String>) -> Result<CommandResult> {
     tokio::task::spawn_blocking(move || {
         let mut child = std::process::Command::new("git")
             .args(args)
@@ -264,7 +264,10 @@ async fn run_git(repo_path: String, args: Vec<String>) -> Result<CommandResult> 
             }
 
             if Instant::now() >= deadline {
-                if let Some(status) = child.try_wait().context("poll git command status at timeout boundary")? {
+                if let Some(status) = child
+                    .try_wait()
+                    .context("poll git command status at timeout boundary")?
+                {
                     let output = child
                         .wait_with_output()
                         .context("collect git command output at timeout boundary")?;
@@ -309,7 +312,7 @@ async fn run_git(repo_path: String, args: Vec<String>) -> Result<CommandResult> 
 }
 
 async fn ensure_clean_worktree(repo_path: &str) -> Result<()> {
-    let status_result = run_git(
+    let status_result = execute_git_command(
         repo_path.to_string(),
         vec!["status".to_string(), "--porcelain".to_string()],
     )
@@ -327,7 +330,7 @@ async fn ensure_clean_worktree(repo_path: &str) -> Result<()> {
 }
 
 async fn ensure_remote_exists(repo_path: &str, remote: &str) -> Result<()> {
-    let result = run_git(
+    let result = execute_git_command(
         repo_path.to_string(),
         vec![
             "remote".to_string(),
@@ -348,7 +351,7 @@ async fn ensure_remote_exists(repo_path: &str, remote: &str) -> Result<()> {
 }
 
 async fn ensure_branch_exists(repo_path: &str, branch: &str, remote: &str) -> Result<()> {
-    let local = run_git(
+    let local = execute_git_command(
         repo_path.to_string(),
         vec![
             "rev-parse".to_string(),
@@ -362,7 +365,7 @@ async fn ensure_branch_exists(repo_path: &str, branch: &str, remote: &str) -> Re
     }
 
     let remote_ref = format!("{remote}/{branch}");
-    let remote_result = run_git(
+    let remote_result = execute_git_command(
         repo_path.to_string(),
         vec![
             "rev-parse".to_string(),
@@ -382,7 +385,7 @@ async fn ensure_branch_exists(repo_path: &str, branch: &str, remote: &str) -> Re
     ))
 }
 
-async fn run_repo_precheck(project: &ManagedProject) -> Result<()> {
+async fn run_repository_precheck(project: &ManagedProject) -> Result<()> {
     let repo_path = Path::new(&project.repo_path);
     if !repo_path.exists() {
         return Err(anyhow!(
@@ -397,7 +400,7 @@ async fn run_repo_precheck(project: &ManagedProject) -> Result<()> {
         ));
     }
 
-    let inside_repo = run_git(
+    let inside_repo = execute_git_command(
         project.repo_path.clone(),
         vec!["rev-parse".to_string(), "--is-inside-work-tree".to_string()],
     )
@@ -410,7 +413,10 @@ async fn run_repo_precheck(project: &ManagedProject) -> Result<()> {
     Ok(())
 }
 
-async fn run_step_prechecks(project: &ManagedProject, operation: &StepOperation) -> Result<()> {
+async fn run_execution_step_prechecks(
+    project: &ManagedProject,
+    operation: &StepOperation,
+) -> Result<()> {
     match operation {
         StepOperation::CheckoutBranch { branch } => {
             ensure_clean_worktree(&project.repo_path).await?;
@@ -960,7 +966,7 @@ async fn execute_project_plan(
 
     mark_project_running(pool, plan.run_project_id).await?;
 
-    if let Err(error) = run_repo_precheck(&plan.project).await {
+    if let Err(error) = run_repository_precheck(&plan.project).await {
         if maybe_cancel_project(
             pool,
             workflow_run_id,
@@ -1032,7 +1038,7 @@ async fn execute_project_plan(
             return Ok(ProjectOutcome::Cancelled);
         }
 
-        let operation = match build_step_operation(step, &plan.project) {
+        let operation = match build_execution_step_operation(step, &plan.project) {
             Ok(operation) => operation,
             Err(error) => {
                 let summary = format!("invalid step parameters: {error}");
@@ -1051,7 +1057,7 @@ async fn execute_project_plan(
             }
         };
 
-        if let Err(error) = run_step_prechecks(&plan.project, &operation).await {
+        if let Err(error) = run_execution_step_prechecks(&plan.project, &operation).await {
             if maybe_cancel_project(
                 pool,
                 workflow_run_id,
@@ -1089,7 +1095,8 @@ async fn execute_project_plan(
             return Ok(ProjectOutcome::Cancelled);
         }
 
-        let command_result = run_git(plan.project.repo_path.clone(), operation.to_args()).await?;
+        let command_result =
+            execute_git_command(plan.project.repo_path.clone(), operation.to_args()).await?;
 
         if command_result.success {
             mark_step_finished(
@@ -1144,7 +1151,7 @@ async fn execute_project_plan(
     Ok(ProjectOutcome::Success)
 }
 
-fn render_steps_for_run(
+fn render_execution_steps(
     step_defs: &[WorkflowExecutionStepDef],
     run_parameters: &Value,
 ) -> Result<Vec<RenderedStepDefinition>> {
@@ -1170,13 +1177,8 @@ async fn mark_unscheduled_plans_cancelled(
 ) -> Result<usize> {
     let mut marked = 0usize;
     for plan in plans.iter().skip(from_index) {
-        mark_remaining_steps_cancelled(
-            pool,
-            &plan.steps,
-            0,
-            "cancelled before project scheduling",
-        )
-        .await?;
+        mark_remaining_steps_cancelled(pool, &plan.steps, 0, "cancelled before project scheduling")
+            .await?;
         mark_project_finished(
             pool,
             plan.run_project_id,
@@ -1228,12 +1230,8 @@ async fn run_workflow_in_background(
             match is_workflow_run_cancelling(&pool, workflow_run_id).await {
                 Ok(true) => {
                     cancellation_observed = true;
-                    if stop_scheduling_and_cancel_unscheduled(
-                        &pool,
-                        &plans,
-                        &mut next_plan_index,
-                    )
-                    .await?
+                    if stop_scheduling_and_cancel_unscheduled(&pool, &plans, &mut next_plan_index)
+                        .await?
                     {
                         has_cancelled = true;
                     }
@@ -1247,12 +1245,8 @@ async fn run_workflow_in_background(
                     );
                     cancellation_observed = true;
                     has_failures = true;
-                    if stop_scheduling_and_cancel_unscheduled(
-                        &pool,
-                        &plans,
-                        &mut next_plan_index,
-                    )
-                    .await?
+                    if stop_scheduling_and_cancel_unscheduled(&pool, &plans, &mut next_plan_index)
+                        .await?
                     {
                         has_cancelled = true;
                     }
@@ -1307,7 +1301,10 @@ async fn run_workflow_in_background(
     Ok(())
 }
 
-async fn load_retry_source_run(pool: &SqlitePool, source_workflow_run_id: i64) -> Result<RetrySourceRun> {
+async fn load_retry_source_run(
+    pool: &SqlitePool,
+    source_workflow_run_id: i64,
+) -> Result<RetrySourceRun> {
     let (workflow_definition_id, project_group_id, status, run_parameters_json) =
         sqlx::query_as::<_, (i64, i64, String, String)>(
             r#"SELECT workflow_definition_id, project_group_id, status, run_parameters_json
@@ -1325,8 +1322,8 @@ async fn load_retry_source_run(pool: &SqlitePool, source_workflow_run_id: i64) -
         ));
     }
 
-    let parsed_run_parameters =
-        serde_json::from_str::<Value>(&run_parameters_json).context("parse source run parameters")?;
+    let parsed_run_parameters = serde_json::from_str::<Value>(&run_parameters_json)
+        .context("parse source run parameters")?;
     let run_parameters = normalize_run_parameters(parsed_run_parameters)?;
 
     Ok(RetrySourceRun {
@@ -1391,7 +1388,7 @@ async fn start_workflow_run_with_projects(
         return Err(anyhow!("workflow max concurrency must be >= 1"));
     }
 
-    let rendered_steps = render_steps_for_run(&workflow.steps, &run_parameters)?;
+    let rendered_steps = render_execution_steps(&workflow.steps, &run_parameters)?;
     let (workflow_run_id, plans) = seed_workflow_run_and_children(
         pool,
         workflow.id,
@@ -1469,10 +1466,11 @@ pub async fn cancel_workflow_run(pool: &SqlitePool, workflow_run_id: i64) -> Res
         return Ok(());
     }
 
-    let status = sqlx::query_scalar::<_, String>(r#"SELECT status FROM workflow_runs WHERE id = ?1"#)
-        .bind(workflow_run_id)
-        .fetch_optional(pool)
-        .await?;
+    let status =
+        sqlx::query_scalar::<_, String>(r#"SELECT status FROM workflow_runs WHERE id = ?1"#)
+            .bind(workflow_run_id)
+            .fetch_optional(pool)
+            .await?;
 
     match status.as_deref() {
         Some("cancelling") | Some("cancelled") => Ok(()),
@@ -1589,13 +1587,16 @@ pub async fn retry_failed_workflow_run(
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_workflow_run, derive_run_final_status, derive_run_final_status_from_project_counts,
-        execute_workflow_run, execute_project_plan, mark_project_internal_failure,
-        reconcile_stale_workflow_runs, retry_failed_workflow_run, ProjectExecutionPlan,
-        ProjectExecutionStep, ProjectOutcome,
+        build_execution_step_operation, cancel_workflow_run, derive_run_final_status,
+        derive_run_final_status_from_project_counts, execute_project_plan, execute_workflow_run,
+        mark_project_internal_failure, normalize_run_parameters, now_rfc3339,
+        reconcile_stale_workflow_runs, render_execution_steps, retry_failed_workflow_run,
+        run_execution_step_prechecks, run_repository_precheck, ProjectExecutionPlan,
+        ProjectExecutionStep, ProjectOutcome, StepOperation,
     };
-    use crate::db;
-    use crate::models::WorkflowStepInput;
+    use crate::db::{self, WorkflowExecutionStepDef};
+    use crate::models::{ManagedProject, WorkflowStepInput};
+    use serde_json::{Map, Value};
     use sqlx::{migrate::Migrator, sqlite::SqlitePoolOptions, SqlitePool};
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1972,7 +1973,9 @@ mod tests {
         let outcome = execute_project_plan(&pool, run_id, &plan)
             .await
             .expect("execute project plan");
-        cancellation_updater.await.expect("wait cancellation updater");
+        cancellation_updater
+            .await
+            .expect("wait cancellation updater");
         assert_eq!(outcome, ProjectOutcome::Cancelled);
 
         let detail = db::get_workflow_run_detail(&pool, run_id)
@@ -2221,9 +2224,10 @@ mod tests {
         .await
         .expect("create workflow definition");
 
-        let run_id = execute_workflow_run(&pool, workflow.id, group.id, serde_json::json!({}), Some(1))
-            .await
-            .expect("execute workflow run");
+        let run_id =
+            execute_workflow_run(&pool, workflow.id, group.id, serde_json::json!({}), Some(1))
+                .await
+                .expect("execute workflow run");
 
         cancel_workflow_run(&pool, run_id)
             .await
@@ -2231,7 +2235,10 @@ mod tests {
 
         let detail = wait_for_terminal_run_status(&pool, run_id, 30_000).await;
         assert_eq!(detail.status, "cancelled");
-        assert!(detail.projects.iter().any(|project| project.status == "cancelled"));
+        assert!(detail
+            .projects
+            .iter()
+            .any(|project| project.status == "cancelled"));
         assert!(detail
             .projects
             .iter()
@@ -2249,11 +2256,14 @@ mod tests {
         assert!(unscheduled_cancelled
             .iter()
             .all(|project| project.steps.iter().all(|step| step.status == "cancelled")));
-        assert!(detail.projects.iter().all(|project| project.steps.iter().all(|step| {
-            !step
-                .summary_message
-                .contains("step cancelled while command was running")
-        })));
+        assert!(detail
+            .projects
+            .iter()
+            .all(|project| project.steps.iter().all(|step| {
+                !step
+                    .summary_message
+                    .contains("step cancelled while command was running")
+            })));
     }
 
     #[tokio::test]
@@ -2340,8 +2350,8 @@ mod tests {
             Some(vec![dirty_project.id, clean_project.id]),
             Some(1),
         )
-            .await
-            .expect("retry failed workflow run");
+        .await
+        .expect("retry failed workflow run");
 
         let retry_seeded = db::get_workflow_run_detail(&pool, retry_run_id)
             .await
@@ -2532,13 +2542,9 @@ mod tests {
         let source_detail = wait_for_terminal_run_status(&pool, source_run_id, 15_000).await;
         assert_eq!(source_detail.status, "partial_failed");
 
-        let retry_result = retry_failed_workflow_run(
-            &pool,
-            source_run_id,
-            Some(vec![clean_project.id]),
-            Some(1),
-        )
-        .await;
+        let retry_result =
+            retry_failed_workflow_run(&pool, source_run_id, Some(vec![clean_project.id]), Some(1))
+                .await;
         assert!(retry_result.is_err());
         assert!(retry_result
             .expect_err("retry should fail when no selected IDs are eligible")
@@ -2618,19 +2624,159 @@ mod tests {
         .await
         .expect("disable dirty project");
 
-        let retry_result = retry_failed_workflow_run(
-            &pool,
-            source_run_id,
-            Some(vec![dirty_project.id]),
-            Some(1),
-        )
-        .await;
+        let retry_result =
+            retry_failed_workflow_run(&pool, source_run_id, Some(vec![dirty_project.id]), Some(1))
+                .await;
 
         assert!(retry_result.is_err());
         assert!(retry_result
             .expect_err("retry should fail when failed project is disabled")
             .to_string()
             .contains("failed managed projects are currently disabled and cannot be retried"));
+    }
+
+    #[test]
+    fn pipeline_runtime_refactor_normalize_run_parameters_accepts_null_and_object() {
+        let normalized_null =
+            normalize_run_parameters(Value::Null).expect("normalize null run parameters");
+        assert_eq!(normalized_null, Value::Object(Map::new()));
+
+        let original = serde_json::json!({
+            "branch": "release",
+            "count": 2,
+            "dryRun": true
+        });
+        let normalized_object =
+            normalize_run_parameters(original.clone()).expect("normalize object run parameters");
+        assert_eq!(normalized_object, original);
+
+        assert!(normalize_run_parameters(Value::Array(vec![])).is_err());
+    }
+
+    #[test]
+    fn pipeline_runtime_refactor_render_execution_steps_renders_nested_templates() {
+        let step_defs = vec![WorkflowExecutionStepDef {
+            id: 41,
+            step_order: 0,
+            step_type: "git_pull".to_string(),
+            parameters: serde_json::json!({
+                "remote": "${remote}",
+                "branch": "${branch}",
+                "labels": ["${branch}", "${count}", "${dryRun}"],
+                "nested": {
+                    "target": "${remote}/${branch}"
+                }
+            }),
+        }];
+
+        let rendered = render_execution_steps(
+            &step_defs,
+            &serde_json::json!({
+                "remote": "upstream",
+                "branch": "release",
+                "count": 3,
+                "dryRun": false
+            }),
+        )
+        .expect("render execution steps");
+
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(
+            rendered[0].rendered_parameters,
+            serde_json::json!({
+                "remote": "upstream",
+                "branch": "release",
+                "labels": ["release", "3", "false"],
+                "nested": {
+                    "target": "upstream/release"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn pipeline_runtime_refactor_build_execution_step_operation_uses_project_defaults() {
+        let project = ManagedProject {
+            id: 1,
+            gitlab_project_id: 88,
+            name: "project-a".to_string(),
+            path_with_namespace: "team/project-a".to_string(),
+            repo_path: "D:/repos/project-a".to_string(),
+            default_branch: "main".to_string(),
+            default_remote: "origin".to_string(),
+            enabled: true,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+        };
+        let step = ProjectExecutionStep {
+            run_step_id: 9,
+            step_type: "git_pull".to_string(),
+            rendered_parameters: serde_json::json!({}),
+        };
+
+        let operation = build_execution_step_operation(&step, &project)
+            .expect("build execution step operation");
+
+        assert_eq!(
+            operation.to_args(),
+            vec![
+                "pull".to_string(),
+                "origin".to_string(),
+                "main".to_string(),
+                "--ff-only".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_runtime_refactor_run_repository_precheck_rejects_dirty_worktree() {
+        let repo = setup_git_repo();
+        std::fs::write(repo.join("README.md"), "dirty\n").expect("mutate tracked file");
+        let project = ManagedProject {
+            id: 1,
+            gitlab_project_id: 99,
+            name: "project-a".to_string(),
+            path_with_namespace: "team/project-a".to_string(),
+            repo_path: repo.to_string_lossy().to_string(),
+            default_branch: "main".to_string(),
+            default_remote: "origin".to_string(),
+            enabled: true,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+        };
+
+        let error = run_repository_precheck(&project)
+            .await
+            .expect_err("dirty worktree should fail repo precheck");
+
+        assert!(error.to_string().contains("not clean"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_runtime_refactor_run_execution_step_prechecks_rejects_missing_checkout_branch(
+    ) {
+        let repo = setup_git_repo();
+        let project = ManagedProject {
+            id: 1,
+            gitlab_project_id: 99,
+            name: "project-a".to_string(),
+            path_with_namespace: "team/project-a".to_string(),
+            repo_path: repo.to_string_lossy().to_string(),
+            default_branch: "main".to_string(),
+            default_remote: "origin".to_string(),
+            enabled: true,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+        };
+        let operation = StepOperation::CheckoutBranch {
+            branch: "missing-branch".to_string(),
+        };
+
+        let error = run_execution_step_prechecks(&project, &operation)
+            .await
+            .expect_err("missing branch should fail step prechecks");
+
+        assert!(error.to_string().contains("missing-branch"));
     }
 
     #[test]
@@ -2800,5 +2946,4 @@ mod tests {
             .summary_message
             .contains("reconciled stale in-flight run after process restart"));
     }
-
 }
