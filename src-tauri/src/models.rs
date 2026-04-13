@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn bool_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -172,7 +176,7 @@ pub struct PipelineScheduleInput {
     pub timezone: String,
     #[serde(default)]
     pub branch: Option<String>,
-    #[serde(default)]
+    #[serde(default = "bool_true")]
     pub enabled: bool,
     pub policy: String,
     #[serde(default)]

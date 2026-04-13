@@ -2858,6 +2858,377 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_definition_run_list_returns_sorted_non_empty_items_with_aggregates() {
+        let pool = setup_test_pool().await;
+
+        let workflow = create_workflow_definition(
+            &pool,
+            "legacy-workflow".to_string(),
+            "legacy".to_string(),
+            true,
+            serde_json::json!({}),
+            1,
+            vec![WorkflowStepInput {
+                step_type: "git_pull".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+        )
+        .await
+        .expect("create legacy workflow definition");
+
+        let pipeline = create_pipeline_definition(
+            &pool,
+            "release-pipeline-runs".to_string(),
+            "release pipeline runs".to_string(),
+            true,
+            3,
+            vec![PipelineVariableInput {
+                key: "target_branch".to_string(),
+                label: "Target Branch".to_string(),
+                default_value: Some("main".to_string()),
+                value_type: "string".to_string(),
+                required: true,
+                options: serde_json::json!([]),
+            }],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!({ "ref": "${target_branch}" }),
+            }],
+            vec![PipelineScheduleInput {
+                cron_expr: "0 9 * * 1-5".to_string(),
+                timezone: "Asia/Shanghai".to_string(),
+                branch: Some("main".to_string()),
+                enabled: true,
+                policy: "skip_if_running".to_string(),
+                variables: serde_json::json!({}),
+            }],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let project_group = create_project_group(&pool, "pipeline-history-group".to_string())
+            .await
+            .expect("create project group");
+
+        let managed_project_a = create_managed_project(
+            &pool,
+            99101,
+            "project-a".to_string(),
+            "team/project-a".to_string(),
+            "D:/repos/project-a".to_string(),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("create managed project a");
+
+        let managed_project_b = create_managed_project(
+            &pool,
+            99102,
+            "project-b".to_string(),
+            "team/project-b".to_string(),
+            "D:/repos/project-b".to_string(),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("create managed project b");
+
+        let legacy_created_at = "2026-04-13T08:00:00Z";
+        let legacy_workflow_run_id = sqlx::query(
+            r#"INSERT INTO workflow_runs (
+             workflow_definition_id, project_group_id, source_workflow_run_id, trigger_kind,
+             status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        )
+        .bind(workflow.id)
+        .bind(project_group.id)
+        .bind("manual")
+        .bind("completed")
+        .bind(r#"{"legacy":"true"}"#)
+        .bind(1_i64)
+        .bind(legacy_created_at)
+        .bind(legacy_created_at)
+        .bind(legacy_created_at)
+        .bind(legacy_created_at)
+        .execute(&pool)
+        .await
+        .expect("insert legacy workflow run")
+        .last_insert_rowid();
+
+        let older_created_at = "2026-04-13T09:00:00Z";
+        let older_pipeline_run_id = sqlx::query(
+            r#"INSERT INTO pipeline_runs (
+             pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+             trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
+        )
+        .bind(pipeline.id)
+        .bind(project_group.id)
+        .bind(legacy_workflow_run_id)
+        .bind("manual")
+        .bind("partial_failed")
+        .bind(r#"{"target_branch":"main","release_window":"morning"}"#)
+        .bind(3_i64)
+        .bind(older_created_at)
+        .bind(older_created_at)
+        .bind(older_created_at)
+        .bind(older_created_at)
+        .execute(&pool)
+        .await
+        .expect("insert older pipeline run")
+        .last_insert_rowid();
+
+        for (managed_project_id, gitlab_project_id, project_name, path, repo_path, status) in [
+            (
+                Some(managed_project_a.id),
+                managed_project_a.gitlab_project_id,
+                managed_project_a.name.as_str(),
+                managed_project_a.path_with_namespace.as_str(),
+                managed_project_a.repo_path.as_str(),
+                "success",
+            ),
+            (
+                Some(managed_project_b.id),
+                managed_project_b.gitlab_project_id,
+                managed_project_b.name.as_str(),
+                managed_project_b.path_with_namespace.as_str(),
+                managed_project_b.repo_path.as_str(),
+                "failed",
+            ),
+            (
+                None,
+                99103_u64,
+                "project-c",
+                "team/project-c",
+                "D:/repos/project-c",
+                "queued",
+            ),
+            (
+                None,
+                99104_u64,
+                "project-d",
+                "team/project-d",
+                "D:/repos/project-d",
+                "failed_precheck",
+            ),
+        ] {
+            sqlx::query(
+                r#"INSERT INTO pipeline_run_projects (
+                 pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+                 repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+               ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', NULL, NULL, ?8, ?9)"#,
+            )
+            .bind(older_pipeline_run_id)
+            .bind(managed_project_id)
+            .bind(u64_to_i64_checked(gitlab_project_id, "gitlab_project_id").expect("convert gitlab project id"))
+            .bind(project_name)
+            .bind(path)
+            .bind(repo_path)
+            .bind(status)
+            .bind(older_created_at)
+            .bind(older_created_at)
+            .execute(&pool)
+            .await
+            .expect("insert pipeline run project");
+        }
+
+        let newer_created_at = "2026-04-13T10:00:00Z";
+        let newer_pipeline_run_id = sqlx::query(
+            r#"INSERT INTO pipeline_runs (
+             pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+             trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)"#,
+        )
+        .bind(pipeline.id)
+        .bind(project_group.id)
+        .bind("schedule")
+        .bind("running")
+        .bind(r#"{"target_branch":"release/1.2"}"#)
+        .bind(2_i64)
+        .bind(newer_created_at)
+        .bind(newer_created_at)
+        .bind(newer_created_at)
+        .execute(&pool)
+        .await
+        .expect("insert newer pipeline run")
+        .last_insert_rowid();
+
+        sqlx::query(
+            r#"INSERT INTO pipeline_run_projects (
+             pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+             repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, NULL, ?9, ?10)"#,
+        )
+        .bind(newer_pipeline_run_id)
+        .bind(managed_project_a.id)
+        .bind(u64_to_i64_checked(managed_project_a.gitlab_project_id, "gitlab_project_id").expect("convert gitlab project id"))
+        .bind(&managed_project_a.name)
+        .bind(&managed_project_a.path_with_namespace)
+        .bind(&managed_project_a.repo_path)
+        .bind("running")
+        .bind(newer_created_at)
+        .bind(newer_created_at)
+        .bind(newer_created_at)
+        .execute(&pool)
+        .await
+        .expect("insert newer pipeline run project");
+
+        let listed = list_pipeline_runs(&pool)
+            .await
+            .expect("list pipeline runs");
+
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, newer_pipeline_run_id);
+        assert_eq!(listed[0].trigger_kind, "schedule");
+        assert_eq!(listed[0].projects_total, 1);
+        assert_eq!(listed[0].projects_running, 1);
+        assert_eq!(
+            listed[0].run_parameters,
+            serde_json::json!({"target_branch":"release/1.2"})
+        );
+
+        assert_eq!(listed[1].id, older_pipeline_run_id);
+        assert_eq!(listed[1].legacy_workflow_run_id, Some(legacy_workflow_run_id));
+        assert_eq!(listed[1].projects_total, 4);
+        assert_eq!(listed[1].projects_queued, 1);
+        assert_eq!(listed[1].projects_success, 1);
+        assert_eq!(listed[1].projects_failed, 1);
+        assert_eq!(listed[1].projects_failed_precheck, 1);
+        assert_eq!(
+            listed[1].run_parameters,
+            serde_json::json!({
+                "target_branch":"main",
+                "release_window":"morning"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_definition_rejects_duplicate_variable_keys() {
+        let pool = setup_test_pool().await;
+
+        let result = create_pipeline_definition(
+            &pool,
+            "duplicate-variable-keys".to_string(),
+            "invalid".to_string(),
+            true,
+            2,
+            vec![
+                PipelineVariableInput {
+                    key: "target_branch".to_string(),
+                    label: "Target Branch".to_string(),
+                    default_value: Some("main".to_string()),
+                    value_type: "string".to_string(),
+                    required: true,
+                    options: serde_json::json!([]),
+                },
+                PipelineVariableInput {
+                    key: " target_branch ".to_string(),
+                    label: "Target Branch Duplicate".to_string(),
+                    default_value: Some("release".to_string()),
+                    value_type: "string".to_string(),
+                    required: false,
+                    options: serde_json::json!([]),
+                },
+            ],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            vec![],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate pipeline variable key: target_branch"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_definition_rejects_non_array_variable_options() {
+        let pool = setup_test_pool().await;
+
+        let result = create_pipeline_definition(
+            &pool,
+            "invalid-variable-options".to_string(),
+            "invalid".to_string(),
+            true,
+            2,
+            vec![PipelineVariableInput {
+                key: "target_branch".to_string(),
+                label: "Target Branch".to_string(),
+                default_value: Some("main".to_string()),
+                value_type: "string".to_string(),
+                required: true,
+                options: serde_json::json!({"not":"array"}),
+            }],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            vec![],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pipeline variable options must be a JSON array"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_definition_rejects_non_object_schedule_variables() {
+        let pool = setup_test_pool().await;
+
+        let result = create_pipeline_definition(
+            &pool,
+            "invalid-schedule-variables".to_string(),
+            "invalid".to_string(),
+            true,
+            2,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            vec![PipelineScheduleInput {
+                cron_expr: "0 9 * * *".to_string(),
+                timezone: "Asia/Shanghai".to_string(),
+                branch: Some("main".to_string()),
+                enabled: true,
+                policy: "skip_if_running".to_string(),
+                variables: serde_json::json!(["not-object"]),
+            }],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pipeline schedule variables must be a JSON object"));
+    }
+
+    #[test]
+    fn pipeline_definition_schedule_input_defaults_enabled_to_true() {
+        let schedule: PipelineScheduleInput = serde_json::from_value(serde_json::json!({
+            "cronExpr": "0 9 * * *",
+            "timezone": "Asia/Shanghai",
+            "policy": "skip_if_running",
+            "variables": {}
+        }))
+        .expect("deserialize pipeline schedule input");
+
+        assert!(schedule.enabled);
+    }
+
+    #[tokio::test]
     async fn workflow_run_history_queries_return_nested_project_and_step_state() {
         let pool = setup_test_pool().await;
 
