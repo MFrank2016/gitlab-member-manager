@@ -410,6 +410,22 @@ pub struct WorkflowExecutionDefinition {
     pub steps: Vec<WorkflowExecutionStepDef>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PipelineExecutionNodeDef {
+    pub id: i64,
+    pub node_order: i64,
+    pub node_type: String,
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct PipelineExecutionDefinition {
+    pub id: i64,
+    pub max_concurrency_default: i64,
+    pub variables: Vec<PipelineVariable>,
+    pub nodes: Vec<PipelineExecutionNodeDef>,
+}
+
 async fn insert_workflow_steps(
     tx: &mut Transaction<'_, Sqlite>,
     workflow_definition_id: i64,
@@ -518,6 +534,89 @@ pub async fn load_workflow_definition_for_execution(
         id,
         max_concurrency_default,
         steps,
+    })
+}
+
+pub async fn load_pipeline_definition_for_execution(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+) -> Result<PipelineExecutionDefinition> {
+    let (id, enabled, max_concurrency_default) = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"SELECT
+         id, enabled, max_concurrency_default
+       FROM pipeline_definitions
+       WHERE id = ?1"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow!("pipeline definition not found: {pipeline_definition_id}"))?;
+
+    if enabled == 0 {
+        return Err(anyhow!(
+            "pipeline definition is disabled: {pipeline_definition_id}"
+        ));
+    }
+
+    let variable_rows =
+        sqlx::query_as::<_, (i64, String, String, Option<String>, String, i64, String)>(
+            r#"SELECT
+             variable_order, key, label, default_value, value_type, required, options_json
+           FROM pipeline_variables
+           WHERE pipeline_definition_id = ?1
+           ORDER BY variable_order ASC, id ASC"#,
+        )
+        .bind(pipeline_definition_id)
+        .fetch_all(pool)
+        .await?;
+    let mut variables = Vec::with_capacity(variable_rows.len());
+    for row in variable_rows {
+        variables.push(PipelineVariable {
+            variable_order: row.0,
+            key: row.1,
+            label: row.2,
+            default_value: row.3,
+            value_type: row.4,
+            required: row.5 != 0,
+            options: normalize_json_array(
+                deserialize_json(&row.6, "pipeline variable options")?,
+                "pipeline variable options",
+            )?,
+        });
+    }
+
+    let node_rows = sqlx::query_as::<_, (i64, i64, String, String)>(
+        r#"SELECT
+         id, node_order, node_type, parameters_json
+       FROM pipeline_nodes
+       WHERE pipeline_definition_id = ?1
+       ORDER BY node_order ASC, id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+
+    if node_rows.is_empty() {
+        return Err(anyhow!(
+            "pipeline definition has no nodes: {pipeline_definition_id}"
+        ));
+    }
+
+    let mut nodes = Vec::with_capacity(node_rows.len());
+    for row in node_rows {
+        nodes.push(PipelineExecutionNodeDef {
+            id: row.0,
+            node_order: row.1,
+            node_type: row.2,
+            parameters: deserialize_json_object(&row.3, "pipeline node parameters")?,
+        });
+    }
+
+    Ok(PipelineExecutionDefinition {
+        id,
+        max_concurrency_default,
+        variables,
+        nodes,
     })
 }
 

@@ -1,5 +1,5 @@
-use crate::db::{self, WorkflowExecutionStepDef};
-use crate::models::ManagedProject;
+use crate::db::{self, PipelineExecutionNodeDef, WorkflowExecutionStepDef};
+use crate::models::{ManagedProject, PipelineVariable};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use serde_json::{Map, Value};
@@ -38,6 +38,28 @@ struct ProjectExecutionPlan {
     steps: Vec<ProjectExecutionStep>,
 }
 
+#[derive(Debug, Clone)]
+struct RenderedPipelineNodeDefinition {
+    pipeline_node_id: i64,
+    node_order: i64,
+    node_type: String,
+    rendered_parameters: Value,
+}
+
+#[derive(Debug, Clone)]
+struct PipelineProjectExecutionNode {
+    run_node_id: i64,
+    node_type: String,
+    rendered_parameters: Value,
+}
+
+#[derive(Debug, Clone)]
+struct PipelineProjectExecutionPlan {
+    run_project_id: i64,
+    project: ManagedProject,
+    nodes: Vec<PipelineProjectExecutionNode>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectOutcome {
     Success,
@@ -51,6 +73,22 @@ struct RetrySourceRun {
     workflow_definition_id: i64,
     project_group_id: i64,
     run_parameters: Value,
+}
+
+#[derive(Debug)]
+struct PipelineRetrySourceRun {
+    pipeline_definition_id: i64,
+    project_group_id: i64,
+    run_parameters: Value,
+}
+
+#[derive(Debug, Clone)]
+struct FailureEnvelope {
+    error_code: String,
+    title_zh: String,
+    detail_zh: String,
+    suggestion_zh: String,
+    evidence: String,
 }
 
 #[derive(Debug)]
@@ -1170,6 +1208,158 @@ fn render_execution_steps(
     Ok(rendered_steps)
 }
 
+fn normalize_pipeline_run_parameters(
+    variables: &[PipelineVariable],
+    run_parameters: Value,
+) -> Result<Value> {
+    let mut normalized = normalize_run_parameters(run_parameters)?;
+    let variable_map = normalized
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("run_parameters must be a JSON object"))?;
+
+    for variable in variables {
+        let missing = match variable_map.get(&variable.key) {
+            None => true,
+            Some(Value::Null) => true,
+            _ => false,
+        };
+        if !missing {
+            continue;
+        }
+
+        if let Some(default_value) = &variable.default_value {
+            variable_map.insert(variable.key.clone(), Value::String(default_value.clone()));
+            continue;
+        }
+
+        if variable.required {
+            return Err(anyhow!(
+                "missing required pipeline variable: {}",
+                variable.key
+            ));
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn render_pipeline_nodes_for_run(
+    node_defs: &[PipelineExecutionNodeDef],
+    run_parameters: &Value,
+) -> Result<Vec<RenderedPipelineNodeDefinition>> {
+    let variable_map = run_parameters
+        .as_object()
+        .ok_or_else(|| anyhow!("run_parameters must be a JSON object"))?;
+    let mut rendered_nodes = Vec::with_capacity(node_defs.len());
+    for node in node_defs {
+        rendered_nodes.push(RenderedPipelineNodeDefinition {
+            pipeline_node_id: node.id,
+            node_order: node.node_order,
+            node_type: node.node_type.clone(),
+            rendered_parameters: render_value(&node.parameters, variable_map)?,
+        });
+    }
+    Ok(rendered_nodes)
+}
+
+fn build_failure_envelope(
+    error_code: &str,
+    title_zh: &str,
+    detail_zh: String,
+    suggestion_zh: &str,
+    evidence: String,
+) -> FailureEnvelope {
+    FailureEnvelope {
+        error_code: error_code.to_string(),
+        title_zh: title_zh.to_string(),
+        detail_zh,
+        suggestion_zh: suggestion_zh.to_string(),
+        evidence,
+    }
+}
+
+fn classify_precheck_failure(error: &str) -> FailureEnvelope {
+    if error.contains("repository worktree is not clean") {
+        return build_failure_envelope(
+            "git.worktree_dirty",
+            "仓库工作区不干净",
+            "仓库存在未提交变更，无法安全执行节点。".to_string(),
+            "请先提交、暂存或清理工作区后重试。",
+            error.to_string(),
+        );
+    }
+    if error.contains("repository path does not exist") {
+        return build_failure_envelope(
+            "git.repo_path_missing",
+            "仓库目录不存在",
+            "仓库目录不存在，无法执行当前节点。".to_string(),
+            "请检查项目仓库路径配置后重试。",
+            error.to_string(),
+        );
+    }
+    if error.contains("path is not a git worktree") {
+        return build_failure_envelope(
+            "git.not_worktree",
+            "仓库目录不是 Git 工作区",
+            "当前目录不是有效的 Git 工作区，无法执行当前节点。".to_string(),
+            "请检查仓库路径并确认已正确初始化 Git 仓库后重试。",
+            error.to_string(),
+        );
+    }
+    if error.contains("branch '") && error.contains("not found") {
+        return build_failure_envelope(
+            "git.branch_missing",
+            "目标分支不存在",
+            "节点依赖的目标分支不存在，无法继续执行。".to_string(),
+            "请确认分支名称和远端配置正确后重试。",
+            error.to_string(),
+        );
+    }
+    if error.contains("git remote '") {
+        return build_failure_envelope(
+            "git.remote_missing",
+            "Git 远端不存在",
+            "节点依赖的 Git 远端不存在，无法继续执行。".to_string(),
+            "请检查项目默认远端配置后重试。",
+            error.to_string(),
+        );
+    }
+
+    build_failure_envelope(
+        "pipeline.node_precheck_failed",
+        "节点预检查失败",
+        format!("节点执行前检查失败：{error}"),
+        "请根据技术证据修复问题后重试。",
+        error.to_string(),
+    )
+}
+
+fn classify_invalid_execution_parameters(error: &str) -> FailureEnvelope {
+    build_failure_envelope(
+        "pipeline.invalid_node_parameters",
+        "节点参数无效",
+        format!("节点参数无效：{error}"),
+        "请检查节点配置和变量模板后重试。",
+        error.to_string(),
+    )
+}
+
+fn classify_git_command_failure(node_type: &str, command_result: &CommandResult) -> FailureEnvelope {
+    let stdout = command_result.stdout.trim();
+    let stderr = command_result.stderr.trim();
+    let evidence = format!(
+        "node_type={node_type}; exit_code={:?}; stdout={}; stderr={}",
+        command_result.exit_code, stdout, stderr
+    );
+    build_failure_envelope(
+        "git.command_failed",
+        "Git 命令执行失败",
+        format!("节点 {node_type} 执行失败，请检查 Git 输出。"),
+        "请根据错误输出修复仓库状态或远端问题后重试。",
+        evidence,
+    )
+}
+
 async fn mark_unscheduled_plans_cancelled(
     pool: &SqlitePool,
     plans: &[ProjectExecutionPlan],
@@ -1584,18 +1774,1091 @@ pub async fn retry_failed_workflow_run(
     .await
 }
 
+async fn insert_pipeline_run_row(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_definition_id: i64,
+    project_group_id: i64,
+    source_pipeline_run_id: Option<i64>,
+    trigger_kind: &str,
+    run_parameters: &Value,
+    max_concurrency: i64,
+) -> Result<i64> {
+    let now = now_rfc3339();
+    let run_parameters_json =
+        serde_json::to_string(run_parameters).context("serialize pipeline run parameters")?;
+    let result = sqlx::query(
+        r#"INSERT INTO pipeline_runs (
+         pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+         trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+       ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10)"#,
+    )
+    .bind(pipeline_definition_id)
+    .bind(project_group_id)
+    .bind(source_pipeline_run_id)
+    .bind(trigger_kind)
+    .bind("running")
+    .bind(run_parameters_json)
+    .bind(max_concurrency)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
+async fn insert_pipeline_run_project_row(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_run_id: i64,
+    project: &ManagedProject,
+) -> Result<i64> {
+    let now = now_rfc3339();
+    let gitlab_project_id = i64::try_from(project.gitlab_project_id).map_err(|_| {
+        anyhow!(
+            "gitlab_project_id out of range: {}",
+            project.gitlab_project_id
+        )
+    })?;
+    let result = sqlx::query(
+        r#"INSERT INTO pipeline_run_projects (
+         pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path,
+         status, summary_message, started_at, finished_at, created_at, updated_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', NULL, NULL, ?8, ?9)"#,
+    )
+    .bind(pipeline_run_id)
+    .bind(project.id)
+    .bind(gitlab_project_id)
+    .bind(&project.name)
+    .bind(&project.path_with_namespace)
+    .bind(&project.repo_path)
+    .bind("queued")
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
+async fn insert_pipeline_run_node_row(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_run_project_id: i64,
+    rendered_node: &RenderedPipelineNodeDefinition,
+) -> Result<i64> {
+    let now = now_rfc3339();
+    let rendered_parameters_json = serde_json::to_string(&rendered_node.rendered_parameters)
+        .context("serialize rendered node parameters")?;
+    let result = sqlx::query(
+        r#"INSERT INTO pipeline_run_nodes (
+         pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
+         status, started_at, finished_at, stdout, stderr, exit_code, summary_message,
+         error_code, title_zh, detail_zh, suggestion_zh, evidence, created_at, updated_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, '', '', NULL, '', NULL, NULL, NULL, NULL, NULL, ?7, ?8)"#,
+    )
+    .bind(pipeline_run_project_id)
+    .bind(rendered_node.pipeline_node_id)
+    .bind(rendered_node.node_order)
+    .bind(&rendered_node.node_type)
+    .bind(rendered_parameters_json)
+    .bind("pending")
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
+async fn seed_pipeline_run_and_children(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+    project_group_id: i64,
+    source_pipeline_run_id: Option<i64>,
+    trigger_kind: &str,
+    run_parameters: &Value,
+    max_concurrency: i64,
+    projects: Vec<ManagedProject>,
+    rendered_nodes: &[RenderedPipelineNodeDefinition],
+) -> Result<(i64, Vec<PipelineProjectExecutionPlan>)> {
+    let mut tx = pool.begin().await?;
+    let pipeline_run_id = insert_pipeline_run_row(
+        &mut tx,
+        pipeline_definition_id,
+        project_group_id,
+        source_pipeline_run_id,
+        trigger_kind,
+        run_parameters,
+        max_concurrency,
+    )
+    .await?;
+
+    let mut plans = Vec::with_capacity(projects.len());
+    for project in projects {
+        let run_project_id =
+            insert_pipeline_run_project_row(&mut tx, pipeline_run_id, &project).await?;
+        let mut project_nodes = Vec::with_capacity(rendered_nodes.len());
+        for rendered_node in rendered_nodes {
+            let run_node_id =
+                insert_pipeline_run_node_row(&mut tx, run_project_id, rendered_node).await?;
+            project_nodes.push(PipelineProjectExecutionNode {
+                run_node_id,
+                node_type: rendered_node.node_type.clone(),
+                rendered_parameters: rendered_node.rendered_parameters.clone(),
+            });
+        }
+        plans.push(PipelineProjectExecutionPlan {
+            run_project_id,
+            project,
+            nodes: project_nodes,
+        });
+    }
+
+    tx.commit().await?;
+    Ok((pipeline_run_id, plans))
+}
+
+async fn mark_pipeline_run_finished(
+    pool: &SqlitePool,
+    pipeline_run_id: i64,
+    status: &str,
+) -> Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"UPDATE pipeline_runs
+       SET status = ?1,
+           finished_at = ?2,
+           updated_at = ?3
+       WHERE id = ?4"#,
+    )
+    .bind(status)
+    .bind(&now)
+    .bind(&now)
+    .bind(pipeline_run_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn load_pipeline_run_status(pool: &SqlitePool, pipeline_run_id: i64) -> Result<String> {
+    sqlx::query_scalar::<_, String>(r#"SELECT status FROM pipeline_runs WHERE id = ?1"#)
+        .bind(pipeline_run_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| anyhow!("pipeline run not found: {pipeline_run_id}"))
+}
+
+async fn is_pipeline_run_cancelling(pool: &SqlitePool, pipeline_run_id: i64) -> Result<bool> {
+    Ok(load_pipeline_run_status(pool, pipeline_run_id).await? == "cancelling")
+}
+
+async fn mark_pipeline_project_running(pool: &SqlitePool, run_project_id: i64) -> Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"UPDATE pipeline_run_projects
+       SET status = 'running',
+           started_at = ?1,
+           updated_at = ?2
+       WHERE id = ?3"#,
+    )
+    .bind(&now)
+    .bind(&now)
+    .bind(run_project_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn mark_pipeline_project_finished(
+    pool: &SqlitePool,
+    run_project_id: i64,
+    status: &str,
+    summary_message: &str,
+) -> Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"UPDATE pipeline_run_projects
+       SET status = ?1,
+           summary_message = ?2,
+           finished_at = ?3,
+           updated_at = ?4
+       WHERE id = ?5"#,
+    )
+    .bind(status)
+    .bind(summary_message)
+    .bind(&now)
+    .bind(&now)
+    .bind(run_project_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn mark_pipeline_node_running(pool: &SqlitePool, run_node_id: i64) -> Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"UPDATE pipeline_run_nodes
+       SET status = 'running',
+           started_at = ?1,
+           updated_at = ?2
+       WHERE id = ?3"#,
+    )
+    .bind(&now)
+    .bind(&now)
+    .bind(run_node_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn mark_pipeline_node_finished(
+    pool: &SqlitePool,
+    run_node_id: i64,
+    status: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i64>,
+    summary_message: &str,
+    envelope: Option<&FailureEnvelope>,
+) -> Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"UPDATE pipeline_run_nodes
+       SET status = ?1,
+           stdout = ?2,
+           stderr = ?3,
+           exit_code = ?4,
+           summary_message = ?5,
+           error_code = ?6,
+           title_zh = ?7,
+           detail_zh = ?8,
+           suggestion_zh = ?9,
+           evidence = ?10,
+           finished_at = ?11,
+           updated_at = ?12
+       WHERE id = ?13"#,
+    )
+    .bind(status)
+    .bind(stdout)
+    .bind(stderr)
+    .bind(exit_code)
+    .bind(summary_message)
+    .bind(envelope.map(|value| value.error_code.as_str()))
+    .bind(envelope.map(|value| value.title_zh.as_str()))
+    .bind(envelope.map(|value| value.detail_zh.as_str()))
+    .bind(envelope.map(|value| value.suggestion_zh.as_str()))
+    .bind(envelope.map(|value| value.evidence.as_str()))
+    .bind(&now)
+    .bind(&now)
+    .bind(run_node_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn load_pipeline_node_status(pool: &SqlitePool, run_node_id: i64) -> Result<String> {
+    sqlx::query_scalar::<_, String>(r#"SELECT status FROM pipeline_run_nodes WHERE id = ?1"#)
+        .bind(run_node_id)
+        .fetch_one(pool)
+        .await
+        .context("load pipeline node status")
+}
+
+async fn mark_remaining_pipeline_nodes_skipped(
+    pool: &SqlitePool,
+    nodes: &[PipelineProjectExecutionNode],
+    from_index: usize,
+    summary_message: &str,
+) -> Result<()> {
+    for node in nodes.iter().skip(from_index) {
+        let status = load_pipeline_node_status(pool, node.run_node_id).await?;
+        if status == "pending" {
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "skipped",
+                "",
+                "",
+                None,
+                summary_message,
+                None,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn mark_remaining_pipeline_nodes_cancelled(
+    pool: &SqlitePool,
+    nodes: &[PipelineProjectExecutionNode],
+    from_index: usize,
+    summary_message: &str,
+) -> Result<()> {
+    for node in nodes.iter().skip(from_index) {
+        let status = load_pipeline_node_status(pool, node.run_node_id).await?;
+        if status == "pending" || status == "running" {
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "cancelled",
+                "",
+                "",
+                None,
+                summary_message,
+                None,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn maybe_cancel_pipeline_project(
+    pool: &SqlitePool,
+    pipeline_run_id: i64,
+    plan: &PipelineProjectExecutionPlan,
+    from_node_index: usize,
+    summary_message: &str,
+) -> Result<bool> {
+    if !is_pipeline_run_cancelling(pool, pipeline_run_id).await? {
+        return Ok(false);
+    }
+
+    mark_remaining_pipeline_nodes_cancelled(pool, &plan.nodes, from_node_index, summary_message)
+        .await?;
+    mark_pipeline_project_finished(pool, plan.run_project_id, "cancelled", summary_message).await?;
+    Ok(true)
+}
+
+async fn mark_pipeline_project_internal_failure(
+    pool: &SqlitePool,
+    plan: &PipelineProjectExecutionPlan,
+    message: &str,
+) -> Result<()> {
+    let envelope = build_failure_envelope(
+        "pipeline.executor_internal_error",
+        "执行器内部错误",
+        format!("Pipeline 执行器内部错误：{message}"),
+        "请查看技术证据并修复后重试。",
+        message.to_string(),
+    );
+    let mut consumed_first_unfinished = false;
+    for node in &plan.nodes {
+        let status = load_pipeline_node_status(pool, node.run_node_id).await?;
+        if status == "success" || status == "failed" || status == "skipped" || status == "cancelled"
+        {
+            continue;
+        }
+
+        if !consumed_first_unfinished {
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "failed",
+                "",
+                "",
+                None,
+                &envelope.title_zh,
+                Some(&envelope),
+            )
+            .await?;
+            consumed_first_unfinished = true;
+        } else if status == "pending" {
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "skipped",
+                "",
+                "",
+                None,
+                "skipped after executor internal error",
+                None,
+            )
+            .await?;
+        }
+    }
+    mark_pipeline_project_finished(pool, plan.run_project_id, "failed", &envelope.title_zh).await
+}
+
+async fn execute_pipeline_project_plan(
+    pool: &SqlitePool,
+    pipeline_run_id: i64,
+    plan: &PipelineProjectExecutionPlan,
+) -> Result<ProjectOutcome> {
+    let repo_lease = get_repo_lease(&plan.project.repo_path).await;
+    let _repo_guard = repo_lease.lock().await;
+
+    if maybe_cancel_pipeline_project(
+        pool,
+        pipeline_run_id,
+        plan,
+        0,
+        "cancelled before project execution",
+    )
+    .await?
+    {
+        return Ok(ProjectOutcome::Cancelled);
+    }
+
+    mark_pipeline_project_running(pool, plan.run_project_id).await?;
+
+    if let Err(error) = run_repository_precheck(&plan.project).await {
+        if maybe_cancel_pipeline_project(
+            pool,
+            pipeline_run_id,
+            plan,
+            0,
+            "cancelled during repository precheck",
+        )
+        .await?
+        {
+            return Ok(ProjectOutcome::Cancelled);
+        }
+
+        let envelope = classify_precheck_failure(&error.to_string());
+        if let Some(first_node) = plan.nodes.first() {
+            mark_pipeline_node_running(pool, first_node.run_node_id).await?;
+            mark_pipeline_node_finished(
+                pool,
+                first_node.run_node_id,
+                "failed",
+                "",
+                "",
+                None,
+                &envelope.title_zh,
+                Some(&envelope),
+            )
+            .await?;
+            mark_remaining_pipeline_nodes_skipped(
+                pool,
+                &plan.nodes,
+                1,
+                "skipped after precheck failure",
+            )
+            .await?;
+        }
+        mark_pipeline_project_finished(
+            pool,
+            plan.run_project_id,
+            "failed_precheck",
+            &envelope.title_zh,
+        )
+        .await?;
+        return Ok(ProjectOutcome::FailedPrecheck);
+    }
+
+    if maybe_cancel_pipeline_project(
+        pool,
+        pipeline_run_id,
+        plan,
+        0,
+        "cancelled before node execution",
+    )
+    .await?
+    {
+        return Ok(ProjectOutcome::Cancelled);
+    }
+
+    for (node_index, node) in plan.nodes.iter().enumerate() {
+        if maybe_cancel_pipeline_project(
+            pool,
+            pipeline_run_id,
+            plan,
+            node_index,
+            "cancelled before node execution",
+        )
+        .await?
+        {
+            return Ok(ProjectOutcome::Cancelled);
+        }
+
+        mark_pipeline_node_running(pool, node.run_node_id).await?;
+
+        if maybe_cancel_pipeline_project(
+            pool,
+            pipeline_run_id,
+            plan,
+            node_index,
+            "cancelled before node execution",
+        )
+        .await?
+        {
+            return Ok(ProjectOutcome::Cancelled);
+        }
+
+        let execution_step = ProjectExecutionStep {
+            run_step_id: node.run_node_id,
+            step_type: node.node_type.clone(),
+            rendered_parameters: node.rendered_parameters.clone(),
+        };
+
+        let operation = match build_execution_step_operation(&execution_step, &plan.project) {
+            Ok(operation) => operation,
+            Err(error) => {
+                let envelope = classify_invalid_execution_parameters(&error.to_string());
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "failed",
+                    "",
+                    "",
+                    None,
+                    &envelope.title_zh,
+                    Some(&envelope),
+                )
+                .await?;
+                mark_remaining_pipeline_nodes_skipped(
+                    pool,
+                    &plan.nodes,
+                    node_index + 1,
+                    "skipped after previous node failure",
+                )
+                .await?;
+                mark_pipeline_project_finished(
+                    pool,
+                    plan.run_project_id,
+                    "failed_precheck",
+                    &envelope.title_zh,
+                )
+                .await?;
+                return Ok(ProjectOutcome::FailedPrecheck);
+            }
+        };
+
+        if let Err(error) = run_execution_step_prechecks(&plan.project, &operation).await {
+            if maybe_cancel_pipeline_project(
+                pool,
+                pipeline_run_id,
+                plan,
+                node_index,
+                "cancelled during node precheck",
+            )
+            .await?
+            {
+                return Ok(ProjectOutcome::Cancelled);
+            }
+
+            let envelope = classify_precheck_failure(&error.to_string());
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "failed",
+                "",
+                "",
+                None,
+                &envelope.title_zh,
+                Some(&envelope),
+            )
+            .await?;
+            mark_remaining_pipeline_nodes_skipped(
+                pool,
+                &plan.nodes,
+                node_index + 1,
+                "skipped after previous node failure",
+            )
+            .await?;
+            mark_pipeline_project_finished(
+                pool,
+                plan.run_project_id,
+                "failed_precheck",
+                &envelope.title_zh,
+            )
+            .await?;
+            return Ok(ProjectOutcome::FailedPrecheck);
+        }
+
+        if maybe_cancel_pipeline_project(
+            pool,
+            pipeline_run_id,
+            plan,
+            node_index,
+            "cancelled before node execution",
+        )
+        .await?
+        {
+            return Ok(ProjectOutcome::Cancelled);
+        }
+
+        let command_result =
+            execute_git_command(plan.project.repo_path.clone(), operation.to_args()).await?;
+
+        if command_result.success {
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "success",
+                &command_result.stdout,
+                &command_result.stderr,
+                command_result.exit_code,
+                "node completed",
+                None,
+            )
+            .await?;
+
+            if node_index + 1 < plan.nodes.len() {
+                if maybe_cancel_pipeline_project(
+                    pool,
+                    pipeline_run_id,
+                    plan,
+                    node_index + 1,
+                    "cancelled after safe execution boundary",
+                )
+                .await?
+                {
+                    return Ok(ProjectOutcome::Cancelled);
+                }
+            }
+        } else {
+            let envelope = classify_git_command_failure(&node.node_type, &command_result);
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "failed",
+                &command_result.stdout,
+                &command_result.stderr,
+                command_result.exit_code,
+                &envelope.title_zh,
+                Some(&envelope),
+            )
+            .await?;
+            mark_remaining_pipeline_nodes_skipped(
+                pool,
+                &plan.nodes,
+                node_index + 1,
+                "skipped after previous node failure",
+            )
+            .await?;
+            mark_pipeline_project_finished(pool, plan.run_project_id, "failed", &envelope.title_zh)
+                .await?;
+            return Ok(ProjectOutcome::Failed);
+        }
+    }
+
+    mark_pipeline_project_finished(pool, plan.run_project_id, "success", "all nodes completed")
+        .await?;
+    Ok(ProjectOutcome::Success)
+}
+
+async fn mark_unscheduled_pipeline_plans_cancelled(
+    pool: &SqlitePool,
+    plans: &[PipelineProjectExecutionPlan],
+    from_index: usize,
+) -> Result<usize> {
+    let mut marked = 0usize;
+    for plan in plans.iter().skip(from_index) {
+        mark_remaining_pipeline_nodes_cancelled(
+            pool,
+            &plan.nodes,
+            0,
+            "cancelled before project scheduling",
+        )
+        .await?;
+        mark_pipeline_project_finished(
+            pool,
+            plan.run_project_id,
+            "cancelled",
+            "cancelled before project scheduling",
+        )
+        .await?;
+        marked += 1;
+    }
+    Ok(marked)
+}
+
+async fn stop_pipeline_scheduling_and_cancel_unscheduled(
+    pool: &SqlitePool,
+    plans: &[PipelineProjectExecutionPlan],
+    next_plan_index: &mut usize,
+) -> Result<bool> {
+    if *next_plan_index >= plans.len() {
+        return Ok(false);
+    }
+
+    let cancelled_count =
+        mark_unscheduled_pipeline_plans_cancelled(pool, plans, *next_plan_index).await?;
+    *next_plan_index = plans.len();
+    Ok(cancelled_count > 0)
+}
+
+async fn run_pipeline_in_background(
+    pool: SqlitePool,
+    pipeline_run_id: i64,
+    plans: Vec<PipelineProjectExecutionPlan>,
+    max_concurrency: i64,
+) -> Result<()> {
+    if plans.is_empty() {
+        mark_pipeline_run_finished(&pool, pipeline_run_id, "completed").await?;
+        return Ok(());
+    }
+
+    let max_concurrency_usize = usize::try_from(max_concurrency)
+        .map_err(|_| anyhow!("max_concurrency is out of range: {max_concurrency}"))?;
+    let mut join_set = JoinSet::new();
+    let mut next_plan_index = 0usize;
+    let mut cancellation_observed = false;
+    let mut has_failures = false;
+    let mut has_cancelled = false;
+
+    loop {
+        if !cancellation_observed {
+            match is_pipeline_run_cancelling(&pool, pipeline_run_id).await {
+                Ok(true) => {
+                    cancellation_observed = true;
+                    if stop_pipeline_scheduling_and_cancel_unscheduled(
+                        &pool,
+                        &plans,
+                        &mut next_plan_index,
+                    )
+                    .await?
+                    {
+                        has_cancelled = true;
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(
+                        pipeline_run_id = pipeline_run_id,
+                        error = %error,
+                        "failed to read pipeline run cancellation status; stopping scheduler to avoid queuing additional projects"
+                    );
+                    cancellation_observed = true;
+                    has_failures = true;
+                    if stop_pipeline_scheduling_and_cancel_unscheduled(
+                        &pool,
+                        &plans,
+                        &mut next_plan_index,
+                    )
+                    .await?
+                    {
+                        has_cancelled = true;
+                    }
+                }
+            }
+        }
+
+        while !cancellation_observed
+            && join_set.len() < max_concurrency_usize
+            && next_plan_index < plans.len()
+        {
+            let plan = plans[next_plan_index].clone();
+            next_plan_index += 1;
+
+            let pool_cloned = pool.clone();
+            join_set.spawn(async move {
+                match execute_pipeline_project_plan(&pool_cloned, pipeline_run_id, &plan).await {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let message = format!("executor internal error: {error}");
+                        let _ =
+                            mark_pipeline_project_internal_failure(&pool_cloned, &plan, &message)
+                                .await;
+                        ProjectOutcome::Failed
+                    }
+                }
+            });
+        }
+
+        if join_set.is_empty() && (next_plan_index >= plans.len() || cancellation_observed) {
+            break;
+        }
+
+        if let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok(ProjectOutcome::Success) => {}
+                Ok(ProjectOutcome::Failed | ProjectOutcome::FailedPrecheck) => {
+                    has_failures = true;
+                }
+                Ok(ProjectOutcome::Cancelled) => {
+                    has_cancelled = true;
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "pipeline project task join failed");
+                    has_failures = true;
+                }
+            }
+        }
+    }
+
+    let final_status = derive_run_final_status(has_failures, has_cancelled);
+    mark_pipeline_run_finished(&pool, pipeline_run_id, final_status).await?;
+    Ok(())
+}
+
+async fn load_pipeline_retry_source_run(
+    pool: &SqlitePool,
+    source_pipeline_run_id: i64,
+) -> Result<PipelineRetrySourceRun> {
+    let (pipeline_definition_id, project_group_id, status, run_parameters_json) =
+        sqlx::query_as::<_, (i64, i64, String, String)>(
+            r#"SELECT pipeline_definition_id, project_group_id, status, run_parameters_json
+           FROM pipeline_runs
+           WHERE id = ?1"#,
+        )
+        .bind(source_pipeline_run_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| anyhow!("pipeline run not found: {source_pipeline_run_id}"))?;
+
+    if status == "pending" || status == "running" || status == "cancelling" {
+        return Err(anyhow!(
+            "pipeline run is not in terminal status for retry: {source_pipeline_run_id}, status={status}"
+        ));
+    }
+
+    let parsed_run_parameters = serde_json::from_str::<Value>(&run_parameters_json)
+        .context("parse source pipeline run parameters")?;
+    let run_parameters = normalize_run_parameters(parsed_run_parameters)?;
+
+    Ok(PipelineRetrySourceRun {
+        pipeline_definition_id,
+        project_group_id,
+        run_parameters,
+    })
+}
+
+async fn load_failed_pipeline_project_ids_for_retry(
+    pool: &SqlitePool,
+    source_pipeline_run_id: i64,
+) -> Result<Vec<i64>> {
+    let rows = sqlx::query_as::<_, (Option<i64>,)>(
+        r#"SELECT managed_project_id
+       FROM pipeline_run_projects
+       WHERE pipeline_run_id = ?1
+         AND status IN ('failed', 'failed_precheck')
+       ORDER BY id ASC"#,
+    )
+    .bind(source_pipeline_run_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut seen = HashSet::<i64>::new();
+    let mut failed_project_ids = Vec::new();
+    for row in rows {
+        if let Some(managed_project_id) = row.0 {
+            if seen.insert(managed_project_id) {
+                failed_project_ids.push(managed_project_id);
+            }
+        }
+    }
+
+    Ok(failed_project_ids)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_pipeline_run_with_projects(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+    project_group_id: i64,
+    run_parameters: Value,
+    max_concurrency_override: Option<i64>,
+    source_pipeline_run_id: Option<i64>,
+    trigger_kind: &str,
+    projects: Vec<ManagedProject>,
+) -> Result<i64> {
+    let pipeline = db::load_pipeline_definition_for_execution(pool, pipeline_definition_id).await?;
+    let run_parameters = normalize_pipeline_run_parameters(&pipeline.variables, run_parameters)?;
+
+    let max_concurrency = match max_concurrency_override {
+        Some(value) if value >= 1 => value,
+        Some(value) => {
+            return Err(anyhow!(
+                "max_concurrency_override must be >= 1, got {value}"
+            ))
+        }
+        None => pipeline.max_concurrency_default,
+    };
+    if max_concurrency < 1 {
+        return Err(anyhow!("pipeline max concurrency must be >= 1"));
+    }
+
+    let rendered_nodes = render_pipeline_nodes_for_run(&pipeline.nodes, &run_parameters)?;
+    let (pipeline_run_id, plans) = seed_pipeline_run_and_children(
+        pool,
+        pipeline.id,
+        project_group_id,
+        source_pipeline_run_id,
+        trigger_kind,
+        &run_parameters,
+        max_concurrency,
+        projects,
+        &rendered_nodes,
+    )
+    .await?;
+
+    if plans.is_empty() {
+        mark_pipeline_run_finished(pool, pipeline_run_id, "completed").await?;
+        return Ok(pipeline_run_id);
+    }
+
+    let pool_for_task = pool.clone();
+    tokio::spawn(async move {
+        if let Err(error) = run_pipeline_in_background(
+            pool_for_task.clone(),
+            pipeline_run_id,
+            plans,
+            max_concurrency,
+        )
+        .await
+        {
+            tracing::error!(pipeline_run_id = pipeline_run_id, error = %error, "pipeline background execution failed");
+            let _ = mark_pipeline_run_finished(&pool_for_task, pipeline_run_id, "partial_failed")
+                .await;
+        }
+    });
+
+    Ok(pipeline_run_id)
+}
+
+pub async fn execute_pipeline_run(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+    project_group_id: i64,
+    run_parameters: Value,
+    max_concurrency_override: Option<i64>,
+) -> Result<i64> {
+    let mut projects = db::list_project_group_projects(pool, project_group_id).await?;
+    projects.retain(|project| project.enabled);
+
+    start_pipeline_run_with_projects(
+        pool,
+        pipeline_definition_id,
+        project_group_id,
+        run_parameters,
+        max_concurrency_override,
+        None,
+        "manual",
+        projects,
+    )
+    .await
+}
+
+pub async fn cancel_pipeline_run(pool: &SqlitePool, pipeline_run_id: i64) -> Result<()> {
+    let now = now_rfc3339();
+    let res = sqlx::query(
+        r#"UPDATE pipeline_runs
+       SET status = 'cancelling',
+           updated_at = ?1
+       WHERE id = ?2 AND status IN ('running', 'pending')"#,
+    )
+    .bind(&now)
+    .bind(pipeline_run_id)
+    .execute(pool)
+    .await?;
+
+    if res.rows_affected() > 0 {
+        return Ok(());
+    }
+
+    let status = sqlx::query_scalar::<_, String>(r#"SELECT status FROM pipeline_runs WHERE id = ?1"#)
+        .bind(pipeline_run_id)
+        .fetch_optional(pool)
+        .await?;
+
+    match status.as_deref() {
+        Some("cancelling") | Some("cancelled") => Ok(()),
+        Some("completed") | Some("partial_failed") => {
+            Err(anyhow!("pipeline run already finished: {pipeline_run_id}"))
+        }
+        Some(current) => Err(anyhow!(
+            "pipeline run is not cancellable: {pipeline_run_id}, status={current}"
+        )),
+        None => Err(anyhow!("pipeline run not found: {pipeline_run_id}")),
+    }
+}
+
+pub async fn retry_pipeline_run(
+    pool: &SqlitePool,
+    source_pipeline_run_id: i64,
+    selected_managed_project_ids: Option<Vec<i64>>,
+    max_concurrency_override: Option<i64>,
+) -> Result<i64> {
+    tracing::info!(
+        source_pipeline_run_id = source_pipeline_run_id,
+        selected_managed_project_ids = ?selected_managed_project_ids,
+        "retry_pipeline_run uses current pipeline/project state with source run parameters"
+    );
+
+    let source_run = load_pipeline_retry_source_run(pool, source_pipeline_run_id).await?;
+    let failed_project_ids =
+        load_failed_pipeline_project_ids_for_retry(pool, source_pipeline_run_id).await?;
+    if failed_project_ids.is_empty() {
+        return Err(anyhow!(
+            "pipeline run has no failed projects to retry: {source_pipeline_run_id}"
+        ));
+    }
+
+    let retry_project_ids = match selected_managed_project_ids {
+        Some(selected_ids) if !selected_ids.is_empty() => {
+            let eligible_failed = failed_project_ids.iter().copied().collect::<HashSet<_>>();
+            let mut seen = HashSet::new();
+            let mut selected_failed = Vec::new();
+            for selected_id in selected_ids {
+                if eligible_failed.contains(&selected_id) && seen.insert(selected_id) {
+                    selected_failed.push(selected_id);
+                }
+            }
+            if selected_failed.is_empty() {
+                return Err(anyhow!(
+                    "none of selected managed project IDs are eligible failed projects"
+                ));
+            }
+            selected_failed
+        }
+        _ => failed_project_ids,
+    };
+
+    let retry_project_id_set = retry_project_ids.iter().copied().collect::<HashSet<_>>();
+    let mut projects = db::list_project_group_projects(pool, source_run.project_group_id).await?;
+    projects.retain(|project| project.enabled);
+
+    let enabled_project_ids = projects.iter().map(|project| project.id).collect::<HashSet<_>>();
+    let disabled_failed_ids = retry_project_ids
+        .iter()
+        .copied()
+        .filter(|project_id| !enabled_project_ids.contains(project_id))
+        .collect::<Vec<_>>();
+    if !disabled_failed_ids.is_empty() {
+        return Err(anyhow!(
+            "failed managed projects are currently disabled and cannot be retried: {:?}",
+            disabled_failed_ids
+        ));
+    }
+
+    projects.retain(|project| retry_project_id_set.contains(&project.id));
+    if projects.is_empty() {
+        return Err(anyhow!(
+            "pipeline retry resolved to zero enabled projects after filtering"
+        ));
+    }
+
+    start_pipeline_run_with_projects(
+        pool,
+        source_run.pipeline_definition_id,
+        source_run.project_group_id,
+        source_run.run_parameters,
+        max_concurrency_override,
+        Some(source_pipeline_run_id),
+        "retry_failed",
+        projects,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_execution_step_operation, cancel_workflow_run, derive_run_final_status,
-        derive_run_final_status_from_project_counts, execute_project_plan, execute_workflow_run,
-        mark_project_internal_failure, normalize_run_parameters, now_rfc3339,
+        build_execution_step_operation, cancel_pipeline_run, cancel_workflow_run,
+        derive_run_final_status, derive_run_final_status_from_project_counts,
+        execute_pipeline_run, execute_project_plan, execute_workflow_run,
+        mark_project_internal_failure, normalize_run_parameters, now_rfc3339, retry_pipeline_run,
         reconcile_stale_workflow_runs, render_execution_steps, retry_failed_workflow_run,
         run_execution_step_prechecks, run_repository_precheck, ProjectExecutionPlan,
         ProjectExecutionStep, ProjectOutcome, StepOperation,
     };
     use crate::db::{self, WorkflowExecutionStepDef};
-    use crate::models::{ManagedProject, WorkflowStepInput};
+    use crate::models::{ManagedProject, PipelineNodeInput, WorkflowStepInput};
     use serde_json::{Map, Value};
     use sqlx::{migrate::Migrator, sqlite::SqlitePoolOptions, SqlitePool};
     use std::path::{Path, PathBuf};
@@ -1687,6 +2950,30 @@ mod tests {
 
             if std::time::Instant::now() >= deadline {
                 panic!("workflow run {run_id} did not reach terminal status in {timeout_ms}ms");
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_for_terminal_pipeline_run_status(
+        pool: &SqlitePool,
+        run_id: i64,
+        timeout_ms: u64,
+    ) -> crate::models::PipelineRunDetail {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            let detail = db::get_pipeline_run_detail(pool, run_id)
+                .await
+                .expect("load pipeline run detail while waiting");
+            if detail.status == "completed"
+                || detail.status == "partial_failed"
+                || detail.status == "cancelled"
+            {
+                return detail;
+            }
+
+            if std::time::Instant::now() >= deadline {
+                panic!("pipeline run {run_id} did not reach terminal status in {timeout_ms}ms");
             }
             sleep(Duration::from_millis(100)).await;
         }
@@ -2334,7 +3621,8 @@ mod tests {
         .await
         .expect("execute source workflow run");
 
-        let source_detail = wait_for_terminal_run_status(&pool, source_run_id, 15_000).await;
+        let source_detail =
+            wait_for_terminal_pipeline_run_status(&pool, source_run_id, 15_000).await;
         assert_eq!(source_detail.status, "partial_failed");
         let failed_project_ids = source_detail
             .projects
@@ -2633,6 +3921,303 @@ mod tests {
             .expect_err("retry should fail when failed project is disabled")
             .to_string()
             .contains("failed managed projects are currently disabled and cannot be retried"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_runtime_persists_run_project_and_node_state() {
+        let pool = setup_test_pool().await;
+        let repo = setup_git_repo();
+
+        let managed = db::create_managed_project(
+            &pool,
+            76001,
+            "pipeline-project-a".to_string(),
+            "team/pipeline-project-a".to_string(),
+            repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+        let group = db::create_project_group(&pool, "pipeline-group-a".to_string())
+            .await
+            .expect("create project group");
+        db::add_projects_to_group(&pool, group.id, vec![managed.id])
+            .await
+            .expect("add project to group");
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "release-pipeline".to_string(),
+            "test pipeline runtime".to_string(),
+            true,
+            2,
+            vec![],
+            vec![
+                PipelineNodeInput {
+                    node_type: "checkout_branch".to_string(),
+                    parameters: serde_json::json!({ "branch": "${target_branch}" }),
+                },
+                PipelineNodeInput {
+                    node_type: "git_merge".to_string(),
+                    parameters: serde_json::json!({ "from": "${source_branch}" }),
+                },
+            ],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let run_id = execute_pipeline_run(
+            &pool,
+            pipeline.id,
+            group.id,
+            serde_json::json!({
+                "source_branch": "release",
+                "target_branch": "main"
+            }),
+            Some(1),
+        )
+        .await
+        .expect("execute pipeline run");
+
+        let seeded = db::get_pipeline_run_detail(&pool, run_id)
+            .await
+            .expect("load seeded pipeline run detail");
+        assert_eq!(seeded.projects.len(), 1);
+        assert_eq!(seeded.projects[0].nodes.len(), 2);
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.status, "completed");
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "success");
+        assert_eq!(detail.projects[0].nodes.len(), 2);
+        assert_eq!(detail.projects[0].nodes[0].status, "success");
+        assert_eq!(detail.projects[0].nodes[1].status, "success");
+        assert_eq!(
+            detail.projects[0].nodes[0].rendered_parameters,
+            serde_json::json!({ "branch": "main" })
+        );
+        assert_eq!(
+            detail.projects[0].nodes[1].rendered_parameters,
+            serde_json::json!({ "from": "release" })
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_runtime_persists_structured_failure_envelope_for_precheck() {
+        let pool = setup_test_pool().await;
+        let repo = setup_git_repo();
+        std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+        let managed = db::create_managed_project(
+            &pool,
+            76002,
+            "pipeline-project-b".to_string(),
+            "team/pipeline-project-b".to_string(),
+            repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+        let group = db::create_project_group(&pool, "pipeline-group-b".to_string())
+            .await
+            .expect("create project group");
+        db::add_projects_to_group(&pool, group.id, vec![managed.id])
+            .await
+            .expect("add project to group");
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "precheck-pipeline".to_string(),
+            "test precheck failure envelope".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let run_id = execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+            .await
+            .expect("execute pipeline run");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.status, "partial_failed");
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "failed_precheck");
+        assert_eq!(detail.projects[0].nodes.len(), 1);
+        assert_eq!(detail.projects[0].nodes[0].status, "failed");
+        assert_eq!(
+            detail.projects[0].nodes[0].error_code.as_deref(),
+            Some("git.worktree_dirty")
+        );
+        assert_eq!(
+            detail.projects[0].nodes[0].title_zh.as_deref(),
+            Some("仓库工作区不干净")
+        );
+        assert!(detail.projects[0].nodes[0]
+            .detail_zh
+            .as_deref()
+            .unwrap_or_default()
+            .contains("未提交"));
+        assert!(detail.projects[0].nodes[0]
+            .suggestion_zh
+            .as_deref()
+            .unwrap_or_default()
+            .contains("重试"));
+        assert!(detail.projects[0].nodes[0]
+            .evidence
+            .as_deref()
+            .unwrap_or_default()
+            .contains("repository worktree is not clean"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_runtime_retry_failed_run_creates_new_run_with_failed_projects_only() {
+        let pool = setup_test_pool().await;
+        let clean_repo = setup_git_repo();
+        let dirty_repo = setup_git_repo();
+        std::fs::write(dirty_repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+        let clean_project = db::create_managed_project(
+            &pool,
+            76003,
+            "pipeline-project-clean".to_string(),
+            "team/pipeline-project-clean".to_string(),
+            clean_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create clean project");
+        let dirty_project = db::create_managed_project(
+            &pool,
+            76004,
+            "pipeline-project-dirty".to_string(),
+            "team/pipeline-project-dirty".to_string(),
+            dirty_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create dirty project");
+
+        let group = db::create_project_group(&pool, "pipeline-group-retry".to_string())
+            .await
+            .expect("create retry project group");
+        db::add_projects_to_group(&pool, group.id, vec![clean_project.id, dirty_project.id])
+            .await
+            .expect("add projects to retry group");
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "retry-pipeline".to_string(),
+            "test retry failed pipeline projects".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let source_run_id = execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+            .await
+            .expect("execute source pipeline run");
+
+        let source_detail =
+            wait_for_terminal_pipeline_run_status(&pool, source_run_id, 15_000).await;
+        assert_eq!(source_detail.status, "partial_failed");
+
+        let retry_run_id = retry_pipeline_run(
+            &pool,
+            source_run_id,
+            Some(vec![dirty_project.id]),
+            Some(1),
+        )
+        .await
+        .expect("retry failed pipeline run");
+
+        let retry_seeded = db::get_pipeline_run_detail(&pool, retry_run_id)
+            .await
+            .expect("load retry seeded pipeline run");
+        assert_eq!(retry_seeded.source_pipeline_run_id, Some(source_run_id));
+        assert_eq!(retry_seeded.projects.len(), 1);
+        assert_eq!(
+            retry_seeded.projects[0].managed_project_id,
+            Some(dirty_project.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_runtime_cancel_marks_running_run_as_cancelling() {
+        let pool = setup_test_pool().await;
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "cancel-pipeline".to_string(),
+            "test cancel pipeline run".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+        let group = db::create_project_group(&pool, "pipeline-group-cancel".to_string())
+            .await
+            .expect("create project group");
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let run_id = sqlx::query(
+            r#"INSERT INTO pipeline_runs (
+             pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+             trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)"#,
+        )
+        .bind(pipeline.id)
+        .bind(group.id)
+        .bind("manual")
+        .bind("running")
+        .bind(r#"{}"#)
+        .bind(1_i64)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert running pipeline run")
+        .last_insert_rowid();
+
+        cancel_pipeline_run(&pool, run_id)
+            .await
+            .expect("cancel pipeline run");
+
+        let status = sqlx::query_scalar::<_, String>(r#"SELECT status FROM pipeline_runs WHERE id = ?1"#)
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("reload pipeline run status");
+        assert_eq!(status, "cancelling");
     }
 
     #[test]

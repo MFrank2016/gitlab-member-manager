@@ -482,6 +482,33 @@ pub struct WorkflowRunRetryFailedRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PipelineRunExecuteRequest {
+    pub pipeline_definition_id: i64,
+    pub project_group_id: i64,
+    #[serde(default)]
+    pub run_parameters: Value,
+    #[serde(default)]
+    pub max_concurrency_override: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunExecuteResult {
+    pub pipeline_run_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunRetryRequest {
+    pub source_pipeline_run_id: i64,
+    #[serde(default)]
+    pub selected_managed_project_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    pub max_concurrency_override: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectGroupMemberSyncRow {
     pub managed_project_id: i64,
     pub gitlab_project_id: u64,

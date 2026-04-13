@@ -282,6 +282,23 @@ export type WorkflowRunRetryFailedRequest = {
   maxConcurrencyOverride?: number | null;
 };
 
+export type PipelineRunExecuteRequest = {
+  pipelineDefinitionId: number;
+  projectGroupId: number;
+  runParameters?: Record<string, unknown>;
+  maxConcurrencyOverride?: number | null;
+};
+
+export type PipelineRunExecuteResult = {
+  pipelineRunId: number;
+};
+
+export type PipelineRunRetryRequest = {
+  sourcePipelineRunId: number;
+  selectedManagedProjectIds?: number[] | null;
+  maxConcurrencyOverride?: number | null;
+};
+
 export type WorkflowRunStatus =
   | "pending"
   | "running"

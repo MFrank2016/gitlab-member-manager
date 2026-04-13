@@ -8,7 +8,10 @@ import type {
   PipelineDefinitionListItem,
   PipelineNodeInput,
   PipelineRunDetail,
+  PipelineRunExecuteRequest,
+  PipelineRunExecuteResult,
   PipelineRunListItem,
+  PipelineRunRetryRequest,
   PipelineScheduleInput,
   PipelineVariableInput,
   ProjectGroup,
@@ -414,6 +417,33 @@ export async function listWorkflowRuns() {
 
 export async function listPipelineRuns() {
   return loggedInvoke<PipelineRunListItem[]>("list_pipeline_runs");
+}
+
+export async function executePipelineRun(request: PipelineRunExecuteRequest) {
+  return loggedInvoke<PipelineRunExecuteResult>("execute_pipeline_run", {
+    request: {
+      pipelineDefinitionId: request.pipelineDefinitionId,
+      projectGroupId: request.projectGroupId,
+      runParameters: normalizeJsonObject(request.runParameters, "runParameters"),
+      maxConcurrencyOverride: request.maxConcurrencyOverride ?? null,
+    },
+  });
+}
+
+export async function cancelPipelineRun(pipelineRunId: number) {
+  return loggedInvoke<void>("cancel_pipeline_run", {
+    pipeline_run_id: pipelineRunId,
+  });
+}
+
+export async function retryPipelineRun(request: PipelineRunRetryRequest) {
+  return loggedInvoke<PipelineRunExecuteResult>("retry_pipeline_run", {
+    request: {
+      sourcePipelineRunId: request.sourcePipelineRunId,
+      selectedManagedProjectIds: request.selectedManagedProjectIds ?? null,
+      maxConcurrencyOverride: request.maxConcurrencyOverride ?? null,
+    },
+  });
 }
 
 export async function executeWorkflowRun(request: WorkflowRunExecuteRequest) {

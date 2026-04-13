@@ -3,13 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
 import {
+  cancelPipelineRun,
   createPipelineDefinition,
   deletePipelineDefinition,
+  executePipelineRun,
   getPipelineDefinitionDetail,
   getPipelineRunDetail,
   listPipelineDefinitions,
   listPipelineRuns,
   listWorkflowDefinitions,
+  retryPipelineRun,
   updatePipelineDefinition,
 } from "@/lib/invoke";
 import { ProjectGroupsPage } from "@/pages/ProjectGroupsPage";
@@ -253,6 +256,17 @@ describe("pipeline wrapper smoke", () => {
         };
       }
       if (cmd === "list_pipeline_runs") return [];
+      if (cmd === "execute_pipeline_run") {
+        return {
+          pipelineRunId: 302,
+        };
+      }
+      if (cmd === "cancel_pipeline_run") return undefined;
+      if (cmd === "retry_pipeline_run") {
+        return {
+          pipelineRunId: 303,
+        };
+      }
       if (cmd === "get_pipeline_run_detail") {
         return {
           id: 301,
@@ -376,17 +390,33 @@ describe("pipeline wrapper smoke", () => {
       ],
       schedules: [],
     });
-    await deletePipelineDefinition(11);
-    const pipelineRuns = await listPipelineRuns();
-    const runDetail = await getPipelineRunDetail(301);
-    const workflowList = await listWorkflowDefinitions();
+	    await deletePipelineDefinition(11);
+	    const executeResult = await executePipelineRun({
+	      pipelineDefinitionId: 11,
+	      projectGroupId: 5,
+	      runParameters: {
+	        source_branch: "release",
+	      },
+	      maxConcurrencyOverride: 1,
+	    });
+	    await cancelPipelineRun(302);
+	    const retryResult = await retryPipelineRun({
+	      sourcePipelineRunId: 301,
+	      selectedManagedProjectIds: [44],
+	      maxConcurrencyOverride: 1,
+	    });
+	    const pipelineRuns = await listPipelineRuns();
+	    const runDetail = await getPipelineRunDetail(301);
+	    const workflowList = await listWorkflowDefinitions();
 
     expect(pipelineList).toEqual([]);
     expect(pipelineDetail.nodes).toHaveLength(1);
-    expect(pipelineDetail.variables[0].options).toEqual([]);
-    expect(pipelineRuns).toEqual([]);
-    expect(runDetail.projects).toEqual([]);
-    expect(workflowList[0].name).toBe("legacy-flow");
+	    expect(pipelineDetail.variables[0].options).toEqual([]);
+	    expect(executeResult.pipelineRunId).toBe(302);
+	    expect(retryResult.pipelineRunId).toBe(303);
+	    expect(pipelineRuns).toEqual([]);
+	    expect(runDetail.projects).toEqual([]);
+	    expect(workflowList[0].name).toBe("legacy-flow");
 
     expect(invokeMock).toHaveBeenCalledWith("list_pipeline_definitions", undefined);
     expect(invokeMock).toHaveBeenCalledWith(
@@ -414,10 +444,30 @@ describe("pipeline wrapper smoke", () => {
         ],
       })
     );
-    expect(invokeMock).toHaveBeenCalledWith("delete_pipeline_definition", { id: 11 });
-    expect(invokeMock).toHaveBeenCalledWith("list_pipeline_runs", undefined);
-    expect(invokeMock).toHaveBeenCalledWith("get_pipeline_run_detail", { id: 301 });
-    expect(invokeMock).toHaveBeenCalledWith("list_workflow_definitions", undefined);
+	    expect(invokeMock).toHaveBeenCalledWith("delete_pipeline_definition", { id: 11 });
+	    expect(invokeMock).toHaveBeenCalledWith("execute_pipeline_run", {
+	      request: {
+	        pipelineDefinitionId: 11,
+	        projectGroupId: 5,
+	        runParameters: {
+	          source_branch: "release",
+	        },
+	        maxConcurrencyOverride: 1,
+	      },
+	    });
+	    expect(invokeMock).toHaveBeenCalledWith("cancel_pipeline_run", {
+	      pipeline_run_id: 302,
+	    });
+	    expect(invokeMock).toHaveBeenCalledWith("retry_pipeline_run", {
+	      request: {
+	        sourcePipelineRunId: 301,
+	        selectedManagedProjectIds: [44],
+	        maxConcurrencyOverride: 1,
+	      },
+	    });
+	    expect(invokeMock).toHaveBeenCalledWith("list_pipeline_runs", undefined);
+	    expect(invokeMock).toHaveBeenCalledWith("get_pipeline_run_detail", { id: 301 });
+	    expect(invokeMock).toHaveBeenCalledWith("list_workflow_definitions", undefined);
   });
 
   it("rejects invalid pipeline variable options before invoking the backend", async () => {

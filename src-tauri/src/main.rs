@@ -9,8 +9,9 @@ use crate::gitlab::GitLabConfig;
 use crate::models::{
     AppSettings, BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert,
     ManagedProject, PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineNodeInput,
-    PipelineRunDetail, PipelineRunListItem, PipelineScheduleInput, PipelineVariableInput,
-    ProjectGroup, ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
+    PipelineRunDetail, PipelineRunExecuteRequest, PipelineRunExecuteResult, PipelineRunListItem,
+    PipelineRunRetryRequest, PipelineScheduleInput, PipelineVariableInput, ProjectGroup,
+    ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
     WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail,
     WorkflowRunExecuteRequest, WorkflowRunExecuteResult, WorkflowRunListItem,
     WorkflowRunRetryFailedRequest, WorkflowStepInput,
@@ -702,6 +703,76 @@ async fn list_pipeline_runs(state: State<'_, AppState>) -> Result<Vec<PipelineRu
 }
 
 #[tauri::command]
+async fn execute_pipeline_run(
+    state: State<'_, AppState>,
+    request: PipelineRunExecuteRequest,
+) -> Result<PipelineRunExecuteResult, String> {
+    let run_id = workflows::execute_pipeline_run(
+        &state.db,
+        request.pipeline_definition_id,
+        request.project_group_id,
+        request.run_parameters,
+        request.max_concurrency_override,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tracing::info!(pipeline_run_id = run_id, "execute_pipeline_run success");
+    Ok(PipelineRunExecuteResult {
+        pipeline_run_id: run_id,
+    })
+}
+
+#[tauri::command]
+async fn cancel_pipeline_run(
+    state: State<'_, AppState>,
+    pipeline_run_id: i64,
+) -> Result<(), String> {
+    let result = workflows::cancel_pipeline_run(&state.db, pipeline_run_id)
+        .await
+        .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(_) => tracing::info!(
+            pipeline_run_id = pipeline_run_id,
+            "cancel_pipeline_run success"
+        ),
+        Err(e) => tracing::error!(
+            pipeline_run_id = pipeline_run_id,
+            error = %e,
+            "cancel_pipeline_run failed"
+        ),
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn retry_pipeline_run(
+    state: State<'_, AppState>,
+    request: PipelineRunRetryRequest,
+) -> Result<PipelineRunExecuteResult, String> {
+    let run_id = workflows::retry_pipeline_run(
+        &state.db,
+        request.source_pipeline_run_id,
+        request.selected_managed_project_ids,
+        request.max_concurrency_override,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tracing::info!(
+        source_pipeline_run_id = request.source_pipeline_run_id,
+        pipeline_run_id = run_id,
+        "retry_pipeline_run success"
+    );
+
+    Ok(PipelineRunExecuteResult {
+        pipeline_run_id: run_id,
+    })
+}
+
+#[tauri::command]
 async fn execute_workflow_run(
     state: State<'_, AppState>,
     request: WorkflowRunExecuteRequest,
@@ -1252,6 +1323,9 @@ fn main() {
 	      update_pipeline_definition,
 	      delete_workflow_definition,
 	      delete_pipeline_definition,
+	      execute_pipeline_run,
+	      cancel_pipeline_run,
+	      retry_pipeline_run,
 	      execute_workflow_run,
 	      cancel_workflow_run,
 	      retry_failed_workflow_run,
