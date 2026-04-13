@@ -1043,6 +1043,22 @@ fn main() {
         ),
       }
 
+      match tauri::async_runtime::block_on(db::migrate_workflows_to_pipelines(&db)) {
+        Ok(summary) => tracing::info!(
+          definitions_migrated = summary.definitions_migrated,
+          variables_migrated = summary.variables_migrated,
+          nodes_migrated = summary.nodes_migrated,
+          runs_migrated = summary.runs_migrated,
+          run_projects_migrated = summary.run_projects_migrated,
+          run_nodes_migrated = summary.run_nodes_migrated,
+          "[setup] migrated legacy workflow data into pipeline tables"
+        ),
+        Err(e) => tracing::error!(
+          error = %e,
+          "[setup] failed to migrate legacy workflow data into pipeline tables"
+        ),
+      }
+
       let gitlab = match tauri::async_runtime::block_on(db::get_gitlab_config(&db)) {
         Ok(Some(cfg)) => {
           tracing::info!("[setup] loaded GitLab config from database");

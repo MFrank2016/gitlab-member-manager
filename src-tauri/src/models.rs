@@ -279,6 +279,17 @@ pub struct PipelineRunDetail {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineMigrationSummary {
+    pub definitions_migrated: i64,
+    pub variables_migrated: i64,
+    pub nodes_migrated: i64,
+    pub runs_migrated: i64,
+    pub run_projects_migrated: i64,
+    pub run_nodes_migrated: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowStep {

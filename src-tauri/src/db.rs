@@ -1,7 +1,7 @@
 use crate::models::{
     AppSettings, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
     PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineNode, PipelineNodeInput,
-    PipelineRunListItem, PipelineSchedule, PipelineScheduleInput,
+    PipelineMigrationSummary, PipelineRunListItem, PipelineSchedule, PipelineScheduleInput,
     PipelineVariable, PipelineVariableInput, ProjectGroup, WorkflowDefinitionDetail,
     WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem, WorkflowRunProject,
     WorkflowRunStep, WorkflowStep, WorkflowStepInput,
@@ -222,6 +222,58 @@ fn deserialize_json(raw: &str, field_name: &str) -> Result<Value> {
 fn deserialize_json_object(raw: &str, field_name: &str) -> Result<Value> {
     let parsed = deserialize_json(raw, field_name)?;
     normalize_json_object(parsed, field_name)
+}
+
+fn json_value_to_text(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::Null) | None => None,
+        Some(Value::String(raw)) => {
+            let trimmed = raw.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        }
+        Some(other) => Some(other.to_string()),
+    }
+}
+
+fn legacy_variable_to_pipeline_input(key: &str, value: &Value) -> Result<PipelineVariableInput> {
+    let config = value
+        .as_object()
+        .ok_or_else(|| anyhow!("workflow variable schema entry must be a JSON object: {key}"))?;
+
+    let label = config
+        .get("label")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or(key)
+        .to_string();
+    let value_type = config
+        .get("type")
+        .or_else(|| config.get("valueType"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or("string")
+        .to_string();
+    let default_value =
+        json_value_to_text(config.get("default").or_else(|| config.get("defaultValue")));
+    let required = config
+        .get("required")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let options = normalize_json_array(
+        config.get("options").cloned().unwrap_or_else(|| Value::Array(vec![])),
+        "workflow variable options",
+    )?;
+
+    Ok(PipelineVariableInput {
+        key: key.trim().to_string(),
+        label,
+        default_value,
+        value_type,
+        required,
+        options,
+    })
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1250,6 +1302,328 @@ pub async fn get_pipeline_definition_detail(
     })
 }
 
+pub async fn migrate_workflows_to_pipelines(
+    pool: &SqlitePool,
+) -> Result<PipelineMigrationSummary> {
+    let mut tx = pool.begin().await?;
+    let mut summary = PipelineMigrationSummary::default();
+
+    let workflow_definitions = sqlx::query_as::<
+        _,
+        (i64, String, String, i64, String, i64, String, String),
+    >(
+        r#"SELECT
+         id, name, description, enabled, variables_schema, max_concurrency_default, created_at, updated_at
+       FROM workflow_definitions
+       ORDER BY id ASC"#,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for workflow_definition in workflow_definitions {
+        let existing_pipeline_definition_id = sqlx::query_scalar::<_, i64>(
+            r#"SELECT id
+           FROM pipeline_definitions
+           WHERE legacy_workflow_definition_id = ?1"#,
+        )
+        .bind(workflow_definition.0)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let pipeline_definition_id = match existing_pipeline_definition_id {
+            Some(id) => id,
+            None => {
+                let result = sqlx::query(
+                    r#"INSERT INTO pipeline_definitions (
+                     legacy_workflow_definition_id, name, description, enabled,
+                     max_concurrency_default, created_at, updated_at
+                   ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+                )
+                .bind(workflow_definition.0)
+                .bind(&workflow_definition.1)
+                .bind(&workflow_definition.2)
+                .bind(workflow_definition.3)
+                .bind(workflow_definition.5)
+                .bind(&workflow_definition.6)
+                .bind(&workflow_definition.7)
+                .execute(&mut *tx)
+                .await?;
+
+                let inserted_id = result.last_insert_rowid();
+                summary.definitions_migrated += 1;
+
+                let variables_schema =
+                    deserialize_json_object(&workflow_definition.4, "workflow variables schema")?;
+                let variables_object = variables_schema
+                    .as_object()
+                    .ok_or_else(|| anyhow!("workflow variables schema must be a JSON object"))?;
+                let mut normalized_variables = Vec::with_capacity(variables_object.len());
+                for (key, value) in variables_object {
+                    normalized_variables.push(legacy_variable_to_pipeline_input(key, value)?);
+                }
+                insert_pipeline_variables(
+                    &mut tx,
+                    inserted_id,
+                    &normalized_variables,
+                    &workflow_definition.6,
+                )
+                .await?;
+                summary.variables_migrated += i64::try_from(normalized_variables.len())
+                    .map_err(|_| anyhow!("pipeline variable count out of range"))?;
+
+                let workflow_steps = sqlx::query_as::<
+                    _,
+                    (i64, String, String, String, String),
+                >(
+                    r#"SELECT
+                     step_order, step_type, parameters_json, created_at, updated_at
+                   FROM workflow_steps
+                   WHERE workflow_definition_id = ?1
+                   ORDER BY step_order ASC, id ASC"#,
+                )
+                .bind(workflow_definition.0)
+                .fetch_all(&mut *tx)
+                .await?;
+
+                for step in workflow_steps {
+                    sqlx::query(
+                        r#"INSERT INTO pipeline_nodes (
+                         pipeline_definition_id, node_order, node_type, parameters_json, created_at, updated_at
+                       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+                    )
+                    .bind(inserted_id)
+                    .bind(step.0)
+                    .bind(&step.1)
+                    .bind(&step.2)
+                    .bind(&step.3)
+                    .bind(&step.4)
+                    .execute(&mut *tx)
+                    .await?;
+                    summary.nodes_migrated += 1;
+                }
+
+                inserted_id
+            }
+        };
+
+        let workflow_runs = sqlx::query_as::<
+            _,
+            (
+                i64,
+                i64,
+                i64,
+                Option<i64>,
+                String,
+                String,
+                String,
+                i64,
+                Option<String>,
+                Option<String>,
+                String,
+                String,
+            ),
+        >(
+            r#"SELECT
+             id, workflow_definition_id, project_group_id, source_workflow_run_id,
+             trigger_kind, status, run_parameters_json, max_concurrency,
+             started_at, finished_at, created_at, updated_at
+           FROM workflow_runs
+           WHERE workflow_definition_id = ?1
+           ORDER BY id ASC"#,
+        )
+        .bind(workflow_definition.0)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for workflow_run in workflow_runs {
+            let existing_pipeline_run_id = sqlx::query_scalar::<_, i64>(
+                r#"SELECT id
+               FROM pipeline_runs
+               WHERE legacy_workflow_run_id = ?1"#,
+            )
+            .bind(workflow_run.0)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            let pipeline_run_id = match existing_pipeline_run_id {
+                Some(id) => id,
+                None => {
+                    let source_pipeline_run_id = match workflow_run.3 {
+                        Some(source_workflow_run_id) => {
+                            sqlx::query_scalar::<_, i64>(
+                                r#"SELECT id
+                               FROM pipeline_runs
+                               WHERE legacy_workflow_run_id = ?1"#,
+                            )
+                            .bind(source_workflow_run_id)
+                            .fetch_optional(&mut *tx)
+                            .await?
+                        }
+                        None => None,
+                    };
+
+                    let result = sqlx::query(
+                        r#"INSERT INTO pipeline_runs (
+                         pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+                         trigger_kind, status, run_parameters_json, max_concurrency,
+                         started_at, finished_at, created_at, updated_at
+                       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+                    )
+                    .bind(pipeline_definition_id)
+                    .bind(workflow_run.2)
+                    .bind(workflow_run.0)
+                    .bind(source_pipeline_run_id)
+                    .bind(&workflow_run.4)
+                    .bind(&workflow_run.5)
+                    .bind(&workflow_run.6)
+                    .bind(workflow_run.7)
+                    .bind(&workflow_run.8)
+                    .bind(&workflow_run.9)
+                    .bind(&workflow_run.10)
+                    .bind(&workflow_run.11)
+                    .execute(&mut *tx)
+                    .await?;
+
+                    summary.runs_migrated += 1;
+                    result.last_insert_rowid()
+                }
+            };
+
+            let workflow_run_projects = sqlx::query_as::<
+                _,
+                (
+                    i64,
+                    Option<i64>,
+                    i64,
+                    String,
+                    String,
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    String,
+                    String,
+                ),
+            >(
+                r#"SELECT
+                 id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+                 repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+               FROM workflow_run_projects
+               WHERE workflow_run_id = ?1
+               ORDER BY id ASC"#,
+            )
+            .bind(workflow_run.0)
+            .fetch_all(&mut *tx)
+            .await?;
+
+            for workflow_run_project in workflow_run_projects {
+                let insert_result = sqlx::query(
+                    r#"INSERT OR IGNORE INTO pipeline_run_projects (
+                     pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+                     repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+                   ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+                )
+                .bind(pipeline_run_id)
+                .bind(workflow_run_project.1)
+                .bind(workflow_run_project.2)
+                .bind(&workflow_run_project.3)
+                .bind(&workflow_run_project.4)
+                .bind(&workflow_run_project.5)
+                .bind(&workflow_run_project.6)
+                .bind(&workflow_run_project.7)
+                .bind(&workflow_run_project.8)
+                .bind(&workflow_run_project.9)
+                .bind(&workflow_run_project.10)
+                .bind(&workflow_run_project.11)
+                .execute(&mut *tx)
+                .await?;
+                summary.run_projects_migrated += i64::try_from(insert_result.rows_affected())
+                    .map_err(|_| anyhow!("pipeline run project count out of range"))?;
+
+                let pipeline_run_project_id = sqlx::query_scalar::<_, i64>(
+                    r#"SELECT id
+                   FROM pipeline_run_projects
+                   WHERE pipeline_run_id = ?1 AND gitlab_project_id = ?2"#,
+                )
+                .bind(pipeline_run_id)
+                .bind(workflow_run_project.2)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                let workflow_run_steps = sqlx::query_as::<
+                    _,
+                    (
+                        Option<i64>,
+                        i64,
+                        String,
+                        String,
+                        String,
+                        Option<String>,
+                        Option<String>,
+                        String,
+                        String,
+                        Option<i64>,
+                        String,
+                        String,
+                        String,
+                    ),
+                >(
+                    r#"SELECT
+                     workflow_step_id, step_order, step_type, rendered_parameters_json, status,
+                     started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
+                   FROM workflow_run_steps
+                   WHERE workflow_run_project_id = ?1
+                   ORDER BY step_order ASC, id ASC"#,
+                )
+                .bind(workflow_run_project.0)
+                .fetch_all(&mut *tx)
+                .await?;
+
+                for workflow_run_step in workflow_run_steps {
+                    let pipeline_node_id = sqlx::query_scalar::<_, i64>(
+                        r#"SELECT id
+                       FROM pipeline_nodes
+                       WHERE pipeline_definition_id = ?1 AND node_order = ?2"#,
+                    )
+                    .bind(pipeline_definition_id)
+                    .bind(workflow_run_step.1)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+
+                    let insert_result = sqlx::query(
+                        r#"INSERT OR IGNORE INTO pipeline_run_nodes (
+                         pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
+                         status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
+                       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+                    )
+                    .bind(pipeline_run_project_id)
+                    .bind(pipeline_node_id)
+                    .bind(workflow_run_step.1)
+                    .bind(&workflow_run_step.2)
+                    .bind(&workflow_run_step.3)
+                    .bind(&workflow_run_step.4)
+                    .bind(&workflow_run_step.5)
+                    .bind(&workflow_run_step.6)
+                    .bind(&workflow_run_step.7)
+                    .bind(&workflow_run_step.8)
+                    .bind(workflow_run_step.9)
+                    .bind(&workflow_run_step.10)
+                    .bind(&workflow_run_step.11)
+                    .bind(&workflow_run_step.12)
+                    .execute(&mut *tx)
+                    .await?;
+                    summary.run_nodes_migrated += i64::try_from(insert_result.rows_affected())
+                        .map_err(|_| anyhow!("pipeline run node count out of range"))?;
+                }
+            }
+        }
+    }
+
+    tx.commit().await?;
+    Ok(summary)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn update_workflow_definition(
     pool: &SqlitePool,
@@ -2051,6 +2425,14 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
 
     static TEST_MIGRATOR: Migrator = sqlx::migrate!();
+
+    async fn count_rows(pool: &SqlitePool, table_name: &str) -> i64 {
+        let query = format!("SELECT COUNT(*) FROM {table_name}");
+        sqlx::query_scalar::<_, i64>(&query)
+            .fetch_one(pool)
+            .await
+            .expect("count rows")
+    }
 
     async fn setup_test_pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new()
@@ -3351,6 +3733,337 @@ mod tests {
         .expect("deserialize pipeline schedule input");
 
         assert!(schedule.enabled);
+    }
+
+    #[tokio::test]
+    async fn pipeline_migration_copies_legacy_workflow_data_into_pipeline_tables() {
+        let pool = setup_test_pool().await;
+
+        let workflow_definition_id = sqlx::query(
+            r#"INSERT INTO workflow_definitions (
+             name, description, enabled, variables_schema, max_concurrency_default, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+        )
+        .bind("legacy-release-workflow")
+        .bind("legacy release workflow")
+        .bind(1_i64)
+        .bind(
+            r#"{
+              "source_branch": {
+                "label": "Source Branch",
+                "type": "string",
+                "default": "release",
+                "required": true,
+                "options": ["release", "hotfix"]
+              },
+              "target_branch": {
+                "label": "Target Branch",
+                "type": "string",
+                "default": "main",
+                "required": true
+              }
+            }"#,
+        )
+        .bind(3_i64)
+        .bind("2026-04-13T08:00:00Z")
+        .bind("2026-04-13T08:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow definition")
+        .last_insert_rowid();
+
+        let workflow_step_a_id = sqlx::query(
+            r#"INSERT INTO workflow_steps (
+             workflow_definition_id, step_order, step_type, parameters_json, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+        )
+        .bind(workflow_definition_id)
+        .bind(0_i64)
+        .bind("check_pipeline")
+        .bind(r#"{"project":"team/service-a","ref":"${source_branch}"}"#)
+        .bind("2026-04-13T08:00:00Z")
+        .bind("2026-04-13T08:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow step a")
+        .last_insert_rowid();
+
+        let workflow_step_b_id = sqlx::query(
+            r#"INSERT INTO workflow_steps (
+             workflow_definition_id, step_order, step_type, parameters_json, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+        )
+        .bind(workflow_definition_id)
+        .bind(1_i64)
+        .bind("trigger_pipeline")
+        .bind(r#"{"project":"team/service-a","ref":"${target_branch}"}"#)
+        .bind("2026-04-13T08:00:00Z")
+        .bind("2026-04-13T08:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow step b")
+        .last_insert_rowid();
+
+        let project_group = create_project_group(&pool, "release-group".to_string())
+            .await
+            .expect("create project group");
+
+        let managed_project = create_managed_project(
+            &pool,
+            88001,
+            "service-a".to_string(),
+            "team/service-a".to_string(),
+            "D:/repos/service-a".to_string(),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("create managed project");
+
+        let workflow_run_id = sqlx::query(
+            r#"INSERT INTO workflow_runs (
+             workflow_definition_id, project_group_id, source_workflow_run_id, trigger_kind,
+             status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        )
+        .bind(workflow_definition_id)
+        .bind(project_group.id)
+        .bind("manual")
+        .bind("partial_failed")
+        .bind(r#"{"source_branch":"release","target_branch":"main"}"#)
+        .bind(2_i64)
+        .bind("2026-04-13T08:05:00Z")
+        .bind("2026-04-13T08:08:00Z")
+        .bind("2026-04-13T08:05:00Z")
+        .bind("2026-04-13T08:08:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow run")
+        .last_insert_rowid();
+
+        let workflow_run_project_id = sqlx::query(
+            r#"INSERT INTO workflow_run_projects (
+             workflow_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+             repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+        )
+        .bind(workflow_run_id)
+        .bind(managed_project.id)
+        .bind(88001_i64)
+        .bind("service-a")
+        .bind("team/service-a")
+        .bind("D:/repos/service-a")
+        .bind("failed")
+        .bind("trigger pipeline failed")
+        .bind("2026-04-13T08:05:00Z")
+        .bind("2026-04-13T08:08:00Z")
+        .bind("2026-04-13T08:05:00Z")
+        .bind("2026-04-13T08:08:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow run project")
+        .last_insert_rowid();
+
+        sqlx::query(
+            r#"INSERT INTO workflow_run_steps (
+             workflow_run_project_id, workflow_step_id, step_order, step_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+        )
+        .bind(workflow_run_project_id)
+        .bind(workflow_step_a_id)
+        .bind(0_i64)
+        .bind("check_pipeline")
+        .bind(r#"{"project":"team/service-a","ref":"release"}"#)
+        .bind("success")
+        .bind("2026-04-13T08:05:00Z")
+        .bind("2026-04-13T08:06:00Z")
+        .bind("pipeline ok")
+        .bind("")
+        .bind(0_i64)
+        .bind("check passed")
+        .bind("2026-04-13T08:05:00Z")
+        .bind("2026-04-13T08:06:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow run step a");
+
+        sqlx::query(
+            r#"INSERT INTO workflow_run_steps (
+             workflow_run_project_id, workflow_step_id, step_order, step_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+        )
+        .bind(workflow_run_project_id)
+        .bind(workflow_step_b_id)
+        .bind(1_i64)
+        .bind("trigger_pipeline")
+        .bind(r#"{"project":"team/service-a","ref":"main"}"#)
+        .bind("failed")
+        .bind("2026-04-13T08:06:00Z")
+        .bind("2026-04-13T08:08:00Z")
+        .bind("")
+        .bind("pipeline failed")
+        .bind(1_i64)
+        .bind("trigger failed")
+        .bind("2026-04-13T08:06:00Z")
+        .bind("2026-04-13T08:08:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow run step b");
+
+        let migrated = migrate_workflows_to_pipelines(&pool)
+            .await
+            .expect("migrate workflows to pipelines");
+
+        assert_eq!(migrated.definitions_migrated, 1);
+        assert_eq!(migrated.variables_migrated, 2);
+        assert_eq!(migrated.nodes_migrated, 2);
+        assert_eq!(migrated.runs_migrated, 1);
+        assert_eq!(migrated.run_projects_migrated, 1);
+        assert_eq!(migrated.run_nodes_migrated, 2);
+
+        assert_eq!(count_rows(&pool, "pipeline_definitions").await, 1);
+        assert_eq!(count_rows(&pool, "pipeline_variables").await, 2);
+        assert_eq!(count_rows(&pool, "pipeline_nodes").await, 2);
+        assert_eq!(count_rows(&pool, "pipeline_runs").await, 1);
+        assert_eq!(count_rows(&pool, "pipeline_run_projects").await, 1);
+        assert_eq!(count_rows(&pool, "pipeline_run_nodes").await, 2);
+    }
+
+    #[tokio::test]
+    async fn pipeline_migration_is_idempotent_on_repeated_runs() {
+        let pool = setup_test_pool().await;
+
+        let workflow_definition_id = sqlx::query(
+            r#"INSERT INTO workflow_definitions (
+             name, description, enabled, variables_schema, max_concurrency_default, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+        )
+        .bind("legacy-idempotent-workflow")
+        .bind("legacy idempotent workflow")
+        .bind(1_i64)
+        .bind(r#"{"release_window":{"label":"Release Window","type":"string","default":"nightly"}}"#)
+        .bind(2_i64)
+        .bind("2026-04-13T09:00:00Z")
+        .bind("2026-04-13T09:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow definition")
+        .last_insert_rowid();
+
+        let workflow_step_id = sqlx::query(
+            r#"INSERT INTO workflow_steps (
+             workflow_definition_id, step_order, step_type, parameters_json, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+        )
+        .bind(workflow_definition_id)
+        .bind(0_i64)
+        .bind("trigger_pipeline")
+        .bind(r#"{"project":"team/service-b","ref":"${release_window}"}"#)
+        .bind("2026-04-13T09:00:00Z")
+        .bind("2026-04-13T09:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow step")
+        .last_insert_rowid();
+
+        let project_group = create_project_group(&pool, "idempotent-group".to_string())
+            .await
+            .expect("create project group");
+
+        let workflow_run_id = sqlx::query(
+            r#"INSERT INTO workflow_runs (
+             workflow_definition_id, project_group_id, source_workflow_run_id, trigger_kind,
+             status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, NULL, NULL, ?7, ?8)"#,
+        )
+        .bind(workflow_definition_id)
+        .bind(project_group.id)
+        .bind("schedule")
+        .bind("pending")
+        .bind(r#"{"release_window":"nightly"}"#)
+        .bind(2_i64)
+        .bind("2026-04-13T09:05:00Z")
+        .bind("2026-04-13T09:05:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow run")
+        .last_insert_rowid();
+
+        let workflow_run_project_id = sqlx::query(
+            r#"INSERT INTO workflow_run_projects (
+             workflow_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+             repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9)"#,
+        )
+        .bind(workflow_run_id)
+        .bind(88002_i64)
+        .bind("service-b")
+        .bind("team/service-b")
+        .bind("D:/repos/service-b")
+        .bind("queued")
+        .bind("")
+        .bind("2026-04-13T09:05:00Z")
+        .bind("2026-04-13T09:05:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow run project")
+        .last_insert_rowid();
+
+        sqlx::query(
+            r#"INSERT INTO workflow_run_steps (
+             workflow_run_project_id, workflow_step_id, step_order, step_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, '', '', NULL, '', ?7, ?8)"#,
+        )
+        .bind(workflow_run_project_id)
+        .bind(workflow_step_id)
+        .bind(0_i64)
+        .bind("trigger_pipeline")
+        .bind(r#"{"project":"team/service-b","ref":"nightly"}"#)
+        .bind("pending")
+        .bind("2026-04-13T09:05:00Z")
+        .bind("2026-04-13T09:05:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert workflow run step");
+
+        migrate_workflows_to_pipelines(&pool)
+            .await
+            .expect("first migration run");
+
+        let counts_after_first = [
+            count_rows(&pool, "pipeline_definitions").await,
+            count_rows(&pool, "pipeline_variables").await,
+            count_rows(&pool, "pipeline_nodes").await,
+            count_rows(&pool, "pipeline_runs").await,
+            count_rows(&pool, "pipeline_run_projects").await,
+            count_rows(&pool, "pipeline_run_nodes").await,
+        ];
+
+        let migrated_again = migrate_workflows_to_pipelines(&pool)
+            .await
+            .expect("second migration run");
+
+        assert_eq!(migrated_again.definitions_migrated, 0);
+        assert_eq!(migrated_again.variables_migrated, 0);
+        assert_eq!(migrated_again.nodes_migrated, 0);
+        assert_eq!(migrated_again.runs_migrated, 0);
+        assert_eq!(migrated_again.run_projects_migrated, 0);
+        assert_eq!(migrated_again.run_nodes_migrated, 0);
+
+        let counts_after_second = [
+            count_rows(&pool, "pipeline_definitions").await,
+            count_rows(&pool, "pipeline_variables").await,
+            count_rows(&pool, "pipeline_nodes").await,
+            count_rows(&pool, "pipeline_runs").await,
+            count_rows(&pool, "pipeline_run_projects").await,
+            count_rows(&pool, "pipeline_run_nodes").await,
+        ];
+
+        assert_eq!(counts_after_second, counts_after_first);
     }
 
     #[tokio::test]
