@@ -274,6 +274,10 @@ pub struct PipelineRunNode {
     pub detail_zh: Option<String>,
     pub suggestion_zh: Option<String>,
     pub evidence: Option<String>,
+    pub wait_target: Option<String>,
+    pub last_remote_status: Option<String>,
+    pub remote_pipeline_id: Option<u64>,
+    pub wait_context: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,11 +1,10 @@
 use crate::models::{
     AppSettings, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
-    PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineNode, PipelineNodeInput,
-    PipelineMigrationSummary, PipelineRunDetail, PipelineRunListItem, PipelineRunNode,
-    PipelineRunProject, PipelineSchedule, PipelineScheduleInput, PipelineVariable,
-    PipelineVariableInput, ProjectGroup, WorkflowDefinitionDetail, WorkflowDefinitionListItem,
-    WorkflowRunDetail, WorkflowRunListItem, WorkflowRunProject, WorkflowRunStep, WorkflowStep,
-    WorkflowStepInput,
+    PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineMigrationSummary, PipelineNode,
+    PipelineNodeInput, PipelineRunDetail, PipelineRunListItem, PipelineRunNode, PipelineRunProject,
+    PipelineSchedule, PipelineScheduleInput, PipelineVariable, PipelineVariableInput, ProjectGroup,
+    WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem,
+    WorkflowRunProject, WorkflowRunStep, WorkflowStep, WorkflowStepInput,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -152,7 +151,9 @@ fn normalize_pipeline_variable_inputs(
 
 fn normalize_pipeline_node_inputs(nodes: Vec<PipelineNodeInput>) -> Result<Vec<PipelineNodeInput>> {
     if nodes.is_empty() {
-        return Err(anyhow!("pipeline definition must contain at least one node"));
+        return Err(anyhow!(
+            "pipeline definition must contain at least one node"
+        ));
     }
 
     let mut normalized = Vec::with_capacity(nodes.len());
@@ -196,8 +197,7 @@ fn normalize_pipeline_schedule_inputs(
             let trimmed = value.trim().to_string();
             (!trimmed.is_empty()).then_some(trimmed)
         });
-        let variables =
-            normalize_json_object(schedule.variables, "pipeline schedule variables")?;
+        let variables = normalize_json_object(schedule.variables, "pipeline schedule variables")?;
 
         normalized.push(PipelineScheduleInput {
             cron_expr,
@@ -263,7 +263,10 @@ fn legacy_variable_to_pipeline_input(key: &str, value: &Value) -> Result<Pipelin
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let options = normalize_json_array(
-        config.get("options").cloned().unwrap_or_else(|| Value::Array(vec![])),
+        config
+            .get("options")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(vec![])),
         "workflow variable options",
     )?;
 
@@ -393,6 +396,10 @@ struct PipelineRunNodeRow {
     detail_zh: Option<String>,
     suggestion_zh: Option<String>,
     evidence: Option<String>,
+    wait_target: Option<String>,
+    last_remote_status: Option<String>,
+    remote_pipeline_id: Option<i64>,
+    wait_context_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1147,8 +1154,8 @@ async fn insert_pipeline_nodes(
     now: &str,
 ) -> Result<()> {
     for (index, node) in nodes.iter().enumerate() {
-        let node_order =
-            i64::try_from(index).map_err(|_| anyhow!("pipeline node index out of range: {index}"))?;
+        let node_order = i64::try_from(index)
+            .map_err(|_| anyhow!("pipeline node index out of range: {index}"))?;
         let parameters_json = serialize_json(&node.parameters, "pipeline_nodes.parameters_json")?;
 
         sqlx::query(
@@ -1407,18 +1414,17 @@ pub async fn get_pipeline_definition_detail(
     pool: &SqlitePool,
     id: i64,
 ) -> Result<PipelineDefinitionDetail> {
-    let row =
-        sqlx::query_as::<_, (i64, String, String, i64, i64, Option<i64>, String, String)>(
-            r#"SELECT
+    let row = sqlx::query_as::<_, (i64, String, String, i64, i64, Option<i64>, String, String)>(
+        r#"SELECT
              id, name, description, enabled, max_concurrency_default, legacy_workflow_definition_id,
              created_at, updated_at
            FROM pipeline_definitions
            WHERE id = ?1"#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| anyhow!("pipeline definition not found: {id}"))?;
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow!("pipeline definition not found: {id}"))?;
 
     let variables = load_pipeline_variables(pool, id).await?;
     let nodes = load_pipeline_nodes(pool, id).await?;
@@ -1522,9 +1528,7 @@ pub async fn delete_pipeline_definition(pool: &SqlitePool, id: i64) -> Result<()
     Ok(())
 }
 
-pub async fn migrate_workflows_to_pipelines(
-    pool: &SqlitePool,
-) -> Result<PipelineMigrationSummary> {
+pub async fn migrate_workflows_to_pipelines(pool: &SqlitePool) -> Result<PipelineMigrationSummary> {
     let mut tx = pool.begin().await?;
     let mut summary = PipelineMigrationSummary::default();
 
@@ -1591,10 +1595,7 @@ pub async fn migrate_workflows_to_pipelines(
                 summary.variables_migrated += i64::try_from(normalized_variables.len())
                     .map_err(|_| anyhow!("pipeline variable count out of range"))?;
 
-                let workflow_steps = sqlx::query_as::<
-                    _,
-                    (i64, String, String, String, String),
-                >(
+                let workflow_steps = sqlx::query_as::<_, (i64, String, String, String, String)>(
                     r#"SELECT
                      step_order, step_type, parameters_json, created_at, updated_at
                    FROM workflow_steps
@@ -1825,7 +1826,7 @@ pub async fn migrate_workflows_to_pipelines(
                     .fetch_optional(&mut *tx)
                     .await?;
 
-                        let insert_result = sqlx::query(
+                    let insert_result = sqlx::query(
                             r#"INSERT OR IGNORE INTO pipeline_run_nodes (
                              pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
                          status, started_at, finished_at, stdout, stderr, exit_code, summary_message,
@@ -2077,7 +2078,11 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
          n.title_zh,
          n.detail_zh,
          n.suggestion_zh,
-         n.evidence
+         n.evidence,
+         n.wait_target,
+         n.last_remote_status,
+         n.remote_pipeline_id,
+         n.wait_context_json
        FROM pipeline_run_nodes n
        INNER JOIN pipeline_run_projects p ON p.id = n.pipeline_run_project_id
        WHERE p.pipeline_run_id = ?1
@@ -2110,6 +2115,16 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
             detail_zh: node_row.detail_zh,
             suggestion_zh: node_row.suggestion_zh,
             evidence: node_row.evidence,
+            wait_target: node_row.wait_target,
+            last_remote_status: node_row.last_remote_status,
+            remote_pipeline_id: option_i64_to_u64_checked(
+                node_row.remote_pipeline_id,
+                "pipeline_run_nodes.remote_pipeline_id",
+            )?,
+            wait_context: node_row
+                .wait_context_json
+                .map(|value| deserialize_json_object(&value, "pipeline run node wait context"))
+                .transpose()?,
         };
         nodes_by_project_id
             .entry(node_row.pipeline_run_project_id)
@@ -2119,7 +2134,9 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
 
     let mut projects = Vec::with_capacity(project_rows.len());
     for project_row in project_rows {
-        let nodes = nodes_by_project_id.remove(&project_row.id).unwrap_or_default();
+        let nodes = nodes_by_project_id
+            .remove(&project_row.id)
+            .unwrap_or_default();
         projects.push(PipelineRunProject {
             id: project_row.id,
             managed_project_id: project_row.managed_project_id,
@@ -3529,9 +3546,7 @@ mod tests {
     async fn pipeline_definition_run_list_returns_empty_on_fresh_database() {
         let pool = setup_test_pool().await;
 
-        let listed = list_pipeline_runs(&pool)
-            .await
-            .expect("list pipeline runs");
+        let listed = list_pipeline_runs(&pool).await.expect("list pipeline runs");
 
         assert!(listed.is_empty());
     }
@@ -3863,9 +3878,7 @@ mod tests {
         .await
         .expect("insert newer pipeline run project");
 
-        let listed = list_pipeline_runs(&pool)
-            .await
-            .expect("list pipeline runs");
+        let listed = list_pipeline_runs(&pool).await.expect("list pipeline runs");
 
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].id, newer_pipeline_run_id);
@@ -3878,7 +3891,10 @@ mod tests {
         );
 
         assert_eq!(listed[1].id, older_pipeline_run_id);
-        assert_eq!(listed[1].legacy_workflow_run_id, Some(legacy_workflow_run_id));
+        assert_eq!(
+            listed[1].legacy_workflow_run_id,
+            Some(legacy_workflow_run_id)
+        );
         assert_eq!(listed[1].projects_total, 4);
         assert_eq!(listed[1].projects_queued, 1);
         assert_eq!(listed[1].projects_success, 1);
@@ -4413,8 +4429,7 @@ mod tests {
         assert_eq!(pipeline_run_nodes.len(), 2);
         assert_eq!(pipeline_run_nodes[0].0, "check_pipeline");
         assert_eq!(
-            serde_json::from_str::<Value>(&pipeline_run_nodes[0].1)
-                .expect("parse run node params"),
+            serde_json::from_str::<Value>(&pipeline_run_nodes[0].1).expect("parse run node params"),
             serde_json::json!({"project":"team/service-a","ref":"release"})
         );
         assert_eq!(pipeline_run_nodes[0].2, "success");
@@ -4826,7 +4841,10 @@ mod tests {
         assert_eq!(detail.projects[0].project_name, "service-a");
         assert_eq!(detail.projects[0].status, "failed");
         assert_eq!(detail.projects[0].nodes.len(), 1);
-        assert_eq!(detail.projects[0].nodes[0].pipeline_node_id, Some(pipeline_node_id));
+        assert_eq!(
+            detail.projects[0].nodes[0].pipeline_node_id,
+            Some(pipeline_node_id)
+        );
         assert_eq!(detail.projects[0].nodes[0].node_type, "trigger_pipeline");
         assert_eq!(
             detail.projects[0].nodes[0].rendered_parameters,

@@ -196,6 +196,10 @@ export type PipelineRunNode = {
   detailZh?: string | null;
   suggestionZh?: string | null;
   evidence?: string | null;
+  waitTarget?: string | null;
+  lastRemoteStatus?: string | null;
+  remotePipelineId?: number | null;
+  waitContext?: unknown | null;
 };
 
 export type PipelineRunProject = {

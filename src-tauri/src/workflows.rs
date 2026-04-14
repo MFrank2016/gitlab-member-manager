@@ -1,4 +1,5 @@
 use crate::db::{self, PipelineExecutionNodeDef, WorkflowExecutionStepDef};
+use crate::gitlab::{self, GitLabConfig, GitLabPipeline};
 use crate::models::{ManagedProject, PipelineVariable};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -12,6 +13,8 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinSet;
 
 const GIT_COMMAND_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_PIPELINE_WAIT_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_PIPELINE_WAIT_POLL_INTERVAL_MS: u64 = 1_000;
 
 static REPO_LEASE_REGISTRY: OnceLock<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>> =
     OnceLock::new();
@@ -89,6 +92,14 @@ struct FailureEnvelope {
     detail_zh: String,
     suggestion_zh: String,
     evidence: String,
+}
+
+#[derive(Debug, Clone)]
+struct WaitMetadata {
+    wait_target: String,
+    last_remote_status: Option<String>,
+    remote_pipeline_id: Option<i64>,
+    wait_context: Value,
 }
 
 #[derive(Debug)]
@@ -249,6 +260,31 @@ fn read_optional_string_param(parameters: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn read_optional_u64_param(parameters: &Value, key: &str) -> Result<Option<u64>> {
+    let value = match parameters.get(key) {
+        None | Some(Value::Null) => return Ok(None),
+        Some(value) => value,
+    };
+
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| anyhow!("step parameter '{key}' must be a positive integer")),
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = trimmed
+                .parse::<u64>()
+                .map_err(|_| anyhow!("step parameter '{key}' must be a positive integer"))?;
+            Ok(Some(parsed))
+        }
+        _ => Err(anyhow!("step parameter '{key}' must be a positive integer")),
+    }
 }
 
 fn build_execution_step_operation(
@@ -1344,7 +1380,124 @@ fn classify_invalid_execution_parameters(error: &str) -> FailureEnvelope {
     )
 }
 
-fn classify_git_command_failure(node_type: &str, command_result: &CommandResult) -> FailureEnvelope {
+fn classify_missing_gitlab_config() -> FailureEnvelope {
+    build_failure_envelope(
+        "gitlab.config_missing",
+        "GitLab 配置缺失",
+        "当前流水线节点依赖 GitLab 配置，但系统中尚未保存可用的 GitLab 服务地址和访问令牌。"
+            .to_string(),
+        "请先在设置页完成 GitLab 配置后再重试。",
+        "gitlab config missing".to_string(),
+    )
+}
+
+fn classify_pipeline_not_found(
+    project: &str,
+    reference: &str,
+    sha: Option<&str>,
+) -> FailureEnvelope {
+    build_failure_envelope(
+        "gitlab.pipeline_not_found",
+        "未找到匹配的 GitLab 流水线",
+        format!(
+            "没有找到 project={project}, ref={reference}, sha={:?} 对应的 GitLab 流水线。",
+            sha
+        ),
+        "请检查项目路径、分支名或提交 SHA 后重试。",
+        format!("project={project}; ref={reference}; sha={:?}", sha),
+    )
+}
+
+fn classify_gitlab_pipeline_status_failure(
+    pipeline: &GitLabPipeline,
+    node_type: &str,
+) -> FailureEnvelope {
+    let (title_zh, detail_zh, suggestion_zh) = match node_type {
+        "check_pipeline" => (
+            "GitLab 流水线检查未通过",
+            format!(
+                "GitLab 流水线 #{} 执行失败，当前状态为 {}，未达到可继续执行的成功状态。",
+                pipeline.id, pipeline.status
+            ),
+            "请先检查该流水线失败原因并修复后再重试。",
+        ),
+        "wait_pipeline" => (
+            "等待的 GitLab 流水线未成功",
+            format!(
+                "等待中的 GitLab 流水线 #{} 最终执行失败，状态为 {}。",
+                pipeline.id, pipeline.status
+            ),
+            "请检查该流水线日志并修复失败原因后再重试。",
+        ),
+        _ => (
+            "GitLab 流水线状态异常",
+            format!(
+                "GitLab 流水线 #{}, 当前状态为 {}，无法继续当前节点。",
+                pipeline.id, pipeline.status
+            ),
+            "请检查流水线状态和配置后重试。",
+        ),
+    };
+    classify_gitlab_pipeline_failure(
+        title_zh,
+        detail_zh,
+        suggestion_zh,
+        Some(pipeline),
+        "gitlab.pipeline_failed",
+    )
+}
+
+fn read_pipeline_project_param(parameters: &Value, project: &ManagedProject) -> Result<String> {
+    Ok(read_optional_string_param(parameters, "project")
+        .unwrap_or_else(|| project.path_with_namespace.clone()))
+}
+
+fn read_pipeline_reference_param(parameters: &Value, project: &ManagedProject) -> String {
+    read_optional_string_param(parameters, "ref").unwrap_or_else(|| project.default_branch.clone())
+}
+
+fn read_pipeline_variables_param(parameters: &Value) -> Result<Vec<(String, String)>> {
+    let value = parameters
+        .get("variables")
+        .cloned()
+        .unwrap_or(Value::Object(Map::new()));
+    let variables = match value {
+        Value::Object(map) => map,
+        _ => return Err(anyhow!("step parameter 'variables' must be a JSON object")),
+    };
+
+    let mut rendered = Vec::with_capacity(variables.len());
+    for (key, value) in variables {
+        rendered.push((
+            key.clone(),
+            json_primitive_to_string(&value, &format!("variables.{key}"))?,
+        ));
+    }
+    Ok(rendered)
+}
+
+fn pipeline_evidence_text(pipeline: &GitLabPipeline) -> String {
+    format!(
+        "pipeline_id={}; status={}; ref={}; sha={}; web_url={}",
+        pipeline.id,
+        pipeline.status,
+        pipeline.ref_name,
+        pipeline.sha.clone().unwrap_or_default(),
+        pipeline.web_url.clone().unwrap_or_default()
+    )
+}
+
+async fn load_runtime_gitlab_config(pool: &SqlitePool) -> Result<Option<GitLabConfig>> {
+    Ok(db::get_gitlab_config(pool).await?.map(|cfg| GitLabConfig {
+        base_url: cfg.base_url,
+        token: cfg.token,
+    }))
+}
+
+fn classify_git_command_failure(
+    node_type: &str,
+    command_result: &CommandResult,
+) -> FailureEnvelope {
     let stdout = command_result.stdout.trim();
     let stderr = command_result.stderr.trim();
     let evidence = format!(
@@ -1358,6 +1511,138 @@ fn classify_git_command_failure(node_type: &str, command_result: &CommandResult)
         "请根据错误输出修复仓库状态或远端问题后重试。",
         evidence,
     )
+}
+
+fn build_wait_target(project: &str, reference: &str, sha: Option<&str>) -> String {
+    match sha {
+        Some(sha) if !sha.trim().is_empty() => format!("{project}@{reference}#{sha}"),
+        _ => format!("{project}@{reference}"),
+    }
+}
+
+fn gitlab_pipeline_id_to_i64(pipeline_id: u64) -> Result<i64> {
+    i64::try_from(pipeline_id)
+        .map_err(|_| anyhow!("gitlab pipeline id out of range: {pipeline_id}"))
+}
+
+fn build_wait_metadata(
+    project: &str,
+    reference: &str,
+    sha: Option<&str>,
+    last_remote_status: Option<&str>,
+    remote_pipeline_id: Option<i64>,
+    elapsed_ms: u128,
+    next_poll_in_ms: u64,
+    timeout_ms: u128,
+    web_url: Option<&str>,
+) -> WaitMetadata {
+    let mut wait_context = Map::new();
+    wait_context.insert(
+        "elapsedMs".to_string(),
+        Value::String(elapsed_ms.to_string()),
+    );
+    wait_context.insert(
+        "nextPollInMs".to_string(),
+        Value::String(next_poll_in_ms.to_string()),
+    );
+    wait_context.insert(
+        "timeoutMs".to_string(),
+        Value::String(timeout_ms.to_string()),
+    );
+    if let Some(web_url) = web_url {
+        wait_context.insert("webUrl".to_string(), Value::String(web_url.to_string()));
+    }
+
+    WaitMetadata {
+        wait_target: build_wait_target(project, reference, sha),
+        last_remote_status: last_remote_status.map(ToString::to_string),
+        remote_pipeline_id,
+        wait_context: Value::Object(wait_context),
+    }
+}
+
+fn update_wait_metadata_with_pipeline(
+    project: &str,
+    reference: &str,
+    sha: Option<&str>,
+    pipeline: Option<&GitLabPipeline>,
+    elapsed_ms: u128,
+    next_poll_in_ms: u64,
+    timeout_ms: u128,
+) -> Result<WaitMetadata> {
+    let remote_pipeline_id = pipeline
+        .map(|value| gitlab_pipeline_id_to_i64(value.id))
+        .transpose()?;
+    Ok(build_wait_metadata(
+        project,
+        reference,
+        sha,
+        pipeline.map(|value| value.status.as_str()),
+        remote_pipeline_id,
+        elapsed_ms,
+        next_poll_in_ms,
+        timeout_ms,
+        pipeline.and_then(|value| value.web_url.as_deref()),
+    ))
+}
+
+fn classify_gitlab_error(error: &str) -> FailureEnvelope {
+    if error.contains("401") || error.contains("403") {
+        return build_failure_envelope(
+            "gitlab.auth_failed",
+            "GitLab 认证失败",
+            "访问 GitLab 接口失败，凭证可能无效或已过期。".to_string(),
+            "请检查 GitLab Token 和服务地址后重试。",
+            error.to_string(),
+        );
+    }
+    if error.contains("404") {
+        return build_failure_envelope(
+            "gitlab.project_not_found",
+            "GitLab 项目不存在",
+            "GitLab 项目不存在或当前凭证无权访问该项目。".to_string(),
+            "请检查项目路径、项目 ID 或访问权限后重试。",
+            error.to_string(),
+        );
+    }
+    if error.contains("timed out") {
+        return build_failure_envelope(
+            "gitlab.pipeline_timeout",
+            "等待远端流水线超时",
+            "在限定时间内没有等到远端流水线进入终态。".to_string(),
+            "请检查远端流水线状态，必要时延长超时时间后重试。",
+            error.to_string(),
+        );
+    }
+
+    build_failure_envelope(
+        "gitlab.api_failed",
+        "GitLab 接口调用失败",
+        format!("调用 GitLab 接口失败：{error}"),
+        "请检查网络、权限和参数配置后重试。",
+        error.to_string(),
+    )
+}
+
+fn classify_gitlab_pipeline_failure(
+    title_zh: &str,
+    detail_zh: String,
+    suggestion_zh: &str,
+    pipeline: Option<&GitLabPipeline>,
+    error_code: &str,
+) -> FailureEnvelope {
+    let evidence = match pipeline {
+        Some(pipeline) => format!(
+            "pipeline_id={}; status={}; ref={}; sha={}; web_url={}",
+            pipeline.id,
+            pipeline.status,
+            pipeline.ref_name,
+            pipeline.sha.clone().unwrap_or_default(),
+            pipeline.web_url.clone().unwrap_or_default()
+        ),
+        None => "pipeline not found".to_string(),
+    };
+    build_failure_envelope(error_code, title_zh, detail_zh, suggestion_zh, evidence)
 }
 
 async fn mark_unscheduled_plans_cancelled(
@@ -2065,6 +2350,38 @@ async fn load_pipeline_node_status(pool: &SqlitePool, run_node_id: i64) -> Resul
         .context("load pipeline node status")
 }
 
+async fn update_pipeline_node_wait_state(
+    pool: &SqlitePool,
+    run_node_id: i64,
+    summary_message: &str,
+    wait_metadata: &WaitMetadata,
+) -> Result<()> {
+    let now = now_rfc3339();
+    let wait_context_json =
+        serde_json::to_string(&wait_metadata.wait_context).context("serialize wait context")?;
+    sqlx::query(
+        r#"UPDATE pipeline_run_nodes
+       SET status = 'waiting',
+           summary_message = ?1,
+           wait_target = ?2,
+           last_remote_status = ?3,
+           remote_pipeline_id = ?4,
+           wait_context_json = ?5,
+           updated_at = ?6
+       WHERE id = ?7"#,
+    )
+    .bind(summary_message)
+    .bind(&wait_metadata.wait_target)
+    .bind(wait_metadata.last_remote_status.as_deref())
+    .bind(wait_metadata.remote_pipeline_id)
+    .bind(wait_context_json)
+    .bind(&now)
+    .bind(run_node_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn mark_remaining_pipeline_nodes_skipped(
     pool: &SqlitePool,
     nodes: &[PipelineProjectExecutionNode],
@@ -2186,6 +2503,7 @@ async fn execute_pipeline_project_plan(
     pool: &SqlitePool,
     pipeline_run_id: i64,
     plan: &PipelineProjectExecutionPlan,
+    gitlab_cfg: Option<&GitLabConfig>,
 ) -> Result<ProjectOutcome> {
     let repo_lease = get_repo_lease(&plan.project.repo_path).await;
     let _repo_guard = repo_lease.lock().await;
@@ -2293,6 +2611,394 @@ async fn execute_pipeline_project_plan(
             step_type: node.node_type.clone(),
             rendered_parameters: node.rendered_parameters.clone(),
         };
+
+        if matches!(
+            node.node_type.as_str(),
+            "check_pipeline" | "wait_pipeline" | "trigger_pipeline"
+        ) {
+            let cfg = match gitlab_cfg {
+                Some(cfg) => cfg,
+                None => {
+                    let envelope = classify_missing_gitlab_config();
+                    mark_pipeline_node_finished(
+                        pool,
+                        node.run_node_id,
+                        "failed",
+                        "",
+                        "",
+                        None,
+                        &envelope.title_zh,
+                        Some(&envelope),
+                    )
+                    .await?;
+                    mark_remaining_pipeline_nodes_skipped(
+                        pool,
+                        &plan.nodes,
+                        node_index + 1,
+                        "skipped after previous node failure",
+                    )
+                    .await?;
+                    mark_pipeline_project_finished(
+                        pool,
+                        plan.run_project_id,
+                        "failed_precheck",
+                        &envelope.title_zh,
+                    )
+                    .await?;
+                    return Ok(ProjectOutcome::FailedPrecheck);
+                }
+            };
+
+            let project_path =
+                match read_pipeline_project_param(&node.rendered_parameters, &plan.project) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let envelope = classify_invalid_execution_parameters(&error.to_string());
+                        mark_pipeline_node_finished(
+                            pool,
+                            node.run_node_id,
+                            "failed",
+                            "",
+                            "",
+                            None,
+                            &envelope.title_zh,
+                            Some(&envelope),
+                        )
+                        .await?;
+                        mark_remaining_pipeline_nodes_skipped(
+                            pool,
+                            &plan.nodes,
+                            node_index + 1,
+                            "skipped after previous node failure",
+                        )
+                        .await?;
+                        mark_pipeline_project_finished(
+                            pool,
+                            plan.run_project_id,
+                            "failed_precheck",
+                            &envelope.title_zh,
+                        )
+                        .await?;
+                        return Ok(ProjectOutcome::FailedPrecheck);
+                    }
+                };
+            let reference = read_pipeline_reference_param(&node.rendered_parameters, &plan.project);
+            let sha = match read_optional_string_param(&node.rendered_parameters, "sha") {
+                Some(value) if !value.is_empty() => Some(value),
+                _ => None,
+            };
+
+            let gitlab_result: std::result::Result<(String, String), FailureEnvelope> = match node
+                .node_type
+                .as_str()
+            {
+                "check_pipeline" => {
+                    match gitlab::check_pipeline(cfg, &project_path, &reference, sha.as_deref())
+                        .await
+                    {
+                        Ok(Some(pipeline)) if pipeline.status == "success" => Ok((
+                            format!("GitLab 流水线检查通过：#{}", pipeline.id),
+                            pipeline_evidence_text(&pipeline),
+                        )),
+                        Ok(Some(pipeline)) => Err(classify_gitlab_pipeline_status_failure(
+                            &pipeline,
+                            "check_pipeline",
+                        )),
+                        Ok(None) => Err(classify_pipeline_not_found(
+                            &project_path,
+                            &reference,
+                            sha.as_deref(),
+                        )),
+                        Err(error) => Err(classify_gitlab_error(&error.to_string())),
+                    }
+                }
+                "trigger_pipeline" => {
+                    let variables = match read_pipeline_variables_param(&node.rendered_parameters) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            let envelope =
+                                classify_invalid_execution_parameters(&error.to_string());
+                            mark_pipeline_node_finished(
+                                pool,
+                                node.run_node_id,
+                                "failed",
+                                "",
+                                "",
+                                None,
+                                &envelope.title_zh,
+                                Some(&envelope),
+                            )
+                            .await?;
+                            mark_remaining_pipeline_nodes_skipped(
+                                pool,
+                                &plan.nodes,
+                                node_index + 1,
+                                "skipped after previous node failure",
+                            )
+                            .await?;
+                            mark_pipeline_project_finished(
+                                pool,
+                                plan.run_project_id,
+                                "failed_precheck",
+                                &envelope.title_zh,
+                            )
+                            .await?;
+                            return Ok(ProjectOutcome::FailedPrecheck);
+                        }
+                    };
+
+                    match gitlab::trigger_pipeline(cfg, &project_path, &reference, &variables).await
+                    {
+                        Ok(pipeline) => Ok((
+                            format!("已触发下游流水线 #{}", pipeline.id),
+                            pipeline_evidence_text(&pipeline),
+                        )),
+                        Err(error) => Err(classify_gitlab_error(&error.to_string())),
+                    }
+                }
+                "wait_pipeline" => {
+                    let timeout_ms =
+                        match read_optional_u64_param(&node.rendered_parameters, "timeout_ms") {
+                            Ok(Some(value)) => value,
+                            Ok(None) => DEFAULT_PIPELINE_WAIT_TIMEOUT_MS,
+                            Err(error) => {
+                                let envelope =
+                                    classify_invalid_execution_parameters(&error.to_string());
+                                mark_pipeline_node_finished(
+                                    pool,
+                                    node.run_node_id,
+                                    "failed",
+                                    "",
+                                    "",
+                                    None,
+                                    &envelope.title_zh,
+                                    Some(&envelope),
+                                )
+                                .await?;
+                                mark_remaining_pipeline_nodes_skipped(
+                                    pool,
+                                    &plan.nodes,
+                                    node_index + 1,
+                                    "skipped after previous node failure",
+                                )
+                                .await?;
+                                mark_pipeline_project_finished(
+                                    pool,
+                                    plan.run_project_id,
+                                    "failed_precheck",
+                                    &envelope.title_zh,
+                                )
+                                .await?;
+                                return Ok(ProjectOutcome::FailedPrecheck);
+                            }
+                        };
+                    let poll_interval_ms = match read_optional_u64_param(
+                        &node.rendered_parameters,
+                        "poll_interval_ms",
+                    ) {
+                        Ok(Some(value)) if value > 0 => value,
+                        Ok(Some(_)) => DEFAULT_PIPELINE_WAIT_POLL_INTERVAL_MS,
+                        Ok(None) => DEFAULT_PIPELINE_WAIT_POLL_INTERVAL_MS,
+                        Err(error) => {
+                            let envelope =
+                                classify_invalid_execution_parameters(&error.to_string());
+                            mark_pipeline_node_finished(
+                                pool,
+                                node.run_node_id,
+                                "failed",
+                                "",
+                                "",
+                                None,
+                                &envelope.title_zh,
+                                Some(&envelope),
+                            )
+                            .await?;
+                            mark_remaining_pipeline_nodes_skipped(
+                                pool,
+                                &plan.nodes,
+                                node_index + 1,
+                                "skipped after previous node failure",
+                            )
+                            .await?;
+                            mark_pipeline_project_finished(
+                                pool,
+                                plan.run_project_id,
+                                "failed_precheck",
+                                &envelope.title_zh,
+                            )
+                            .await?;
+                            return Ok(ProjectOutcome::FailedPrecheck);
+                        }
+                    };
+
+                    let wait_started_at = Instant::now();
+                    loop {
+                        let pipeline = match gitlab::check_pipeline(
+                            cfg,
+                            &project_path,
+                            &reference,
+                            sha.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(value) => value,
+                            Err(error) => {
+                                break Err(classify_gitlab_error(&error.to_string()));
+                            }
+                        };
+
+                        let elapsed_ms = wait_started_at.elapsed().as_millis();
+                        let wait_metadata = match update_wait_metadata_with_pipeline(
+                            &project_path,
+                            &reference,
+                            sha.as_deref(),
+                            pipeline.as_ref(),
+                            elapsed_ms,
+                            poll_interval_ms,
+                            u128::from(timeout_ms),
+                        ) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                let envelope =
+                                    classify_invalid_execution_parameters(&error.to_string());
+                                break Err(envelope);
+                            }
+                        };
+
+                        match pipeline {
+                            Some(pipeline) if pipeline.status == "success" => {
+                                if let Err(error) = update_pipeline_node_wait_state(
+                                    pool,
+                                    node.run_node_id,
+                                    &format!("已等待到 GitLab 流水线 #{} 成功", pipeline.id),
+                                    &wait_metadata,
+                                )
+                                .await
+                                {
+                                    return Err(error);
+                                }
+                                break Ok((
+                                    format!("等待 GitLab 流水线完成：#{}", pipeline.id),
+                                    pipeline_evidence_text(&pipeline),
+                                ));
+                            }
+                            Some(pipeline)
+                                if matches!(
+                                    pipeline.status.as_str(),
+                                    "failed" | "canceled" | "cancelled" | "skipped"
+                                ) =>
+                            {
+                                if let Err(error) = update_pipeline_node_wait_state(
+                                    pool,
+                                    node.run_node_id,
+                                    &format!(
+                                        "等待中的 GitLab 流水线 #{} 已结束，状态为 {}",
+                                        pipeline.id, pipeline.status
+                                    ),
+                                    &wait_metadata,
+                                )
+                                .await
+                                {
+                                    return Err(error);
+                                }
+                                break Err(classify_gitlab_pipeline_status_failure(
+                                    &pipeline,
+                                    "wait_pipeline",
+                                ));
+                            }
+                            Some(pipeline) => {
+                                let summary_message = match pipeline {
+                                    current => format!(
+                                        "等待 GitLab 流水线 #{}，当前状态为 {}",
+                                        current.id, current.status
+                                    ),
+                                };
+                                if let Err(error) = update_pipeline_node_wait_state(
+                                    pool,
+                                    node.run_node_id,
+                                    &summary_message,
+                                    &wait_metadata,
+                                )
+                                .await
+                                {
+                                    return Err(error);
+                                }
+                            }
+                            None => {
+                                let summary_message = "等待匹配的 GitLab 流水线出现".to_string();
+                                if let Err(error) = update_pipeline_node_wait_state(
+                                    pool,
+                                    node.run_node_id,
+                                    &summary_message,
+                                    &wait_metadata,
+                                )
+                                .await
+                                {
+                                    return Err(error);
+                                }
+                            }
+                        }
+
+                        if elapsed_ms >= u128::from(timeout_ms) {
+                            break Err(classify_gitlab_error(&format!(
+                                "GitLab pipeline wait timed out for project={}, ref={}, sha={:?}",
+                                &project_path,
+                                &reference,
+                                sha.as_deref()
+                            )));
+                        }
+
+                        tokio::time::sleep(StdDuration::from_millis(poll_interval_ms)).await;
+                    }
+                }
+                _ => unreachable!(),
+            };
+
+            match gitlab_result {
+                Ok((summary_message, stdout)) => {
+                    mark_pipeline_node_finished(
+                        pool,
+                        node.run_node_id,
+                        "success",
+                        &stdout,
+                        "",
+                        Some(0),
+                        &summary_message,
+                        None,
+                    )
+                    .await?;
+                    continue;
+                }
+                Err(envelope) => {
+                    mark_pipeline_node_finished(
+                        pool,
+                        node.run_node_id,
+                        "failed",
+                        "",
+                        "",
+                        None,
+                        &envelope.title_zh,
+                        Some(&envelope),
+                    )
+                    .await?;
+                    mark_remaining_pipeline_nodes_skipped(
+                        pool,
+                        &plan.nodes,
+                        node_index + 1,
+                        "skipped after previous node failure",
+                    )
+                    .await?;
+                    mark_pipeline_project_finished(
+                        pool,
+                        plan.run_project_id,
+                        "failed",
+                        &envelope.title_zh,
+                    )
+                    .await?;
+                    return Ok(ProjectOutcome::Failed);
+                }
+            }
+        }
 
         let operation = match build_execution_step_operation(&execution_step, &plan.project) {
             Ok(operation) => operation,
@@ -2487,6 +3193,7 @@ async fn run_pipeline_in_background(
     pipeline_run_id: i64,
     plans: Vec<PipelineProjectExecutionPlan>,
     max_concurrency: i64,
+    gitlab_cfg: Option<GitLabConfig>,
 ) -> Result<()> {
     if plans.is_empty() {
         mark_pipeline_run_finished(&pool, pipeline_run_id, "completed").await?;
@@ -2546,8 +3253,16 @@ async fn run_pipeline_in_background(
             next_plan_index += 1;
 
             let pool_cloned = pool.clone();
+            let gitlab_cfg_cloned = gitlab_cfg.clone();
             join_set.spawn(async move {
-                match execute_pipeline_project_plan(&pool_cloned, pipeline_run_id, &plan).await {
+                match execute_pipeline_project_plan(
+                    &pool_cloned,
+                    pipeline_run_id,
+                    &plan,
+                    gitlab_cfg_cloned.as_ref(),
+                )
+                .await
+                {
                     Ok(outcome) => outcome,
                     Err(error) => {
                         let message = format!("executor internal error: {error}");
@@ -2658,6 +3373,7 @@ async fn start_pipeline_run_with_projects(
     projects: Vec<ManagedProject>,
 ) -> Result<i64> {
     let pipeline = db::load_pipeline_definition_for_execution(pool, pipeline_definition_id).await?;
+    let gitlab_cfg = load_runtime_gitlab_config(pool).await?;
     let run_parameters = normalize_pipeline_run_parameters(&pipeline.variables, run_parameters)?;
 
     let max_concurrency = match max_concurrency_override {
@@ -2699,12 +3415,13 @@ async fn start_pipeline_run_with_projects(
             pipeline_run_id,
             plans,
             max_concurrency,
+            gitlab_cfg,
         )
         .await
         {
             tracing::error!(pipeline_run_id = pipeline_run_id, error = %error, "pipeline background execution failed");
-            let _ = mark_pipeline_run_finished(&pool_for_task, pipeline_run_id, "partial_failed")
-                .await;
+            let _ =
+                mark_pipeline_run_finished(&pool_for_task, pipeline_run_id, "partial_failed").await;
         }
     });
 
@@ -2751,10 +3468,11 @@ pub async fn cancel_pipeline_run(pool: &SqlitePool, pipeline_run_id: i64) -> Res
         return Ok(());
     }
 
-    let status = sqlx::query_scalar::<_, String>(r#"SELECT status FROM pipeline_runs WHERE id = ?1"#)
-        .bind(pipeline_run_id)
-        .fetch_optional(pool)
-        .await?;
+    let status =
+        sqlx::query_scalar::<_, String>(r#"SELECT status FROM pipeline_runs WHERE id = ?1"#)
+            .bind(pipeline_run_id)
+            .fetch_optional(pool)
+            .await?;
 
     match status.as_deref() {
         Some("cancelling") | Some("cancelled") => Ok(()),
@@ -2813,7 +3531,10 @@ pub async fn retry_pipeline_run(
     let mut projects = db::list_project_group_projects(pool, source_run.project_group_id).await?;
     projects.retain(|project| project.enabled);
 
-    let enabled_project_ids = projects.iter().map(|project| project.id).collect::<HashSet<_>>();
+    let enabled_project_ids = projects
+        .iter()
+        .map(|project| project.id)
+        .collect::<HashSet<_>>();
     let disabled_failed_ids = retry_project_ids
         .iter()
         .copied()
@@ -2850,10 +3571,10 @@ pub async fn retry_pipeline_run(
 mod tests {
     use super::{
         build_execution_step_operation, cancel_pipeline_run, cancel_workflow_run,
-        derive_run_final_status, derive_run_final_status_from_project_counts,
-        execute_pipeline_run, execute_project_plan, execute_workflow_run,
-        mark_project_internal_failure, normalize_run_parameters, now_rfc3339, retry_pipeline_run,
-        reconcile_stale_workflow_runs, render_execution_steps, retry_failed_workflow_run,
+        derive_run_final_status, derive_run_final_status_from_project_counts, execute_pipeline_run,
+        execute_project_plan, execute_workflow_run, mark_project_internal_failure,
+        normalize_run_parameters, now_rfc3339, reconcile_stale_workflow_runs,
+        render_execution_steps, retry_failed_workflow_run, retry_pipeline_run,
         run_execution_step_prechecks, run_repository_precheck, ProjectExecutionPlan,
         ProjectExecutionStep, ProjectOutcome, StepOperation,
     };
@@ -2861,6 +3582,7 @@ mod tests {
     use crate::models::{ManagedProject, PipelineNodeInput, WorkflowStepInput};
     use serde_json::{Map, Value};
     use sqlx::{migrate::Migrator, sqlite::SqlitePoolOptions, SqlitePool};
+    use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::str::FromStr;
@@ -2868,6 +3590,9 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex as TokioMutex;
     use tokio::time::{sleep, Duration};
 
     static MIGRATOR: Migrator = sqlx::migrate!();
@@ -2977,6 +3702,104 @@ mod tests {
             }
             sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestHttpResponse {
+        status_line: &'static str,
+        body: String,
+        extra_headers: Vec<(&'static str, String)>,
+        delay_ms: u64,
+    }
+
+    async fn spawn_gitlab_test_server(responses: Vec<TestHttpResponse>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gitlab test server");
+        let addr = listener.local_addr().expect("read local addr");
+        let response_queue = Arc::new(TokioMutex::new(VecDeque::from(responses)));
+        let responses_for_task = Arc::clone(&response_queue);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(value) => value,
+                    Err(_) => break,
+                };
+
+                let mut raw = Vec::new();
+                let mut header_end = None;
+                let mut content_length = 0usize;
+                loop {
+                    let mut buffer = vec![0_u8; 2048];
+                    let bytes_read = match stream.read(&mut buffer).await {
+                        Ok(value) => value,
+                        Err(_) => return,
+                    };
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buffer[..bytes_read]);
+
+                    if header_end.is_none() {
+                        let header_probe = String::from_utf8_lossy(&raw).to_string();
+                        if let Some(position) = header_probe.find("\r\n\r\n") {
+                            header_end = Some(position);
+                            let header_text = &header_probe[..position];
+                            content_length = header_text
+                                .lines()
+                                .find_map(|line| {
+                                    let lower = line.to_ascii_lowercase();
+                                    lower
+                                        .strip_prefix("content-length:")
+                                        .and_then(|value| value.trim().parse::<usize>().ok())
+                                })
+                                .unwrap_or(0);
+                        }
+                    }
+
+                    if let Some(position) = header_end {
+                        let expected_len = position + 4 + content_length;
+                        if raw.len() >= expected_len {
+                            break;
+                        }
+                    }
+                }
+
+                let response =
+                    responses_for_task
+                        .lock()
+                        .await
+                        .pop_front()
+                        .unwrap_or(TestHttpResponse {
+                            status_line: "500 Internal Server Error",
+                            body: "{}".to_string(),
+                            extra_headers: vec![],
+                            delay_ms: 0,
+                        });
+
+                if response.delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(response.delay_ms)).await;
+                }
+
+                let mut response_text = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+                    response.status_line,
+                    response.body.len()
+                );
+                for (key, value) in response.extra_headers {
+                    response_text.push_str(&format!("{key}: {value}\r\n"));
+                }
+                response_text.push_str("\r\n");
+                response_text.push_str(&response.body);
+
+                if stream.write_all(response_text.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        format!("http://{}", addr)
     }
 
     #[tokio::test]
@@ -4046,9 +4869,10 @@ mod tests {
         .await
         .expect("create pipeline definition");
 
-        let run_id = execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
-            .await
-            .expect("execute pipeline run");
+        let run_id =
+            execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+                .await
+                .expect("execute pipeline run");
 
         let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
         assert_eq!(detail.status, "partial_failed");
@@ -4136,22 +4960,19 @@ mod tests {
         .await
         .expect("create pipeline definition");
 
-        let source_run_id = execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
-            .await
-            .expect("execute source pipeline run");
+        let source_run_id =
+            execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+                .await
+                .expect("execute source pipeline run");
 
         let source_detail =
             wait_for_terminal_pipeline_run_status(&pool, source_run_id, 15_000).await;
         assert_eq!(source_detail.status, "partial_failed");
 
-        let retry_run_id = retry_pipeline_run(
-            &pool,
-            source_run_id,
-            Some(vec![dirty_project.id]),
-            Some(1),
-        )
-        .await
-        .expect("retry failed pipeline run");
+        let retry_run_id =
+            retry_pipeline_run(&pool, source_run_id, Some(vec![dirty_project.id]), Some(1))
+                .await
+                .expect("retry failed pipeline run");
 
         let retry_seeded = db::get_pipeline_run_detail(&pool, retry_run_id)
             .await
@@ -4212,12 +5033,231 @@ mod tests {
             .await
             .expect("cancel pipeline run");
 
-        let status = sqlx::query_scalar::<_, String>(r#"SELECT status FROM pipeline_runs WHERE id = ?1"#)
-            .bind(run_id)
-            .fetch_one(&pool)
-            .await
-            .expect("reload pipeline run status");
+        let status =
+            sqlx::query_scalar::<_, String>(r#"SELECT status FROM pipeline_runs WHERE id = ?1"#)
+                .bind(run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("reload pipeline run status");
         assert_eq!(status, "cancelling");
+    }
+
+    #[tokio::test]
+    async fn pipeline_runtime_gitlab_nodes_execute_and_persist_wait_metadata() {
+        let pool = setup_test_pool().await;
+        let repo = setup_git_repo();
+        let base_url = spawn_gitlab_test_server(vec![
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":501,"status":"success","ref":"main","sha":"sha-check","web_url":"https://gitlab.example/p/501"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "201 Created",
+                body: r#"{"id":777,"status":"pending","ref":"main","sha":"sha-trigger","web_url":"https://gitlab.example/p/777"}"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":777,"status":"running","ref":"main","sha":"sha-trigger","web_url":"https://gitlab.example/p/777"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":777,"status":"success","ref":"main","sha":"sha-trigger","web_url":"https://gitlab.example/p/777"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+        ])
+        .await;
+
+        db::set_gitlab_config(&pool, &base_url, "test-token", None, None, None)
+            .await
+            .expect("save gitlab config");
+
+        let managed = db::create_managed_project(
+            &pool,
+            76005,
+            "pipeline-project-gitlab".to_string(),
+            "team/pipeline-project-gitlab".to_string(),
+            repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+        let group = db::create_project_group(&pool, "pipeline-group-gitlab".to_string())
+            .await
+            .expect("create project group");
+        db::add_projects_to_group(&pool, group.id, vec![managed.id])
+            .await
+            .expect("add project to group");
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "gitlab-runtime-pipeline".to_string(),
+            "test gitlab runtime nodes".to_string(),
+            true,
+            1,
+            vec![],
+            vec![
+                PipelineNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/pipeline-project-gitlab",
+                        "ref": "main"
+                    }),
+                },
+                PipelineNodeInput {
+                    node_type: "trigger_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/pipeline-project-gitlab",
+                        "ref": "main",
+                        "variables": {
+                            "DEPLOY_ENV": "prod"
+                        }
+                    }),
+                },
+                PipelineNodeInput {
+                    node_type: "wait_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/pipeline-project-gitlab",
+                        "ref": "main",
+                        "poll_interval_ms": 10,
+                        "timeout_ms": 500
+                    }),
+                },
+            ],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let run_id =
+            execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+                .await
+                .expect("execute pipeline run");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.status, "completed");
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "success");
+        assert_eq!(detail.projects[0].nodes.len(), 3);
+        assert_eq!(detail.projects[0].nodes[0].node_type, "check_pipeline");
+        assert_eq!(detail.projects[0].nodes[0].status, "success");
+        assert_eq!(detail.projects[0].nodes[1].node_type, "trigger_pipeline");
+        assert_eq!(detail.projects[0].nodes[1].status, "success");
+        assert_eq!(detail.projects[0].nodes[2].node_type, "wait_pipeline");
+        assert_eq!(detail.projects[0].nodes[2].status, "success");
+        assert_eq!(
+            detail.projects[0].nodes[2].wait_target.as_deref(),
+            Some("team/pipeline-project-gitlab@main")
+        );
+        assert_eq!(
+            detail.projects[0].nodes[2].last_remote_status.as_deref(),
+            Some("success")
+        );
+        assert_eq!(detail.projects[0].nodes[2].remote_pipeline_id, Some(777));
+        assert_eq!(
+            detail.projects[0].nodes[2]
+                .wait_context
+                .as_ref()
+                .and_then(|value| value.get("webUrl"))
+                .and_then(Value::as_str),
+            Some("https://gitlab.example/p/777")
+        );
+        assert!(detail.projects[0].nodes[1].summary_message.contains("#777"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_runtime_gitlab_failed_check_pipeline_persists_failure_envelope() {
+        let pool = setup_test_pool().await;
+        let repo = setup_git_repo();
+        let base_url = spawn_gitlab_test_server(vec![TestHttpResponse {
+            status_line: "200 OK",
+            body: r#"[{"id":601,"status":"failed","ref":"main","sha":"sha-failed","web_url":"https://gitlab.example/p/601"}]"#.to_string(),
+            extra_headers: vec![],
+            delay_ms: 0,
+        }])
+        .await;
+
+        db::set_gitlab_config(&pool, &base_url, "test-token", None, None, None)
+            .await
+            .expect("save gitlab config");
+
+        let managed = db::create_managed_project(
+            &pool,
+            76006,
+            "pipeline-project-gitlab-failed".to_string(),
+            "team/pipeline-project-gitlab-failed".to_string(),
+            repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+        let group = db::create_project_group(&pool, "pipeline-group-gitlab-failed".to_string())
+            .await
+            .expect("create project group");
+        db::add_projects_to_group(&pool, group.id, vec![managed.id])
+            .await
+            .expect("add project to group");
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "gitlab-failed-check-pipeline".to_string(),
+            "test failed check pipeline envelope".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "check_pipeline".to_string(),
+                parameters: serde_json::json!({
+                    "project": "team/pipeline-project-gitlab-failed",
+                    "ref": "main"
+                }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let run_id =
+            execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+                .await
+                .expect("execute pipeline run");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.status, "partial_failed");
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "failed");
+        assert_eq!(detail.projects[0].nodes.len(), 1);
+        assert_eq!(detail.projects[0].nodes[0].node_type, "check_pipeline");
+        assert_eq!(detail.projects[0].nodes[0].status, "failed");
+        assert_eq!(
+            detail.projects[0].nodes[0].error_code.as_deref(),
+            Some("gitlab.pipeline_failed")
+        );
+        assert!(detail.projects[0].nodes[0]
+            .title_zh
+            .as_deref()
+            .unwrap_or_default()
+            .contains("流水线"));
+        assert!(detail.projects[0].nodes[0]
+            .detail_zh
+            .as_deref()
+            .unwrap_or_default()
+            .contains("失败"));
+        assert!(detail.projects[0].nodes[0]
+            .evidence
+            .as_deref()
+            .unwrap_or_default()
+            .contains("pipeline_id=601"));
     }
 
     #[test]
