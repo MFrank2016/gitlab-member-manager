@@ -34,8 +34,14 @@
       "icons/Square150x150Logo.png"
     ],
     "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "allowDowngrades": false,
       "wix": {
-        "language": "zh-CN"
+        "language": "zh-CN",
+        "template": "wix/main.wxs"
       },
       "nsis": {
         "installerIcon": "icons/icon.ico",
