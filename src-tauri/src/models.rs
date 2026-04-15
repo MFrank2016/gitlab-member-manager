@@ -171,6 +171,8 @@ pub struct PipelineNode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineScheduleInput {
+    #[serde(alias = "project_group_id")]
+    pub project_group_id: i64,
     #[serde(alias = "cron_expr")]
     pub cron_expr: String,
     pub timezone: String,
@@ -187,6 +189,7 @@ pub struct PipelineScheduleInput {
 #[serde(rename_all = "camelCase")]
 pub struct PipelineSchedule {
     pub schedule_order: i64,
+    pub project_group_id: Option<i64>,
     pub cron_expr: String,
     pub timezone: String,
     pub branch: Option<String>,

@@ -3451,6 +3451,28 @@ pub async fn execute_pipeline_run(
     .await
 }
 
+pub async fn execute_scheduled_pipeline_run(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+    project_group_id: i64,
+    run_parameters: Value,
+) -> Result<i64> {
+    let mut projects = db::list_project_group_projects(pool, project_group_id).await?;
+    projects.retain(|project| project.enabled);
+
+    start_pipeline_run_with_projects(
+        pool,
+        pipeline_definition_id,
+        project_group_id,
+        run_parameters,
+        None,
+        None,
+        "schedule",
+        projects,
+    )
+    .await
+}
+
 pub async fn cancel_pipeline_run(pool: &SqlitePool, pipeline_run_id: i64) -> Result<()> {
     let now = now_rfc3339();
     let res = sqlx::query(

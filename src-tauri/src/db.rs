@@ -178,6 +178,10 @@ fn normalize_pipeline_schedule_inputs(
     let mut normalized = Vec::with_capacity(schedules.len());
 
     for schedule in schedules {
+        if schedule.project_group_id < 1 {
+            return Err(anyhow!("pipeline schedule project_group_id must be >= 1"));
+        }
+
         let cron_expr = schedule.cron_expr.trim().to_string();
         if cron_expr.is_empty() {
             return Err(anyhow!("pipeline schedule cron_expr is empty"));
@@ -200,6 +204,7 @@ fn normalize_pipeline_schedule_inputs(
         let variables = normalize_json_object(schedule.variables, "pipeline schedule variables")?;
 
         normalized.push(PipelineScheduleInput {
+            project_group_id: schedule.project_group_id,
             cron_expr,
             timezone,
             branch,
@@ -210,6 +215,24 @@ fn normalize_pipeline_schedule_inputs(
     }
 
     Ok(normalized)
+}
+
+async fn ensure_pipeline_schedule_project_groups_exist(
+    pool: &SqlitePool,
+    schedules: &[PipelineScheduleInput],
+) -> Result<()> {
+    let project_group_ids = schedules
+        .iter()
+        .map(|schedule| schedule.project_group_id)
+        .collect::<BTreeSet<_>>();
+
+    for project_group_id in project_group_ids {
+        if !project_group_exists(pool, project_group_id).await? {
+            return Err(anyhow!("project group not found: {project_group_id}"));
+        }
+    }
+
+    Ok(())
 }
 
 fn serialize_json(value: &Value, field_name: &str) -> Result<String> {
@@ -1190,12 +1213,13 @@ async fn insert_pipeline_schedules(
 
         sqlx::query(
             r#"INSERT INTO pipeline_schedules (
-             pipeline_definition_id, schedule_order, cron_expr, timezone, branch, enabled, policy,
-             variables_json, created_at, updated_at
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+             pipeline_definition_id, schedule_order, project_group_id, cron_expr, timezone, branch,
+             enabled, policy, variables_json, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
         )
         .bind(pipeline_definition_id)
         .bind(schedule_order)
+        .bind(schedule.project_group_id)
         .bind(&schedule.cron_expr)
         .bind(&schedule.timezone)
         .bind(&schedule.branch)
@@ -1276,9 +1300,22 @@ async fn load_pipeline_schedules(
     pool: &SqlitePool,
     pipeline_definition_id: i64,
 ) -> Result<Vec<PipelineSchedule>> {
-    let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, i64, String, String)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            Option<i64>,
+            String,
+            String,
+            Option<String>,
+            i64,
+            String,
+            String,
+        ),
+    >(
         r#"SELECT
-         schedule_order, cron_expr, timezone, branch, enabled, policy, variables_json
+         schedule_order, project_group_id, cron_expr, timezone, branch, enabled, policy,
+         variables_json
        FROM pipeline_schedules
        WHERE pipeline_definition_id = ?1
        ORDER BY schedule_order ASC, id ASC"#,
@@ -1291,12 +1328,13 @@ async fn load_pipeline_schedules(
     for row in rows {
         schedules.push(PipelineSchedule {
             schedule_order: row.0,
-            cron_expr: row.1,
-            timezone: row.2,
-            branch: row.3,
-            enabled: row.4 != 0,
-            policy: row.5,
-            variables: deserialize_json_object(&row.6, "pipeline schedule variables")?,
+            project_group_id: row.1,
+            cron_expr: row.2,
+            timezone: row.3,
+            branch: row.4,
+            enabled: row.5 != 0,
+            policy: row.6,
+            variables: deserialize_json_object(&row.7, "pipeline schedule variables")?,
         });
     }
 
@@ -1325,6 +1363,7 @@ pub async fn create_pipeline_definition(
     let variables = normalize_pipeline_variable_inputs(variables)?;
     let nodes = normalize_pipeline_node_inputs(nodes)?;
     let schedules = normalize_pipeline_schedule_inputs(schedules)?;
+    ensure_pipeline_schedule_project_groups_exist(pool, &schedules).await?;
     let description = description.trim().to_string();
     let enabled_value = if enabled { 1_i64 } else { 0_i64 };
     let now = Utc::now().to_rfc3339();
@@ -1468,6 +1507,7 @@ pub async fn update_pipeline_definition(
     let variables = normalize_pipeline_variable_inputs(variables)?;
     let nodes = normalize_pipeline_node_inputs(nodes)?;
     let schedules = normalize_pipeline_schedule_inputs(schedules)?;
+    ensure_pipeline_schedule_project_groups_exist(pool, &schedules).await?;
     let description = description.trim().to_string();
     let enabled_value = if enabled { 1_i64 } else { 0_i64 };
     let now = Utc::now().to_rfc3339();
@@ -2842,11 +2882,21 @@ pub async fn set_gitlab_config(
 }
 
 #[cfg(test)]
+pub(crate) async fn setup_test_pool() -> SqlitePool {
+    static TEST_MIGRATOR: Migrator = sqlx::migrate!();
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory sqlite");
+    TEST_MIGRATOR.run(&pool).await.expect("run migrations");
+    pool
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    static TEST_MIGRATOR: Migrator = sqlx::migrate!();
 
     async fn count_rows(pool: &SqlitePool, table_name: &str) -> i64 {
         let query = format!("SELECT COUNT(*) FROM {table_name}");
@@ -2854,16 +2904,6 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("count rows")
-    }
-
-    async fn setup_test_pool() -> SqlitePool {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-        TEST_MIGRATOR.run(&pool).await.expect("run migrations");
-        pool
     }
 
     #[tokio::test]
@@ -3554,6 +3594,12 @@ mod tests {
     #[tokio::test]
     async fn pipeline_definition_create_list_detail_persists_variables_nodes_and_schedules() {
         let pool = setup_test_pool().await;
+        let release_group = create_project_group(&pool, "release-schedule-group".to_string())
+            .await
+            .expect("create release schedule group");
+        let staging_group = create_project_group(&pool, "staging-schedule-group".to_string())
+            .await
+            .expect("create staging schedule group");
 
         let created = create_pipeline_definition(
             &pool,
@@ -3597,6 +3643,7 @@ mod tests {
             ],
             vec![
                 PipelineScheduleInput {
+                    project_group_id: release_group.id,
                     cron_expr: "0 9 * * 1-5".to_string(),
                     timezone: "Asia/Shanghai".to_string(),
                     branch: Some("main".to_string()),
@@ -3607,6 +3654,7 @@ mod tests {
                     }),
                 },
                 PipelineScheduleInput {
+                    project_group_id: staging_group.id,
                     cron_expr: "30 18 * * 5".to_string(),
                     timezone: "UTC".to_string(),
                     branch: Some("release".to_string()),
@@ -3648,8 +3696,10 @@ mod tests {
             })
         );
         assert_eq!(detail.schedules.len(), 2);
+        assert_eq!(detail.schedules[0].project_group_id, Some(release_group.id));
         assert_eq!(detail.schedules[0].cron_expr, "0 9 * * 1-5");
         assert_eq!(detail.schedules[0].timezone, "Asia/Shanghai");
+        assert_eq!(detail.schedules[1].project_group_id, Some(staging_group.id));
         assert_eq!(detail.schedules[1].policy, "allow_parallel");
         assert_eq!(
             detail.schedules[1].variables,
@@ -3660,8 +3710,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_schedule_schema_requires_project_group_target_column() {
+        let pool = setup_test_pool().await;
+
+        let columns = sqlx::query_as::<_, (i64, String, String, i64, Option<String>, i64)>(
+            r#"PRAGMA table_info(pipeline_schedules)"#,
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load pipeline_schedules columns");
+
+        let column_names = columns.into_iter().map(|row| row.1).collect::<Vec<_>>();
+        assert!(
+            column_names.iter().any(|name| name == "project_group_id"),
+            "expected pipeline_schedules to contain project_group_id, got {:?}",
+            column_names
+        );
+    }
+
+    #[tokio::test]
     async fn pipeline_definition_run_list_returns_sorted_non_empty_items_with_aggregates() {
         let pool = setup_test_pool().await;
+        let schedule_group = create_project_group(&pool, "run-list-schedule-group".to_string())
+            .await
+            .expect("create schedule group");
 
         let workflow = create_workflow_definition(
             &pool,
@@ -3697,6 +3769,7 @@ mod tests {
                 parameters: serde_json::json!({ "ref": "${target_branch}" }),
             }],
             vec![PipelineScheduleInput {
+                project_group_id: schedule_group.id,
                 cron_expr: "0 9 * * 1-5".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 branch: Some("main".to_string()),
@@ -3988,6 +4061,9 @@ mod tests {
     #[tokio::test]
     async fn pipeline_definition_rejects_non_object_schedule_variables() {
         let pool = setup_test_pool().await;
+        let schedule_group = create_project_group(&pool, "invalid-schedule-variables".to_string())
+            .await
+            .expect("create schedule group");
 
         let result = create_pipeline_definition(
             &pool,
@@ -4001,6 +4077,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
+                project_group_id: schedule_group.id,
                 cron_expr: "0 9 * * *".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 branch: Some("main".to_string()),
@@ -4047,6 +4124,9 @@ mod tests {
     #[tokio::test]
     async fn pipeline_definition_rejects_schedule_with_empty_cron_expr() {
         let pool = setup_test_pool().await;
+        let schedule_group = create_project_group(&pool, "invalid-schedule-cron".to_string())
+            .await
+            .expect("create schedule group");
 
         let result = create_pipeline_definition(
             &pool,
@@ -4060,6 +4140,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
+                project_group_id: schedule_group.id,
                 cron_expr: "   ".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 branch: Some("main".to_string()),
@@ -4080,6 +4161,9 @@ mod tests {
     #[tokio::test]
     async fn pipeline_definition_rejects_schedule_with_empty_timezone() {
         let pool = setup_test_pool().await;
+        let schedule_group = create_project_group(&pool, "invalid-schedule-timezone".to_string())
+            .await
+            .expect("create schedule group");
 
         let result = create_pipeline_definition(
             &pool,
@@ -4093,6 +4177,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
+                project_group_id: schedule_group.id,
                 cron_expr: "0 9 * * *".to_string(),
                 timezone: "   ".to_string(),
                 branch: Some("main".to_string()),
@@ -4113,6 +4198,9 @@ mod tests {
     #[tokio::test]
     async fn pipeline_definition_rejects_schedule_with_empty_policy() {
         let pool = setup_test_pool().await;
+        let schedule_group = create_project_group(&pool, "invalid-schedule-policy".to_string())
+            .await
+            .expect("create schedule group");
 
         let result = create_pipeline_definition(
             &pool,
@@ -4126,6 +4214,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
+                project_group_id: schedule_group.id,
                 cron_expr: "0 9 * * *".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 branch: Some("main".to_string()),
@@ -4143,9 +4232,78 @@ mod tests {
             .contains("pipeline schedule policy is empty"));
     }
 
+    #[tokio::test]
+    async fn pipeline_definition_rejects_schedule_with_unknown_project_group_id() {
+        let pool = setup_test_pool().await;
+
+        let result = create_pipeline_definition(
+            &pool,
+            "invalid-schedule-project-group".to_string(),
+            "invalid".to_string(),
+            true,
+            2,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            vec![PipelineScheduleInput {
+                project_group_id: 999_999,
+                cron_expr: "0 9 * * *".to_string(),
+                timezone: "Asia/Shanghai".to_string(),
+                branch: Some("main".to_string()),
+                enabled: true,
+                policy: "skip_if_running".to_string(),
+                variables: serde_json::json!({}),
+            }],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("project group not found: 999999"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_definition_rejects_schedule_with_non_positive_project_group_id() {
+        let pool = setup_test_pool().await;
+
+        let result = create_pipeline_definition(
+            &pool,
+            "invalid-schedule-project-group-zero".to_string(),
+            "invalid".to_string(),
+            true,
+            2,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "trigger_pipeline".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            vec![PipelineScheduleInput {
+                project_group_id: 0,
+                cron_expr: "0 9 * * *".to_string(),
+                timezone: "Asia/Shanghai".to_string(),
+                branch: Some("main".to_string()),
+                enabled: true,
+                policy: "skip_if_running".to_string(),
+                variables: serde_json::json!({}),
+            }],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pipeline schedule project_group_id must be >= 1"));
+    }
+
     #[test]
     fn pipeline_definition_schedule_input_defaults_enabled_to_true() {
         let schedule: PipelineScheduleInput = serde_json::from_value(serde_json::json!({
+            "projectGroupId": 1,
             "cronExpr": "0 9 * * *",
             "timezone": "Asia/Shanghai",
             "policy": "skip_if_running",
@@ -4154,6 +4312,20 @@ mod tests {
         .expect("deserialize pipeline schedule input");
 
         assert!(schedule.enabled);
+    }
+
+    #[test]
+    fn pipeline_definition_schedule_input_requires_project_group_id() {
+        let result: serde_json::Result<PipelineScheduleInput> =
+            serde_json::from_value(serde_json::json!({
+                "cronExpr": "0 9 * * *",
+                "timezone": "Asia/Shanghai",
+                "policy": "skip_if_running",
+                "variables": {}
+            }));
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("projectGroupId"));
     }
 
     #[tokio::test]

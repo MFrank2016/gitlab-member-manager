@@ -1,6 +1,7 @@
 mod db;
 mod gitlab;
 mod models;
+mod scheduler;
 mod workflows;
 
 use tauri::Manager;
@@ -11,10 +12,10 @@ use crate::models::{
     ManagedProject, PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineNodeInput,
     PipelineRunDetail, PipelineRunExecuteRequest, PipelineRunExecuteResult, PipelineRunListItem,
     PipelineRunRetryRequest, PipelineScheduleInput, PipelineVariableInput, ProjectGroup,
-    ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary,
-    WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail,
-    WorkflowRunExecuteRequest, WorkflowRunExecuteResult, WorkflowRunListItem,
-    WorkflowRunRetryFailedRequest, WorkflowStepInput,
+    ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary, WorkflowDefinitionDetail,
+    WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunExecuteRequest,
+    WorkflowRunExecuteResult, WorkflowRunListItem, WorkflowRunRetryFailedRequest,
+    WorkflowStepInput,
 };
 use sqlx::SqlitePool;
 use std::sync::Mutex;
@@ -143,8 +144,8 @@ async fn set_gitlab_config(
         default_branch.as_deref(),
         default_remote.as_deref(),
     )
-        .await
-        .map_err(|e| e.to_string())?;
+    .await
+    .map_err(|e| e.to_string())?;
 
     let mut guard = state
         .gitlab
@@ -689,7 +690,9 @@ async fn list_workflow_runs(
 }
 
 #[tauri::command]
-async fn list_pipeline_runs(state: State<'_, AppState>) -> Result<Vec<PipelineRunListItem>, String> {
+async fn list_pipeline_runs(
+    state: State<'_, AppState>,
+) -> Result<Vec<PipelineRunListItem>, String> {
     let result = db::list_pipeline_runs(&state.db)
         .await
         .map_err(|e| e.to_string());
@@ -794,7 +797,10 @@ async fn execute_workflow_run(
 }
 
 #[tauri::command]
-async fn cancel_workflow_run(state: State<'_, AppState>, workflow_run_id: i64) -> Result<(), String> {
+async fn cancel_workflow_run(
+    state: State<'_, AppState>,
+    workflow_run_id: i64,
+) -> Result<(), String> {
     let result = workflows::cancel_workflow_run(&state.db, workflow_run_id)
         .await
         .map_err(|e| e.to_string());
@@ -1288,6 +1294,9 @@ fn main() {
           None
         }
       };
+
+      scheduler::spawn_pipeline_scheduler(db.clone());
+      tracing::info!("[setup] started pipeline scheduler loop");
 
       app.manage(AppState {
         db,

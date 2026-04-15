@@ -105,6 +105,7 @@ export type PipelineNode = {
 };
 
 export type PipelineScheduleInput = {
+  projectGroupId: number;
   cronExpr: string;
   timezone: string;
   branch?: string | null;
@@ -115,6 +116,7 @@ export type PipelineScheduleInput = {
 
 export type PipelineSchedule = {
   scheduleOrder: number;
+  projectGroupId: number | null;
   cronExpr: string;
   timezone: string;
   branch?: string | null;

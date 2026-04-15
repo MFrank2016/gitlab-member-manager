@@ -290,6 +290,7 @@ function toPipelineVariablePayload(variable: PipelineVariableInput) {
 
 function toPipelineSchedulePayload(schedule: PipelineScheduleInput) {
   return {
+    projectGroupId: schedule.projectGroupId,
     cronExpr: schedule.cronExpr.trim(),
     timezone: schedule.timezone.trim(),
     branch: schedule.branch?.trim() ? schedule.branch.trim() : null,
