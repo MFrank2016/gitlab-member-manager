@@ -74,6 +74,179 @@ export type WorkflowStep = {
   parameters: unknown;
 };
 
+export type PipelineVariableInput = {
+  key: string;
+  label: string;
+  defaultValue?: string | null;
+  valueType: string;
+  required?: boolean;
+  options?: unknown;
+};
+
+export type PipelineVariable = {
+  variableOrder: number;
+  key: string;
+  label: string;
+  defaultValue?: string | null;
+  valueType: string;
+  required: boolean;
+  options: unknown;
+};
+
+export type PipelineNodeInput = {
+  nodeType: string;
+  parameters?: unknown;
+};
+
+export type PipelineNode = {
+  nodeOrder: number;
+  nodeType: string;
+  parameters: unknown;
+};
+
+export type PipelineScheduleInput = {
+  projectGroupId: number;
+  cronExpr: string;
+  timezone: string;
+  branch?: string | null;
+  enabled?: boolean;
+  policy: string;
+  variables?: unknown;
+};
+
+export type PipelineSchedule = {
+  scheduleOrder: number;
+  projectGroupId: number | null;
+  cronExpr: string;
+  timezone: string;
+  branch?: string | null;
+  enabled: boolean;
+  policy: string;
+  variables: unknown;
+};
+
+export type PipelineDefinitionListItem = {
+  id: number;
+  name: string;
+  description: string;
+  enabled: boolean;
+  maxConcurrencyDefault: number;
+  legacyWorkflowDefinitionId?: number | null;
+  createdAt: string;
+  updatedAt: string;
+  variablesCount: number;
+  nodesCount: number;
+  schedulesCount: number;
+};
+
+export type PipelineDefinitionDetail = {
+  id: number;
+  name: string;
+  description: string;
+  enabled: boolean;
+  maxConcurrencyDefault: number;
+  legacyWorkflowDefinitionId?: number | null;
+  createdAt: string;
+  updatedAt: string;
+  variables: PipelineVariable[];
+  nodes: PipelineNode[];
+  schedules: PipelineSchedule[];
+};
+
+export type PipelineRunStatus =
+  | "pending"
+  | "running"
+  | "waiting"
+  | "cancelling"
+  | "completed"
+  | "partial_failed"
+  | "cancelled";
+
+export type PipelineRunProjectStatus =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "success"
+  | "failed"
+  | "cancelled"
+  | "failed_precheck";
+
+export type PipelineRunNodeStatus =
+  | "pending"
+  | "running"
+  | "waiting"
+  | "success"
+  | "failed"
+  | "skipped"
+  | "cancelled";
+
+export type PipelineRunNode = {
+  id: number;
+  pipelineNodeId?: number | null;
+  nodeOrder: number;
+  nodeType: string;
+  renderedParameters: unknown;
+  status: PipelineRunNodeStatus;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  stdout: string;
+  stderr: string;
+  exitCode?: number | null;
+  summaryMessage: string;
+  errorCode?: string | null;
+  titleZh?: string | null;
+  detailZh?: string | null;
+  suggestionZh?: string | null;
+  evidence?: string | null;
+  waitTarget?: string | null;
+  lastRemoteStatus?: string | null;
+  remotePipelineId?: number | null;
+  waitContext?: unknown | null;
+};
+
+export type PipelineRunProject = {
+  id: number;
+  managedProjectId?: number | null;
+  gitlabProjectId: number;
+  projectName: string;
+  projectPathWithNamespace: string;
+  repoPath: string;
+  status: PipelineRunProjectStatus;
+  summaryMessage: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  nodes: PipelineRunNode[];
+};
+
+export type PipelineRunListItem = {
+  id: number;
+  pipelineDefinitionId: number;
+  pipelineDefinitionName: string;
+  projectGroupId: number;
+  projectGroupName: string;
+  legacyWorkflowRunId?: number | null;
+  sourcePipelineRunId?: number | null;
+  triggerKind: string;
+  status: PipelineRunStatus;
+  runParameters: unknown;
+  maxConcurrency: number;
+  projectsTotal: number;
+  projectsQueued: number;
+  projectsRunning: number;
+  projectsSuccess: number;
+  projectsFailed: number;
+  projectsCancelled: number;
+  projectsFailedPrecheck: number;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PipelineRunDetail = PipelineRunListItem & {
+  projects: PipelineRunProject[];
+};
+
 export type WorkflowDefinitionListItem = {
   id: number;
   name: string;
@@ -111,6 +284,23 @@ export type WorkflowRunExecuteResult = {
 
 export type WorkflowRunRetryFailedRequest = {
   sourceWorkflowRunId: number;
+  selectedManagedProjectIds?: number[] | null;
+  maxConcurrencyOverride?: number | null;
+};
+
+export type PipelineRunExecuteRequest = {
+  pipelineDefinitionId: number;
+  projectGroupId: number;
+  runParameters?: Record<string, unknown>;
+  maxConcurrencyOverride?: number | null;
+};
+
+export type PipelineRunExecuteResult = {
+  pipelineRunId: number;
+};
+
+export type PipelineRunRetryRequest = {
+  sourcePipelineRunId: number;
   selectedManagedProjectIds?: number[] | null;
   maxConcurrencyOverride?: number | null;
 };

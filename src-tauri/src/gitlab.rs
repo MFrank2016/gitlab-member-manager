@@ -63,6 +63,142 @@ struct ApiMember {
     expires_at: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ApiPipeline {
+    id: u64,
+    status: String,
+    #[serde(rename = "ref")]
+    ref_name: String,
+    sha: Option<String>,
+    web_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GitLabPipeline {
+    pub id: u64,
+    pub status: String,
+    pub ref_name: String,
+    pub sha: Option<String>,
+    pub web_url: Option<String>,
+}
+
+fn map_api_pipeline(pipeline: ApiPipeline) -> GitLabPipeline {
+    GitLabPipeline {
+        id: pipeline.id,
+        status: pipeline.status,
+        ref_name: pipeline.ref_name,
+        sha: pipeline.sha,
+        web_url: pipeline.web_url,
+    }
+}
+
+pub async fn check_pipeline(
+    cfg: &GitLabConfig,
+    project: &str,
+    reference: &str,
+    sha: Option<&str>,
+) -> Result<Option<GitLabPipeline>> {
+    let project = encode_project(project.trim());
+    let url = api_url(
+        &cfg.base_url,
+        &format!("/api/v4/projects/{}/pipelines", project),
+    );
+    let mut query = vec![
+        ("ref".to_string(), reference.trim().to_string()),
+        ("per_page".to_string(), "1".to_string()),
+    ];
+    if let Some(sha) = sha {
+        query.push(("sha".to_string(), sha.trim().to_string()));
+    }
+
+    let resp = client()
+        .get(&url)
+        .header("PRIVATE-TOKEN", &cfg.token)
+        .query(&query)
+        .send()
+        .await
+        .context("GitLab request failed")?;
+
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!("GitLab API error {status}: {text}"));
+    }
+
+    let pipelines: Vec<ApiPipeline> = serde_json::from_str(&text).context("Parse JSON")?;
+    Ok(pipelines.into_iter().next().map(map_api_pipeline))
+}
+
+pub async fn wait_pipeline(
+    cfg: &GitLabConfig,
+    project: &str,
+    reference: &str,
+    sha: Option<&str>,
+    timeout: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> Result<GitLabPipeline> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let pipeline = check_pipeline(cfg, project, reference, sha).await?;
+        match pipeline {
+            Some(pipeline)
+                if matches!(
+                    pipeline.status.as_str(),
+                    "success" | "failed" | "canceled" | "cancelled" | "skipped"
+                ) =>
+            {
+                return Ok(pipeline);
+            }
+            Some(_) | None => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(anyhow!(
+                        "GitLab pipeline wait timed out for project={}, ref={}, sha={:?}",
+                        project,
+                        reference,
+                        sha
+                    ));
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+        }
+    }
+}
+
+pub async fn trigger_pipeline(
+    cfg: &GitLabConfig,
+    project: &str,
+    reference: &str,
+    variables: &[(String, String)],
+) -> Result<GitLabPipeline> {
+    let project = encode_project(project.trim());
+    let url = api_url(
+        &cfg.base_url,
+        &format!("/api/v4/projects/{}/pipeline", project),
+    );
+
+    let mut params = vec![("ref".to_string(), reference.trim().to_string())];
+    for (key, value) in variables {
+        params.push((format!("variables[{key}]"), value.clone()));
+    }
+
+    let resp = client()
+        .post(&url)
+        .header("PRIVATE-TOKEN", &cfg.token)
+        .form(&params)
+        .send()
+        .await
+        .context("GitLab request failed")?;
+
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!("GitLab API error {status}: {text}"));
+    }
+
+    let pipeline: ApiPipeline = serde_json::from_str(&text).context("Parse JSON")?;
+    Ok(map_api_pipeline(pipeline))
+}
+
 /// 分页搜索项目。返回 (项目列表, 总条数)。总条数来自响应头 X-Total，若缺失则用本页数量估算。
 pub async fn search_projects(
     cfg: &GitLabConfig,
@@ -413,6 +549,143 @@ mod tests {
     use super::*;
     use crate::models::ManagedProject;
     use anyhow::anyhow;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex as TokioMutex;
+
+    #[derive(Debug, Clone)]
+    struct TestHttpResponse {
+        status_line: &'static str,
+        body: String,
+        extra_headers: Vec<(&'static str, String)>,
+        delay_ms: u64,
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedRequest {
+        method: String,
+        path: String,
+        body: String,
+    }
+
+    async fn spawn_gitlab_test_server(
+        responses: Vec<TestHttpResponse>,
+    ) -> (GitLabConfig, Arc<TokioMutex<Vec<CapturedRequest>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gitlab test server");
+        let addr = listener.local_addr().expect("read local addr");
+        let requests = Arc::new(TokioMutex::new(Vec::<CapturedRequest>::new()));
+        let response_queue = Arc::new(TokioMutex::new(VecDeque::from(responses)));
+        let requests_for_task = Arc::clone(&requests);
+        let responses_for_task = Arc::clone(&response_queue);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(value) => value,
+                    Err(_) => break,
+                };
+
+                let mut raw = Vec::new();
+                let mut header_end = None;
+                let mut content_length = 0usize;
+                loop {
+                    let mut buffer = vec![0_u8; 2048];
+                    let bytes_read = match stream.read(&mut buffer).await {
+                        Ok(value) => value,
+                        Err(_) => return,
+                    };
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buffer[..bytes_read]);
+
+                    if header_end.is_none() {
+                        let header_probe = String::from_utf8_lossy(&raw).to_string();
+                        if let Some(position) = header_probe.find("\r\n\r\n") {
+                            header_end = Some(position);
+                            let header_text = &header_probe[..position];
+                            content_length = header_text
+                                .lines()
+                                .find_map(|line| {
+                                    let lower = line.to_ascii_lowercase();
+                                    lower
+                                        .strip_prefix("content-length:")
+                                        .and_then(|value| value.trim().parse::<usize>().ok())
+                                })
+                                .unwrap_or(0);
+                        }
+                    }
+
+                    if let Some(position) = header_end {
+                        let expected_len = position + 4 + content_length;
+                        if raw.len() >= expected_len {
+                            break;
+                        }
+                    }
+                }
+
+                let request_text = String::from_utf8_lossy(&raw).to_string();
+                let header_end = request_text.find("\r\n\r\n").unwrap_or(request_text.len());
+                let header_text = &request_text[..header_end];
+                let body = if header_end + 4 <= request_text.len() {
+                    request_text[header_end + 4..].to_string()
+                } else {
+                    String::new()
+                };
+                let request_line = header_text.lines().next().unwrap_or_default();
+                let mut request_parts = request_line.split_whitespace();
+                let method = request_parts.next().unwrap_or_default().to_string();
+                let path = request_parts.next().unwrap_or_default().to_string();
+                requests_for_task
+                    .lock()
+                    .await
+                    .push(CapturedRequest { method, path, body });
+
+                let response =
+                    responses_for_task
+                        .lock()
+                        .await
+                        .pop_front()
+                        .unwrap_or(TestHttpResponse {
+                            status_line: "500 Internal Server Error",
+                            body: "{}".to_string(),
+                            extra_headers: vec![],
+                            delay_ms: 0,
+                        });
+
+                if response.delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(response.delay_ms)).await;
+                }
+
+                let mut response_text = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+                    response.status_line,
+                    response.body.len()
+                );
+                for (key, value) in response.extra_headers {
+                    response_text.push_str(&format!("{key}: {value}\r\n"));
+                }
+                response_text.push_str("\r\n");
+                response_text.push_str(&response.body);
+
+                if stream.write_all(response_text.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        (
+            GitLabConfig {
+                base_url: format!("http://{}", addr),
+                token: "test-token".to_string(),
+            },
+            requests,
+        )
+    }
 
     fn sample_project() -> ManagedProject {
         ManagedProject {
@@ -456,5 +729,166 @@ mod tests {
         assert_eq!(row.failed[0].user_id, 1002);
         assert!(row.failed[0].message.contains("simulated gitlab failure"));
         assert!(!row.success);
+    }
+
+    #[tokio::test]
+    async fn pipeline_gitlab_check_pipeline_uses_commit_specific_lookup_when_sha_present() {
+        let (cfg, requests) = spawn_gitlab_test_server(vec![TestHttpResponse {
+            status_line: "200 OK",
+            body: r#"[{"id":91,"status":"running","ref":"main","sha":"abc123","web_url":"https://gitlab.example/p/91"}]"#.to_string(),
+            extra_headers: vec![],
+            delay_ms: 0,
+        }])
+        .await;
+
+        let pipeline = check_pipeline(&cfg, "group/project", "main", Some("abc123"))
+            .await
+            .expect("check pipeline")
+            .expect("pipeline exists");
+
+        assert_eq!(pipeline.id, 91);
+        assert_eq!(pipeline.status, "running");
+        assert_eq!(pipeline.sha.as_deref(), Some("abc123"));
+
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].path.contains("ref=main"));
+        assert!(captured[0].path.contains("sha=abc123"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_gitlab_wait_pipeline_falls_back_to_ref_head_without_sha() {
+        let (cfg, requests) = spawn_gitlab_test_server(vec![
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":92,"status":"running","ref":"release","sha":"def456","web_url":"https://gitlab.example/p/92"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":92,"status":"success","ref":"release","sha":"def456","web_url":"https://gitlab.example/p/92"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+        ])
+        .await;
+
+        let pipeline = wait_pipeline(
+            &cfg,
+            "group/project",
+            "release",
+            None,
+            std::time::Duration::from_millis(250),
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect("wait pipeline");
+
+        assert_eq!(pipeline.id, 92);
+        assert_eq!(pipeline.status, "success");
+
+        let captured = requests.lock().await;
+        assert!(captured
+            .iter()
+            .all(|request| !request.path.contains("sha=")));
+    }
+
+    #[tokio::test]
+    async fn pipeline_gitlab_trigger_pipeline_returns_downstream_identifier() {
+        let (cfg, requests) = spawn_gitlab_test_server(vec![TestHttpResponse {
+            status_line: "201 Created",
+            body: r#"{"id":93,"status":"pending","ref":"main","sha":"fedcba","web_url":"https://gitlab.example/p/93"}"#.to_string(),
+            extra_headers: vec![],
+            delay_ms: 0,
+        }])
+        .await;
+
+        let pipeline = trigger_pipeline(
+            &cfg,
+            "group/project",
+            "main",
+            &[("DEPLOY_ENV".to_string(), "prod".to_string())],
+        )
+        .await
+        .expect("trigger pipeline");
+
+        assert_eq!(pipeline.id, 93);
+        assert_eq!(pipeline.status, "pending");
+
+        let captured = requests.lock().await;
+        assert_eq!(captured[0].method, "POST");
+        assert!(captured[0]
+            .path
+            .contains("/api/v4/projects/group%2Fproject/pipeline"));
+        assert!(captured[0].body.contains("ref=main"));
+        assert!(captured[0].body.contains("variables%5BDEPLOY_ENV%5D=prod"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_gitlab_check_pipeline_surfaces_auth_and_not_found_errors() {
+        let (auth_cfg, _) = spawn_gitlab_test_server(vec![TestHttpResponse {
+            status_line: "401 Unauthorized",
+            body: r#"{"message":"401 Unauthorized"}"#.to_string(),
+            extra_headers: vec![],
+            delay_ms: 0,
+        }])
+        .await;
+
+        let auth_error = check_pipeline(&auth_cfg, "group/project", "main", None)
+            .await
+            .expect_err("auth error should surface");
+        assert!(auth_error.to_string().contains("401"));
+
+        let (not_found_cfg, _) = spawn_gitlab_test_server(vec![TestHttpResponse {
+            status_line: "404 Not Found",
+            body: r#"{"message":"404 Project Not Found"}"#.to_string(),
+            extra_headers: vec![],
+            delay_ms: 0,
+        }])
+        .await;
+
+        let not_found_error = trigger_pipeline(&not_found_cfg, "missing/project", "main", &[])
+            .await
+            .expect_err("not found should surface");
+        assert!(not_found_error.to_string().contains("404"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_gitlab_wait_pipeline_times_out_when_remote_never_finishes() {
+        let (cfg, _) = spawn_gitlab_test_server(vec![
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":94,"status":"running","ref":"main","sha":"wait1","web_url":"https://gitlab.example/p/94"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":94,"status":"running","ref":"main","sha":"wait1","web_url":"https://gitlab.example/p/94"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":94,"status":"running","ref":"main","sha":"wait1","web_url":"https://gitlab.example/p/94"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+        ])
+        .await;
+
+        let error = wait_pipeline(
+            &cfg,
+            "group/project",
+            "main",
+            Some("wait1"),
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect_err("wait pipeline should time out");
+
+        assert!(error.to_string().contains("timed out"));
     }
 }

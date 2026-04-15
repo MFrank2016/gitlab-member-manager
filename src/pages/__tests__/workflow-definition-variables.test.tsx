@@ -18,7 +18,17 @@ vi.mock("sonner", () => ({
   },
 }));
 
-describe("workflow definition variable editor", () => {
+const projectGroups = [
+  {
+    id: 7,
+    name: "release-train",
+    createdAt: "2026-04-14T00:00:00Z",
+    updatedAt: "2026-04-14T00:00:00Z",
+    projectsCount: 2,
+  },
+];
+
+describe("pipeline definition editor", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     toastErrorMock.mockReset();
@@ -26,54 +36,122 @@ describe("workflow definition variable editor", () => {
 
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "list_workflow_definitions") return [];
-      if (cmd === "create_workflow_definition") {
+      if (cmd === "list_pipeline_definitions") {
+        return [
+          {
+            id: 201,
+            name: "legacy-release-pipeline",
+            description: "migrated legacy workflow",
+            enabled: true,
+            maxConcurrencyDefault: 2,
+            legacyWorkflowDefinitionId: 91,
+            createdAt: "2026-04-14T00:00:00Z",
+            updatedAt: "2026-04-14T00:00:00Z",
+            variablesCount: 1,
+            nodesCount: 2,
+            schedulesCount: 1,
+          },
+        ];
+      }
+      if (cmd === "list_project_groups") return projectGroups;
+      if (cmd === "create_pipeline_definition") {
         return {
           id: 101,
           name: String(args?.name ?? ""),
           description: String(args?.description ?? ""),
           enabled: Boolean(args?.enabled),
-          variablesSchema: args?.variables_schema ?? {},
           maxConcurrencyDefault: Number(args?.max_concurrency_default ?? 1),
-          createdAt: "2026-03-19T00:00:00Z",
-          updatedAt: "2026-03-19T00:00:00Z",
-          steps: [],
+          legacyWorkflowDefinitionId: null,
+          createdAt: "2026-04-14T00:00:00Z",
+          updatedAt: "2026-04-14T00:00:00Z",
+          variables: args?.variables ?? [],
+          nodes: args?.nodes ?? [],
+          schedules: args?.schedules ?? [],
         };
       }
       return undefined;
     });
   });
 
-  it("auto-adds referenced variables and persists them as default-value pairs", async () => {
+  it("shows pipeline sections and persists schedule-aware pipeline payloads", async () => {
     render(<WorkflowsPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建工作流" }));
+    expect(await screen.findByText("legacy-release-pipeline")).toBeInTheDocument();
+    expect(screen.getByText("迁移自工作流 #91")).toBeInTheDocument();
 
-    expect(screen.getByRole("option", { name: /当前分支/ })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "新建流水线" }));
 
-    const variableRows = await screen.findAllByTestId("workflow-variable-row");
+    expect(screen.getByText("基础信息")).toBeInTheDocument();
+    expect(screen.getByText("变量")).toBeInTheDocument();
+    expect(screen.getByText("节点")).toBeInTheDocument();
+    expect(screen.getByText("调度")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /添加调度/i })).toBeInTheDocument();
+
+    const variableRows = await screen.findAllByTestId("pipeline-variable-row");
     expect(variableRows).toHaveLength(1);
     expect(within(variableRows[0]).getByDisplayValue("source_branch")).toBeInTheDocument();
-    expect(within(variableRows[0]).getByPlaceholderText("默认值")).toHaveValue("");
 
-    fireEvent.click(screen.getByRole("button", { name: /添加步骤/i }));
+    fireEvent.click(screen.getByRole("button", { name: /添加节点/i }));
     await waitFor(() => {
-      expect(screen.getAllByTestId("workflow-variable-row")).toHaveLength(2);
+      expect(screen.getAllByTestId("pipeline-variable-row")).toHaveLength(2);
     });
 
-    fireEvent.change(screen.getByPlaceholderText("工作流名称"), {
-      target: { value: "release-flow" },
+    fireEvent.click(screen.getByRole("button", { name: /添加调度/i }));
+    const scheduleRows = await screen.findAllByTestId("pipeline-schedule-row");
+    expect(scheduleRows).toHaveLength(1);
+
+    fireEvent.change(screen.getByLabelText("调度 1 目标项目组"), {
+      target: { value: "7" },
+    });
+    fireEvent.change(screen.getByLabelText("流水线名称"), {
+      target: { value: "release-pipeline" },
     });
     fireEvent.click(screen.getByRole("button", { name: /^创建$/ }));
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith(
-        "create_workflow_definition",
+        "create_pipeline_definition",
         expect.objectContaining({
-          name: "release-flow",
-          variables_schema: {
-            source_branch: "",
-            target_branch: "",
-          },
+          name: "release-pipeline",
+          variables: [
+            {
+              key: "source_branch",
+              label: "Source Branch",
+              defaultValue: "",
+              valueType: "string",
+              required: true,
+              options: [],
+            },
+            {
+              key: "target_branch",
+              label: "Target Branch",
+              defaultValue: "",
+              valueType: "string",
+              required: true,
+              options: [],
+            },
+          ],
+          nodes: [
+            {
+              nodeType: "checkout_branch",
+              parameters: { branch: "${source_branch}" },
+            },
+            {
+              nodeType: "git_pull",
+              parameters: { branch: "${target_branch}" },
+            },
+          ],
+          schedules: [
+            {
+              projectGroupId: 7,
+              cronExpr: "0 9 * * 1-5",
+              timezone: "Asia/Shanghai",
+              branch: null,
+              enabled: true,
+              policy: "skip_if_running",
+              variables: {},
+            },
+          ],
         })
       );
     });
@@ -82,13 +160,12 @@ describe("workflow definition variable editor", () => {
   it("rejects save when a referenced variable has been deleted from the form", async () => {
     render(<WorkflowsPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建工作流" }));
-
-    fireEvent.change(screen.getByPlaceholderText("工作流名称"), {
-      target: { value: "release-flow" },
+    fireEvent.click(await screen.findByRole("button", { name: "新建流水线" }));
+    fireEvent.change(screen.getByLabelText("流水线名称"), {
+      target: { value: "release-pipeline" },
     });
 
-    const firstRow = await screen.findByTestId("workflow-variable-row");
+    const firstRow = await screen.findByTestId("pipeline-variable-row");
     fireEvent.click(within(firstRow).getByRole("button", { name: /删除变量 source_branch/i }));
 
     fireEvent.click(screen.getByRole("button", { name: /^创建$/ }));
@@ -97,9 +174,8 @@ describe("workflow definition variable editor", () => {
       expect(toastErrorMock).toHaveBeenCalledWith(expect.stringContaining("source_branch"));
     });
     expect(invokeMock).not.toHaveBeenCalledWith(
-      "create_workflow_definition",
+      "create_pipeline_definition",
       expect.anything()
     );
   });
 });
-

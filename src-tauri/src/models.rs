@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn bool_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -120,6 +124,218 @@ pub struct WorkflowStepInput {
     pub step_type: String,
     #[serde(default)]
     pub parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineVariableInput {
+    pub key: String,
+    pub label: String,
+    pub default_value: Option<String>,
+    pub value_type: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub options: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineVariable {
+    pub variable_order: i64,
+    pub key: String,
+    pub label: String,
+    pub default_value: Option<String>,
+    pub value_type: String,
+    pub required: bool,
+    pub options: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineNodeInput {
+    #[serde(alias = "node_type")]
+    pub node_type: String,
+    #[serde(default)]
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineNode {
+    pub node_order: i64,
+    pub node_type: String,
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineScheduleInput {
+    #[serde(alias = "project_group_id")]
+    pub project_group_id: i64,
+    #[serde(alias = "cron_expr")]
+    pub cron_expr: String,
+    pub timezone: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default = "bool_true")]
+    pub enabled: bool,
+    pub policy: String,
+    #[serde(default)]
+    pub variables: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineSchedule {
+    pub schedule_order: i64,
+    pub project_group_id: Option<i64>,
+    pub cron_expr: String,
+    pub timezone: String,
+    pub branch: Option<String>,
+    pub enabled: bool,
+    pub policy: String,
+    pub variables: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineDefinitionListItem {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub max_concurrency_default: i64,
+    pub legacy_workflow_definition_id: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub variables_count: i64,
+    pub nodes_count: i64,
+    pub schedules_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineDefinitionDetail {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub max_concurrency_default: i64,
+    pub legacy_workflow_definition_id: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub variables: Vec<PipelineVariable>,
+    pub nodes: Vec<PipelineNode>,
+    pub schedules: Vec<PipelineSchedule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunListItem {
+    pub id: i64,
+    pub pipeline_definition_id: i64,
+    pub pipeline_definition_name: String,
+    pub project_group_id: i64,
+    pub project_group_name: String,
+    pub legacy_workflow_run_id: Option<i64>,
+    pub source_pipeline_run_id: Option<i64>,
+    pub trigger_kind: String,
+    pub status: String,
+    pub run_parameters: Value,
+    pub max_concurrency: i64,
+    pub projects_total: i64,
+    pub projects_queued: i64,
+    pub projects_running: i64,
+    pub projects_success: i64,
+    pub projects_failed: i64,
+    pub projects_cancelled: i64,
+    pub projects_failed_precheck: i64,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunNode {
+    pub id: i64,
+    pub pipeline_node_id: Option<i64>,
+    pub node_order: i64,
+    pub node_type: String,
+    pub rendered_parameters: Value,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i64>,
+    pub summary_message: String,
+    pub error_code: Option<String>,
+    pub title_zh: Option<String>,
+    pub detail_zh: Option<String>,
+    pub suggestion_zh: Option<String>,
+    pub evidence: Option<String>,
+    pub wait_target: Option<String>,
+    pub last_remote_status: Option<String>,
+    pub remote_pipeline_id: Option<u64>,
+    pub wait_context: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunProject {
+    pub id: i64,
+    pub managed_project_id: Option<i64>,
+    pub gitlab_project_id: u64,
+    pub project_name: String,
+    pub project_path_with_namespace: String,
+    pub repo_path: String,
+    pub status: String,
+    pub summary_message: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub nodes: Vec<PipelineRunNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunDetail {
+    pub id: i64,
+    pub pipeline_definition_id: i64,
+    pub pipeline_definition_name: String,
+    pub project_group_id: i64,
+    pub project_group_name: String,
+    pub legacy_workflow_run_id: Option<i64>,
+    pub source_pipeline_run_id: Option<i64>,
+    pub trigger_kind: String,
+    pub status: String,
+    pub run_parameters: Value,
+    pub max_concurrency: i64,
+    pub projects_total: i64,
+    pub projects_queued: i64,
+    pub projects_running: i64,
+    pub projects_success: i64,
+    pub projects_failed: i64,
+    pub projects_cancelled: i64,
+    pub projects_failed_precheck: i64,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub projects: Vec<PipelineRunProject>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineMigrationSummary {
+    pub definitions_migrated: i64,
+    pub variables_migrated: i64,
+    pub nodes_migrated: i64,
+    pub runs_migrated: i64,
+    pub run_projects_migrated: i64,
+    pub run_nodes_migrated: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +481,33 @@ pub struct WorkflowRunExecuteResult {
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRunRetryFailedRequest {
     pub source_workflow_run_id: i64,
+    #[serde(default)]
+    pub selected_managed_project_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    pub max_concurrency_override: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunExecuteRequest {
+    pub pipeline_definition_id: i64,
+    pub project_group_id: i64,
+    #[serde(default)]
+    pub run_parameters: Value,
+    #[serde(default)]
+    pub max_concurrency_override: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunExecuteResult {
+    pub pipeline_run_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunRetryRequest {
+    pub source_pipeline_run_id: i64,
     #[serde(default)]
     pub selected_managed_project_ids: Option<Vec<i64>>,
     #[serde(default)]
