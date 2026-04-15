@@ -4466,8 +4466,7 @@ mod tests {
         .await
         .expect("execute source workflow run");
 
-        let source_detail =
-            wait_for_terminal_pipeline_run_status(&pool, source_run_id, 15_000).await;
+        let source_detail = wait_for_terminal_run_status(&pool, source_run_id, 15_000).await;
         assert_eq!(source_detail.status, "partial_failed");
         let failed_project_ids = source_detail
             .projects
