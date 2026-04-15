@@ -3602,6 +3602,7 @@ mod tests {
     };
     use crate::db::{self, WorkflowExecutionStepDef};
     use crate::models::{ManagedProject, PipelineNodeInput, WorkflowStepInput};
+    use serial_test::serial;
     use serde_json::{Map, Value};
     use sqlx::{migrate::Migrator, sqlite::SqlitePoolOptions, SqlitePool};
     use std::collections::VecDeque;
@@ -3825,6 +3826,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn workflow_executor_persists_run_project_and_step_state() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
@@ -3916,6 +3918,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn workflow_executor_marks_project_failed_precheck_for_dirty_repo() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
@@ -3979,6 +3982,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn workflow_executor_treats_precheck_error_as_cancelled_when_run_is_cancelling() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
@@ -4120,6 +4124,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn internal_failure_fallback_preserves_finished_steps() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
@@ -4308,6 +4313,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn workflow_executor_supports_cooperative_cancellation() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
@@ -4399,6 +4405,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn retry_failed_workflow_run_creates_new_run_with_failed_projects_only() {
         let pool = setup_test_pool().await;
         let clean_repo = setup_git_repo();
@@ -4499,6 +4506,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn retry_failed_workflow_run_retries_all_failed_when_selection_empty() {
         let pool = setup_test_pool().await;
         let clean_repo = setup_git_repo();
@@ -4604,6 +4612,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn retry_failed_workflow_run_errors_when_selected_projects_not_failed() {
         let pool = setup_test_pool().await;
         let clean_repo = setup_git_repo();
@@ -4685,6 +4694,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn retry_failed_workflow_run_errors_when_failed_project_is_now_disabled() {
         let pool = setup_test_pool().await;
         let dirty_repo = setup_git_repo();
@@ -4768,6 +4778,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn pipeline_runtime_persists_run_project_and_node_state() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
@@ -4850,6 +4861,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn pipeline_runtime_persists_structured_failure_envelope_for_precheck() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
@@ -4927,6 +4939,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn pipeline_runtime_retry_failed_run_creates_new_run_with_failed_projects_only() {
         let pool = setup_test_pool().await;
         let clean_repo = setup_git_repo();
@@ -5007,6 +5020,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn pipeline_runtime_cancel_marks_running_run_as_cancelling() {
         let pool = setup_test_pool().await;
 
@@ -5064,6 +5078,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn pipeline_runtime_gitlab_nodes_execute_and_persist_wait_metadata() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
@@ -5195,6 +5210,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn pipeline_runtime_gitlab_failed_check_pipeline_persists_failure_envelope() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
@@ -5375,6 +5391,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn pipeline_runtime_refactor_run_repository_precheck_rejects_dirty_worktree() {
         let repo = setup_git_repo();
         std::fs::write(repo.join("README.md"), "dirty\n").expect("mutate tracked file");
@@ -5399,6 +5416,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn pipeline_runtime_refactor_run_execution_step_prechecks_rejects_missing_checkout_branch(
     ) {
         let repo = setup_git_repo();
@@ -5454,6 +5472,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn repo_lease_blocks_concurrent_execution_for_same_repo_path() {
         let lease_a = super::get_repo_lease(r"D:\Repos\Shared").await;
         let lease_b = super::get_repo_lease("d:/repos/shared").await;
@@ -5480,6 +5499,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn reconcile_stale_running_workflow_marks_terminal_cancelled_rows() {
         let pool = setup_test_pool().await;
         let workflow = db::create_workflow_definition(
