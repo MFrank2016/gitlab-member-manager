@@ -466,3 +466,7 @@
 2. 把第 1-2 周内容再细化成一份 grounded implementation plan
 
 也就是说，当前这份文档用于“定方向”；下一份文档应该用于“开工执行”。
+
+## Baseline Artifact
+
+- See `docs/plans/2026-04-16-pipeline-baseline-metrics.md` for the verified pre-refactor command baseline and the current monitoring/query hotspots captured on 2026-04-16.
