@@ -1,4 +1,5 @@
 use crate::db::{self, PipelineExecutionNodeDef, WorkflowExecutionStepDef};
+use crate::failure_envelope::{build_failure_envelope, FailureEnvelope};
 use crate::gitlab::{self, GitLabConfig, GitLabPipeline};
 use crate::models::{ManagedProject, PipelineVariable};
 use anyhow::{anyhow, Context, Result};
@@ -83,15 +84,6 @@ struct PipelineRetrySourceRun {
     pipeline_definition_id: i64,
     project_group_id: i64,
     run_parameters: Value,
-}
-
-#[derive(Debug, Clone)]
-struct FailureEnvelope {
-    error_code: String,
-    title_zh: String,
-    detail_zh: String,
-    suggestion_zh: String,
-    evidence: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1296,22 +1288,6 @@ fn render_pipeline_nodes_for_run(
         });
     }
     Ok(rendered_nodes)
-}
-
-fn build_failure_envelope(
-    error_code: &str,
-    title_zh: &str,
-    detail_zh: String,
-    suggestion_zh: &str,
-    evidence: String,
-) -> FailureEnvelope {
-    FailureEnvelope {
-        error_code: error_code.to_string(),
-        title_zh: title_zh.to_string(),
-        detail_zh,
-        suggestion_zh: suggestion_zh.to_string(),
-        evidence,
-    }
 }
 
 fn classify_precheck_failure(error: &str) -> FailureEnvelope {

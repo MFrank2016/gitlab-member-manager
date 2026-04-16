@@ -1,4 +1,5 @@
 mod db;
+mod failure_envelope;
 mod gitlab;
 mod models;
 mod scheduler;
