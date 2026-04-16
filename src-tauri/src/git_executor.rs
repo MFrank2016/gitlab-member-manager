@@ -17,10 +17,20 @@ pub(crate) struct CommandResult {
 
 #[derive(Debug)]
 pub(crate) enum StepOperation {
-    CheckoutBranch { branch: String },
-    GitPull { remote: String, branch: String },
-    GitMerge { from: String },
-    GitPush { remote: String, branch: Option<String> },
+    CheckoutBranch {
+        branch: String,
+    },
+    GitPull {
+        remote: String,
+        branch: String,
+    },
+    GitMerge {
+        from: String,
+    },
+    GitPush {
+        remote: String,
+        branch: Option<String>,
+    },
 }
 
 impl StepOperation {
@@ -93,7 +103,10 @@ pub(crate) fn build_execution_step_operation(
     }
 }
 
-pub(crate) async fn execute_git_command(repo_path: String, args: Vec<String>) -> Result<CommandResult> {
+pub(crate) async fn execute_git_command(
+    repo_path: String,
+    args: Vec<String>,
+) -> Result<CommandResult> {
     tokio::task::spawn_blocking(move || {
         let mut child = std::process::Command::new("git")
             .args(args)
@@ -172,7 +185,10 @@ async fn ensure_clean_worktree(repo_path: &str) -> Result<()> {
     )
     .await?;
     if !status_result.success {
-        return Err(anyhow!("git status failed: {}", status_result.stderr.trim()));
+        return Err(anyhow!(
+            "git status failed: {}",
+            status_result.stderr.trim()
+        ));
     }
     if !status_result.stdout.trim().is_empty() {
         return Err(anyhow!("repository worktree is not clean"));

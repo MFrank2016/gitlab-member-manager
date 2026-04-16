@@ -4,7 +4,10 @@ mod git_executor;
 mod gitlab;
 mod gitlab_executor;
 mod models;
+mod pipeline_runtime;
+mod runtime_support;
 mod scheduler;
+mod workflow_runtime_legacy;
 mod workflows;
 
 use tauri::Manager;

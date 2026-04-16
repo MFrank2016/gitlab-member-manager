@@ -111,13 +111,10 @@ pub(crate) fn read_pipeline_reference_param(
     parameters: &Value,
     project: &ManagedProject,
 ) -> String {
-    read_optional_string_param(parameters, "ref")
-        .unwrap_or_else(|| project.default_branch.clone())
+    read_optional_string_param(parameters, "ref").unwrap_or_else(|| project.default_branch.clone())
 }
 
-pub(crate) fn read_pipeline_variables_param(
-    parameters: &Value,
-) -> Result<Vec<(String, String)>> {
+pub(crate) fn read_pipeline_variables_param(parameters: &Value) -> Result<Vec<(String, String)>> {
     let value = parameters
         .get("variables")
         .cloned()
