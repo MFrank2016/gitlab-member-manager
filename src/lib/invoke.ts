@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   BatchResult,
+  CommandError,
   LocalGroup,
   LocalMember,
   ManagedProject,
@@ -114,6 +115,50 @@ async function loggedInvoke<T>(cmd: string, args?: Record<string, unknown>): Pro
     logger.error(`[invoke] ${cmd} failed (${duration}ms)`, error);
     throw error;
   }
+}
+
+function readErrorMessage(error: unknown): string | null {
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>;
+    if (typeof record.messageZh === "string" && record.messageZh.trim()) {
+      return record.messageZh;
+    }
+    if (typeof record.message_zh === "string" && record.message_zh.trim()) {
+      return record.message_zh;
+    }
+    if (typeof record.message === "string" && record.message.trim()) {
+      return record.message;
+    }
+  }
+  return null;
+}
+
+export function isCommandError(error: unknown): error is CommandError {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    typeof (error as Record<string, unknown>).category === "string" &&
+    typeof (error as Record<string, unknown>).messageZh === "string"
+  );
+}
+
+export function readCommandErrorMessage(error: unknown, fallback: string): string {
+  if (isCommandError(error)) {
+    return error.messageZh;
+  }
+
+  const rawMessage = readErrorMessage(error);
+  if (rawMessage) {
+    return rawMessage;
+  }
+
+  return fallback;
 }
 
 export async function getGitLabConfig(): Promise<{

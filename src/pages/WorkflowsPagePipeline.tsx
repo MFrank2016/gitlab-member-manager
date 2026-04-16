@@ -22,6 +22,7 @@ import {
   getPipelineDefinitionDetail,
   listPipelineDefinitions,
   listProjectGroups,
+  readCommandErrorMessage,
   updatePipelineDefinition,
 } from "@/lib/invoke";
 import {
@@ -960,7 +961,7 @@ export function WorkflowsPagePipeline() {
       return true;
     } catch (error) {
       if (!silent) {
-        toast.error(`加载流水线失败：${String(error)}`);
+        toast.error(readCommandErrorMessage(error, "加载流水线定义失败。"));
       }
       setItems([]);
       setProjectGroups([]);
@@ -979,7 +980,7 @@ export function WorkflowsPagePipeline() {
     try {
       payload = buildPipelineCreatePayload(createDraft);
     } catch (error) {
-      toast.error(String(error));
+      toast.error(readCommandErrorMessage(error, "创建流水线前校验失败。"));
       return;
     }
 
@@ -992,7 +993,7 @@ export function WorkflowsPagePipeline() {
         toast.success("流水线已创建。");
       }
     } catch (error) {
-      toast.error(`创建流水线失败：${String(error)}`);
+      toast.error(readCommandErrorMessage(error, "创建流水线失败。"));
     } finally {
       setCreating(false);
     }
@@ -1009,7 +1010,7 @@ export function WorkflowsPagePipeline() {
       setEditOpen(true);
     } catch (error) {
       if (requestToken !== editRequestTokenRef.current) return;
-      toast.error(`加载流水线详情失败：${String(error)}`);
+      toast.error(readCommandErrorMessage(error, "加载流水线详情失败。"));
     }
   }
 
@@ -1019,7 +1020,7 @@ export function WorkflowsPagePipeline() {
     try {
       payload = buildPipelineCreatePayload(editDraft);
     } catch (error) {
-      toast.error(String(error));
+      toast.error(readCommandErrorMessage(error, "更新流水线前校验失败。"));
       return;
     }
 
@@ -1032,7 +1033,7 @@ export function WorkflowsPagePipeline() {
         toast.success("流水线已更新。");
       }
     } catch (error) {
-      toast.error(`更新流水线失败：${String(error)}`);
+      toast.error(readCommandErrorMessage(error, "更新流水线失败。"));
     } finally {
       setSaving(false);
     }
@@ -1046,7 +1047,7 @@ export function WorkflowsPagePipeline() {
         toast.success("流水线已删除。");
       }
     } catch (error) {
-      toast.error(`删除流水线失败：${String(error)}`);
+      toast.error(readCommandErrorMessage(error, "删除流水线失败。"));
     }
   }
 

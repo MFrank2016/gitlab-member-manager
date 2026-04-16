@@ -6,6 +6,21 @@ export type GitLabConfig = {
   defaultRemote?: string | null;
 };
 
+export type CommandErrorCategory =
+  | "config_missing"
+  | "validation_failed"
+  | "git_failed"
+  | "gitlab_failed"
+  | "not_found"
+  | "conflict"
+  | "internal";
+
+export type CommandError = {
+  category: CommandErrorCategory;
+  messageZh: string;
+  detail?: string | null;
+};
+
 export type ProjectSummary = {
   id: number;
   name: string;

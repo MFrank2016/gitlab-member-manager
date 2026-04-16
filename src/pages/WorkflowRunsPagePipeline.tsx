@@ -8,6 +8,7 @@ import {
   cancelPipelineRun,
   getPipelineRunDetail,
   listPipelineRuns,
+  readCommandErrorMessage,
   retryPipelineRun,
 } from "@/lib/invoke";
 import type {
@@ -229,7 +230,7 @@ export function WorkflowRunsPagePipeline() {
       }
     } catch (error) {
       if (refreshRequestToken !== refreshRequestTokenRef.current) return;
-      toast.error(`Load pipeline runs failed: ${String(error)}`);
+      toast.error(readCommandErrorMessage(error, "加载流水线运行记录失败。"));
       detailRequestTokenRef.current += 1;
       setRuns([]);
       setSelectedRunId(null);
@@ -275,7 +276,7 @@ export function WorkflowRunsPagePipeline() {
         if (requestToken !== detailRequestTokenRef.current) return;
         setRunDetail(null);
         setSelectedProjectId(null);
-        toast.error(`Load pipeline run detail failed: ${String(error)}`);
+        toast.error(readCommandErrorMessage(error, "加载流水线运行详情失败。"));
       })
       .finally(() => {
         if (requestToken !== detailRequestTokenRef.current) return;
@@ -299,10 +300,10 @@ export function WorkflowRunsPagePipeline() {
     setCancelling(true);
     try {
       await cancelPipelineRun(targetRunId);
-      toast.success(`Cancel requested for run #${targetRunId}.`);
+      toast.success(`已提交取消请求：运行 #${targetRunId}`);
       await refreshRuns(targetRunId);
     } catch (error) {
-      toast.error(`Cancel pipeline run failed: ${String(error)}`);
+      toast.error(readCommandErrorMessage(error, "取消流水线运行失败。"));
     } finally {
       setCancelling(false);
     }
@@ -323,10 +324,10 @@ export function WorkflowRunsPagePipeline() {
         selectedManagedProjectIds: failedManagedProjectIds.length > 0 ? failedManagedProjectIds : null,
         maxConcurrencyOverride: null,
       });
-      toast.success(`Retry run queued as #${result.pipelineRunId}.`);
+      toast.success(`已创建重试运行：#${result.pipelineRunId}`);
       await refreshRuns(result.pipelineRunId);
     } catch (error) {
-      toast.error(`Retry failed projects failed: ${String(error)}`);
+      toast.error(readCommandErrorMessage(error, "重试失败项目失败。"));
     } finally {
       setRetrying(false);
     }

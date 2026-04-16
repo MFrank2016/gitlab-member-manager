@@ -1,4 +1,5 @@
 mod db;
+mod errors;
 mod failure_envelope;
 mod git_executor;
 mod gitlab;
@@ -12,6 +13,7 @@ mod workflows;
 
 use tauri::Manager;
 
+use crate::errors::{CommandError, CommandErrorCategory};
 use crate::gitlab::GitLabConfig;
 use crate::models::{
     AppSettings, BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert,
@@ -99,6 +101,91 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn validation_error(message_zh: impl Into<String>) -> CommandError {
+    CommandError::new(CommandErrorCategory::ValidationFailed, message_zh, None)
+}
+
+fn pipeline_command_error(error: anyhow::Error) -> CommandError {
+    let detail = error.to_string();
+    let normalized = detail.to_ascii_lowercase();
+
+    if normalized.contains("config not set") || normalized.contains("config missing") {
+        return CommandError::new(
+            CommandErrorCategory::ConfigMissing,
+            "GitLab 配置缺失，请先完成设置后重试。",
+            Some(detail),
+        );
+    }
+
+    if normalized.contains("unique constraint failed") {
+        return CommandError::new(
+            CommandErrorCategory::Conflict,
+            "流水线定义与现有数据冲突，请检查名称或关联配置。",
+            Some(detail),
+        );
+    }
+
+    if normalized.contains("not found") {
+        return CommandError::new(
+            CommandErrorCategory::NotFound,
+            "目标流水线不存在或已被删除。",
+            Some(detail),
+        );
+    }
+
+    if normalized.contains("already finished")
+        || normalized.contains("not cancellable")
+        || normalized.contains("cannot be retried")
+        || normalized.contains("retry resolved")
+    {
+        return CommandError::new(
+            CommandErrorCategory::Conflict,
+            "当前流水线状态不允许执行该操作。",
+            Some(detail),
+        );
+    }
+
+    if normalized.contains("gitlab") {
+        return CommandError::new(
+            CommandErrorCategory::GitlabFailed,
+            "GitLab 操作失败，请检查配置、权限或远端流水线状态。",
+            Some(detail),
+        );
+    }
+
+    if normalized.contains("repository")
+        || normalized.contains("git ")
+        || normalized.contains("worktree")
+        || normalized.contains("branch")
+        || normalized.contains("remote")
+    {
+        return CommandError::new(
+            CommandErrorCategory::GitFailed,
+            "Git 操作失败，请检查仓库状态、分支和远端配置。",
+            Some(detail),
+        );
+    }
+
+    if normalized.contains("must be")
+        || normalized.contains("invalid")
+        || normalized.contains("required")
+        || normalized.contains("missing")
+        || normalized.contains("empty")
+    {
+        return CommandError::new(
+            CommandErrorCategory::ValidationFailed,
+            "请求参数无效，请检查输入后重试。",
+            Some(detail),
+        );
+    }
+
+    CommandError::new(
+        CommandErrorCategory::Internal,
+        "流水线操作失败，请稍后重试。",
+        Some(detail),
+    )
 }
 
 #[tauri::command]
@@ -493,10 +580,21 @@ async fn create_pipeline_definition(
     variables: Vec<PipelineVariableInput>,
     nodes: Vec<PipelineNodeInput>,
     schedules: Vec<PipelineScheduleInput>,
-) -> Result<PipelineDefinitionDetail, String> {
+) -> Result<PipelineDefinitionDetail, CommandError> {
+    let trimmed_name = name.trim().to_string();
+    if trimmed_name.is_empty() {
+        return Err(validation_error("流水线名称不能为空。"));
+    }
+    if max_concurrency_default < 1 {
+        return Err(validation_error("默认最大并发数必须大于等于 1。"));
+    }
+    if nodes.is_empty() {
+        return Err(validation_error("至少需要一个流水线节点。"));
+    }
+
     let result = db::create_pipeline_definition(
         &state.db,
-        name.trim().to_string(),
+        trimmed_name,
         description.trim().to_string(),
         enabled,
         max_concurrency_default,
@@ -505,11 +603,11 @@ async fn create_pipeline_definition(
         schedules,
     )
     .await
-    .map_err(|e| e.to_string());
+    .map_err(pipeline_command_error);
 
     match &result {
         Ok(pipeline) => tracing::info!(id = pipeline.id, "create_pipeline_definition success"),
-        Err(e) => tracing::error!(error = %e, "create_pipeline_definition failed"),
+        Err(e) => tracing::error!(error = ?e, "create_pipeline_definition failed"),
     }
 
     result
@@ -536,16 +634,16 @@ async fn list_workflow_definitions(
 #[tauri::command]
 async fn list_pipeline_definitions(
     state: State<'_, AppState>,
-) -> Result<Vec<PipelineDefinitionListItem>, String> {
+) -> Result<Vec<PipelineDefinitionListItem>, CommandError> {
     let result = db::list_pipeline_definitions(&state.db)
         .await
-        .map_err(|e| e.to_string());
+        .map_err(pipeline_command_error);
 
     match &result {
         Ok(pipelines) => {
             tracing::info!(count = pipelines.len(), "list_pipeline_definitions success")
         }
-        Err(e) => tracing::error!(error = %e, "list_pipeline_definitions failed"),
+        Err(e) => tracing::error!(error = ?e, "list_pipeline_definitions failed"),
     }
 
     result
@@ -572,14 +670,14 @@ async fn get_workflow_definition_detail(
 async fn get_pipeline_definition_detail(
     state: State<'_, AppState>,
     id: i64,
-) -> Result<PipelineDefinitionDetail, String> {
+) -> Result<PipelineDefinitionDetail, CommandError> {
     let result = db::get_pipeline_definition_detail(&state.db, id)
         .await
-        .map_err(|e| e.to_string());
+        .map_err(pipeline_command_error);
 
     match &result {
         Ok(_) => tracing::info!(id = id, "get_pipeline_definition_detail success"),
-        Err(e) => tracing::error!(id = id, error = %e, "get_pipeline_definition_detail failed"),
+        Err(e) => tracing::error!(id = id, error = ?e, "get_pipeline_definition_detail failed"),
     }
 
     result
@@ -628,11 +726,22 @@ async fn update_pipeline_definition(
     variables: Vec<PipelineVariableInput>,
     nodes: Vec<PipelineNodeInput>,
     schedules: Vec<PipelineScheduleInput>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
+    let trimmed_name = name.trim().to_string();
+    if trimmed_name.is_empty() {
+        return Err(validation_error("流水线名称不能为空。"));
+    }
+    if max_concurrency_default < 1 {
+        return Err(validation_error("默认最大并发数必须大于等于 1。"));
+    }
+    if nodes.is_empty() {
+        return Err(validation_error("至少需要一个流水线节点。"));
+    }
+
     let result = db::update_pipeline_definition(
         &state.db,
         id,
-        name.trim().to_string(),
+        trimmed_name,
         description.trim().to_string(),
         enabled,
         max_concurrency_default,
@@ -641,11 +750,11 @@ async fn update_pipeline_definition(
         schedules,
     )
     .await
-    .map_err(|e| e.to_string());
+    .map_err(pipeline_command_error);
 
     match &result {
         Ok(_) => tracing::info!(id = id, "update_pipeline_definition success"),
-        Err(e) => tracing::error!(id = id, error = %e, "update_pipeline_definition failed"),
+        Err(e) => tracing::error!(id = id, error = ?e, "update_pipeline_definition failed"),
     }
 
     result
@@ -666,14 +775,17 @@ async fn delete_workflow_definition(state: State<'_, AppState>, id: i64) -> Resu
 }
 
 #[tauri::command]
-async fn delete_pipeline_definition(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+async fn delete_pipeline_definition(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), CommandError> {
     let result = db::delete_pipeline_definition(&state.db, id)
         .await
-        .map_err(|e| e.to_string());
+        .map_err(pipeline_command_error);
 
     match &result {
         Ok(_) => tracing::info!(id = id, "delete_pipeline_definition success"),
-        Err(e) => tracing::error!(id = id, error = %e, "delete_pipeline_definition failed"),
+        Err(e) => tracing::error!(id = id, error = ?e, "delete_pipeline_definition failed"),
     }
 
     result
@@ -698,14 +810,14 @@ async fn list_workflow_runs(
 #[tauri::command]
 async fn list_pipeline_runs(
     state: State<'_, AppState>,
-) -> Result<Vec<PipelineRunListItem>, String> {
+) -> Result<Vec<PipelineRunListItem>, CommandError> {
     let result = db::list_pipeline_runs(&state.db)
         .await
-        .map_err(|e| e.to_string());
+        .map_err(pipeline_command_error);
 
     match &result {
         Ok(runs) => tracing::info!(count = runs.len(), "list_pipeline_runs success"),
-        Err(e) => tracing::error!(error = %e, "list_pipeline_runs failed"),
+        Err(e) => tracing::error!(error = ?e, "list_pipeline_runs failed"),
     }
 
     result
@@ -715,7 +827,7 @@ async fn list_pipeline_runs(
 async fn execute_pipeline_run(
     state: State<'_, AppState>,
     request: PipelineRunExecuteRequest,
-) -> Result<PipelineRunExecuteResult, String> {
+) -> Result<PipelineRunExecuteResult, CommandError> {
     let run_id = workflows::execute_pipeline_run(
         &state.db,
         request.pipeline_definition_id,
@@ -724,7 +836,7 @@ async fn execute_pipeline_run(
         request.max_concurrency_override,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(pipeline_command_error)?;
 
     tracing::info!(pipeline_run_id = run_id, "execute_pipeline_run success");
     Ok(PipelineRunExecuteResult {
@@ -736,10 +848,10 @@ async fn execute_pipeline_run(
 async fn cancel_pipeline_run(
     state: State<'_, AppState>,
     pipeline_run_id: i64,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let result = workflows::cancel_pipeline_run(&state.db, pipeline_run_id)
         .await
-        .map_err(|e| e.to_string());
+        .map_err(pipeline_command_error);
 
     match &result {
         Ok(_) => tracing::info!(
@@ -748,7 +860,7 @@ async fn cancel_pipeline_run(
         ),
         Err(e) => tracing::error!(
             pipeline_run_id = pipeline_run_id,
-            error = %e,
+            error = ?e,
             "cancel_pipeline_run failed"
         ),
     }
@@ -760,7 +872,7 @@ async fn cancel_pipeline_run(
 async fn retry_pipeline_run(
     state: State<'_, AppState>,
     request: PipelineRunRetryRequest,
-) -> Result<PipelineRunExecuteResult, String> {
+) -> Result<PipelineRunExecuteResult, CommandError> {
     let run_id = workflows::retry_pipeline_run(
         &state.db,
         request.source_pipeline_run_id,
@@ -768,7 +880,7 @@ async fn retry_pipeline_run(
         request.max_concurrency_override,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(pipeline_command_error)?;
 
     tracing::info!(
         source_pipeline_run_id = request.source_pipeline_run_id,
@@ -872,14 +984,14 @@ async fn get_workflow_run_detail(
 async fn get_pipeline_run_detail(
     state: State<'_, AppState>,
     id: i64,
-) -> Result<PipelineRunDetail, String> {
+) -> Result<PipelineRunDetail, CommandError> {
     let result = db::get_pipeline_run_detail(&state.db, id)
         .await
-        .map_err(|e| e.to_string());
+        .map_err(pipeline_command_error);
 
     match &result {
         Ok(_) => tracing::info!(id = id, "get_pipeline_run_detail success"),
-        Err(e) => tracing::error!(id = id, error = %e, "get_pipeline_run_detail failed"),
+        Err(e) => tracing::error!(id = id, error = ?e, "get_pipeline_run_detail failed"),
     }
 
     result
@@ -1365,4 +1477,28 @@ fn main() {
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn pipeline_command_error_serializes_camel_case_payload() {
+        let payload = serde_json::to_value(crate::errors::CommandError {
+            category: crate::errors::CommandErrorCategory::ValidationFailed,
+            message_zh: "字段校验失败".to_string(),
+            detail: Some("missing required pipeline variable".to_string()),
+        })
+        .expect("serialize command error");
+
+        assert_eq!(
+            payload,
+            json!({
+                "category": "validation_failed",
+                "messageZh": "字段校验失败",
+                "detail": "missing required pipeline variable"
+            })
+        );
+    }
 }

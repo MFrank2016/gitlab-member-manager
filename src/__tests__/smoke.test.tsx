@@ -12,6 +12,7 @@ import {
   listPipelineDefinitions,
   listPipelineRuns,
   listWorkflowDefinitions,
+  readCommandErrorMessage,
   retryPipelineRun,
   updatePipelineDefinition,
 } from "@/lib/invoke";
@@ -66,6 +67,23 @@ describe("navigation smoke", () => {
     expect(screen.getByTitle("项目分组")).toBeInTheDocument();
     expect(screen.getByTitle("工作流定义")).toBeInTheDocument();
     expect(screen.getByTitle("工作流运行")).toBeInTheDocument();
+  });
+});
+
+describe("pipeline command error helpers", () => {
+  it("prefers structured Chinese command errors and falls back for unknown payloads", () => {
+    expect(
+      readCommandErrorMessage(
+        {
+          category: "validation_failed",
+          messageZh: "加载流水线失败",
+          detail: "missing required pipeline variable",
+        },
+        "默认失败提示"
+      )
+    ).toBe("加载流水线失败");
+
+    expect(readCommandErrorMessage({ unexpected: true }, "默认失败提示")).toBe("默认失败提示");
   });
 });
 
