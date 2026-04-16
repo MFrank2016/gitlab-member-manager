@@ -1,6 +1,8 @@
 mod db;
 mod failure_envelope;
+mod git_executor;
 mod gitlab;
+mod gitlab_executor;
 mod models;
 mod scheduler;
 mod workflows;
