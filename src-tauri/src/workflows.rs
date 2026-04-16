@@ -3827,7 +3827,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn workflow_executor_persists_run_project_and_step_state() {
+    async fn workflow_runtime_legacy_execute_workflow_run_still_works() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
 
@@ -4862,7 +4862,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn pipeline_runtime_persists_structured_failure_envelope_for_precheck() {
+    async fn pipeline_runtime_foundation_persists_structured_failure_envelope_for_precheck() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
         std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
@@ -5079,7 +5079,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn pipeline_runtime_gitlab_nodes_execute_and_persist_wait_metadata() {
+    async fn pipeline_runtime_foundation_gitlab_nodes_persist_wait_metadata() {
         let pool = setup_test_pool().await;
         let repo = setup_git_repo();
         let base_url = spawn_gitlab_test_server(vec![
