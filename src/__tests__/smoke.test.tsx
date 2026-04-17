@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
@@ -805,6 +805,286 @@ describe("pipeline run monitor interactions", () => {
         },
       });
     });
+  });
+});
+
+describe("pipeline run auto refresh", () => {
+  function createIntervalTracker() {
+    type TrackedInterval = {
+      callback: () => void | Promise<void>;
+      delay?: number;
+      handle: number;
+    };
+
+    const trackedIntervals: TrackedInterval[] = [];
+    const activeHandles = new Set<number>();
+    let nextHandle = 1;
+
+    const setIntervalSpy = vi
+      .spyOn(globalThis, "setInterval")
+      .mockImplementation(((callback: TimerHandler, delay?: number) => {
+        const handle = nextHandle++;
+        if (typeof callback === "function") {
+          trackedIntervals.push({
+            callback: callback as () => void | Promise<void>,
+            delay: typeof delay === "number" ? delay : undefined,
+            handle,
+          });
+        }
+        activeHandles.add(handle);
+        return handle as unknown as ReturnType<typeof setInterval>;
+      }) as typeof setInterval);
+
+    const clearIntervalSpy = vi
+      .spyOn(globalThis, "clearInterval")
+      .mockImplementation(((handle?: number | ReturnType<typeof setInterval>) => {
+        activeHandles.delete(handle as number);
+      }) as typeof clearInterval);
+
+    function getActiveAutoRefreshIntervals() {
+      return trackedIntervals.filter((entry) => entry.delay === 10_000 && activeHandles.has(entry.handle));
+    }
+
+    return {
+      clearIntervalSpy,
+      getActiveAutoRefreshIntervals,
+      setIntervalSpy,
+    };
+  }
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("auto refreshes the selected active pipeline run", async () => {
+    const { clearIntervalSpy, getActiveAutoRefreshIntervals, setIntervalSpy } = createIntervalTracker();
+
+    const runningRun = {
+      id: 901,
+      pipelineDefinitionId: 44,
+      pipelineDefinitionName: "release-pipeline",
+      projectGroupId: 7,
+      projectGroupName: "release-train",
+      legacyWorkflowRunId: null,
+      sourcePipelineRunId: null,
+      triggerKind: "manual",
+      status: "running",
+      runParameters: { source_branch: "release" },
+      maxConcurrency: 2,
+      projectsTotal: 1,
+      projectsQueued: 0,
+      projectsRunning: 1,
+      projectsSuccess: 0,
+      projectsFailed: 0,
+      projectsCancelled: 0,
+      projectsFailedPrecheck: 0,
+      startedAt: "2026-04-17T00:00:00Z",
+      finishedAt: null,
+      createdAt: "2026-04-17T00:00:00Z",
+      updatedAt: "2026-04-17T00:00:10Z",
+    };
+
+    const runningDetail = {
+      ...runningRun,
+      projects: [
+        {
+          id: 4001,
+          managedProjectId: 6001,
+          gitlabProjectId: 7001,
+          projectName: "service-a",
+          projectPathWithNamespace: "team/service-a",
+          repoPath: "D:/repos/service-a",
+          status: "running",
+          summaryMessage: "running",
+          startedAt: "2026-04-17T00:00:00Z",
+          finishedAt: null,
+          nodes: [
+            {
+              id: 5001,
+              pipelineNodeId: 1,
+              nodeOrder: 0,
+              nodeType: "wait_pipeline",
+              renderedParameters: { project: "team/service-a", ref: "main" },
+              status: "waiting",
+              startedAt: "2026-04-17T00:00:01Z",
+              finishedAt: null,
+              exitCode: null,
+              summaryMessage: "waiting",
+              errorCode: null,
+              titleZh: null,
+              detailZh: null,
+              suggestionZh: null,
+              waitTarget: "team/service-a@main",
+              lastRemoteStatus: "running",
+              remotePipelineId: 777,
+            },
+          ],
+        },
+      ],
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_pipeline_runs") {
+        return {
+          items: [runningRun],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "get_pipeline_run_detail") return runningDetail;
+      return undefined;
+    });
+
+    render(<WorkflowRunsPage />);
+
+    expect(await screen.findByText("team/service-a@main")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(setIntervalSpy).toHaveBeenCalled();
+      expect(getActiveAutoRefreshIntervals().length).toBeGreaterThan(0);
+    });
+    const listCallsBeforeTick = invokeMock.mock.calls.filter(([cmd]) => cmd === "list_pipeline_runs").length;
+    expect(listCallsBeforeTick).toBe(1);
+
+    const activeIntervals = getActiveAutoRefreshIntervals();
+    const activeRefreshCallback = activeIntervals[activeIntervals.length - 1]?.callback;
+    expect(activeRefreshCallback).toBeDefined();
+    await act(async () => {
+      await activeRefreshCallback?.();
+    });
+
+    await waitFor(() => {
+      const listCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "list_pipeline_runs").length;
+      expect(listCalls).toBeGreaterThanOrEqual(2);
+    });
+
+    setIntervalSpy.mockRestore();
+    clearIntervalSpy.mockRestore();
+  });
+
+  it("stops auto refresh after the selected pipeline run becomes terminal", async () => {
+    const { clearIntervalSpy, getActiveAutoRefreshIntervals, setIntervalSpy } = createIntervalTracker();
+
+    const runningRun = {
+      id: 902,
+      pipelineDefinitionId: 45,
+      pipelineDefinitionName: "release-pipeline",
+      projectGroupId: 8,
+      projectGroupName: "release-train",
+      legacyWorkflowRunId: null,
+      sourcePipelineRunId: null,
+      triggerKind: "manual",
+      status: "running",
+      runParameters: { source_branch: "release" },
+      maxConcurrency: 2,
+      projectsTotal: 1,
+      projectsQueued: 0,
+      projectsRunning: 1,
+      projectsSuccess: 0,
+      projectsFailed: 0,
+      projectsCancelled: 0,
+      projectsFailedPrecheck: 0,
+      startedAt: "2026-04-17T00:00:00Z",
+      finishedAt: null,
+      createdAt: "2026-04-17T00:00:00Z",
+      updatedAt: "2026-04-17T00:00:10Z",
+    };
+    const completedRun = {
+      ...runningRun,
+      status: "completed",
+      projectsRunning: 0,
+      projectsSuccess: 1,
+      finishedAt: "2026-04-17T00:00:20Z",
+      updatedAt: "2026-04-17T00:00:20Z",
+    };
+
+    let listCallIndex = 0;
+    let detailCallIndex = 0;
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_pipeline_runs") {
+        listCallIndex += 1;
+        const run = listCallIndex >= 2 ? completedRun : runningRun;
+        return {
+          items: [run],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "get_pipeline_run_detail") {
+        detailCallIndex += 1;
+        const run = detailCallIndex >= 2 ? completedRun : runningRun;
+        return {
+          ...run,
+          projects: [
+            {
+              id: 4002,
+              managedProjectId: 6002,
+              gitlabProjectId: 7002,
+              projectName: "service-b",
+              projectPathWithNamespace: "team/service-b",
+              repoPath: "D:/repos/service-b",
+              status: run.status === "completed" ? "success" : "running",
+              summaryMessage: run.status,
+              startedAt: "2026-04-17T00:00:00Z",
+              finishedAt: run.finishedAt,
+              nodes: [
+                {
+                  id: 5002,
+                  pipelineNodeId: 1,
+                  nodeOrder: 0,
+                  nodeType: "wait_pipeline",
+                  renderedParameters: { project: "team/service-b", ref: "main" },
+                  status: run.status === "completed" ? "success" : "running",
+                  startedAt: "2026-04-17T00:00:01Z",
+                  finishedAt: run.finishedAt,
+                  exitCode: null,
+                  summaryMessage: run.status,
+                  errorCode: null,
+                  titleZh: null,
+                  detailZh: null,
+                  suggestionZh: null,
+                  waitTarget: "team/service-b@main",
+                  lastRemoteStatus: run.status === "completed" ? "success" : "running",
+                  remotePipelineId: 778,
+                },
+              ],
+            },
+          ],
+        };
+      }
+      return undefined;
+    });
+
+    render(<WorkflowRunsPage />);
+
+    expect(await screen.findByText("team/service-b@main")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(setIntervalSpy).toHaveBeenCalled();
+      expect(getActiveAutoRefreshIntervals().length).toBeGreaterThan(0);
+    });
+
+    const activeIntervals = getActiveAutoRefreshIntervals();
+    const activeRefreshCallback = activeIntervals[activeIntervals.length - 1]?.callback;
+    expect(activeRefreshCallback).toBeDefined();
+    await act(async () => {
+      await activeRefreshCallback?.();
+    });
+
+    await waitFor(() => {
+      const listCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "list_pipeline_runs").length;
+      expect(listCalls).toBe(2);
+    });
+    await waitFor(() => {
+      expect(clearIntervalSpy).toHaveBeenCalled();
+      expect(getActiveAutoRefreshIntervals()).toHaveLength(0);
+    });
+
+    setIntervalSpy.mockRestore();
+    clearIntervalSpy.mockRestore();
   });
 });
 

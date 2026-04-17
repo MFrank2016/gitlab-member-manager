@@ -84,6 +84,7 @@ const NODE_TYPE_TEXT: Record<string, string> = {
 };
 
 const DEFAULT_RUN_PAGE_SIZE = 20;
+const AUTO_REFRESH_INTERVAL_MS = 10_000;
 
 const RUN_STATUS_FILTER_OPTIONS = [
   { value: "", label: "全部状态" },
@@ -169,6 +170,10 @@ function buildRunQuery(filters: FilterState, page: number): PipelineRunListQuery
     pipelineDefinitionId: parseOptionalNumber(filters.pipelineDefinitionId),
     projectGroupId: parseOptionalNumber(filters.projectGroupId),
   };
+}
+
+function isActiveRunStatus(status: string | null | undefined) {
+  return status === "pending" || status === "running" || status === "waiting" || status === "cancelling";
 }
 
 function PipelineNodeCard({
@@ -304,12 +309,20 @@ export function WorkflowRunsPagePipeline() {
   const detailRequestTokenRef = React.useRef(0);
   const refreshRequestTokenRef = React.useRef(0);
   const selectedRunIdRef = React.useRef<number | null>(null);
+  const previousSelectedRunIdRef = React.useRef<number | null>(null);
   const userSelectionVersionRef = React.useRef(0);
 
   const runs = runPage.items;
 
   React.useEffect(() => {
     selectedRunIdRef.current = selectedRunId;
+  }, [selectedRunId]);
+
+  React.useEffect(() => {
+    if (previousSelectedRunIdRef.current !== selectedRunId) {
+      previousSelectedRunIdRef.current = selectedRunId;
+      resetNodeDiagnosticsState();
+    }
   }, [selectedRunId]);
 
   function resetNodeDiagnosticsState() {
@@ -386,7 +399,6 @@ export function WorkflowRunsPagePipeline() {
   React.useEffect(() => {
     const requestToken = detailRequestTokenRef.current + 1;
     detailRequestTokenRef.current = requestToken;
-    resetNodeDiagnosticsState();
 
     if (!selectedRunId) {
       setRunDetail(null);
@@ -428,6 +440,27 @@ export function WorkflowRunsPagePipeline() {
     selectedRunDetail?.projects.find((project) => project.id === selectedProjectId) ?? null;
   const canCancel = selectedRun?.status === "pending" || selectedRun?.status === "running";
   const canRetryFailed = selectedRunDetail?.projects.some((project) => hasFailedProject(project)) ?? false;
+
+  React.useEffect(() => {
+    if (!selectedRunId || !isActiveRunStatus(activeRun?.status)) {
+      return;
+    }
+
+    const intervalHandle = window.setInterval(() => {
+      void refreshRuns(selectedRunId, runPage.page, filters);
+    }, AUTO_REFRESH_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalHandle);
+    };
+  }, [
+    selectedRunId,
+    activeRun?.status,
+    runPage.page,
+    filters.status,
+    filters.pipelineDefinitionId,
+    filters.projectGroupId,
+  ]);
 
   async function onCancelRun() {
     if (!selectedRun) return;
