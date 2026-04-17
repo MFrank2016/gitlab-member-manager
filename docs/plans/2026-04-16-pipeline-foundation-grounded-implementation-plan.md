@@ -201,3 +201,17 @@ This plan intentionally does **not** include:
 - DAG or timeline visualization
 
 Those belong to the next grounded implementation slice.
+
+## Status Note
+
+The runtime-foundation slice is now landed in the isolated `pipeline-runtime-foundation` worktree and has completed:
+- runtime decomposition across `pipeline_runtime.rs`, `workflow_runtime_legacy.rs`, `git_executor.rs`, `gitlab_executor.rs`, and `failure_envelope.rs`
+- thinner pipeline-facing Tauri command handlers with structured command errors
+- focused OpenSpec, frontend smoke, pipeline runtime, GitLab runtime, and scheduler regression verification
+
+Still intentionally deferred after this slice:
+- run-history pagination is still pending
+- run-detail lazy loading is still pending
+- active-run auto-refresh is still pending
+- scheduler query optimization is still pending
+- richer pipeline visualizations are still pending

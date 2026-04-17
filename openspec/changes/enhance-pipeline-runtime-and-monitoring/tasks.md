@@ -1,7 +1,7 @@
 ## 1. Runtime Foundation
-- [ ] 1.1 Split the pipeline runtime into smaller modules with stable boundaries for Git execution, GitLab execution, failure classification, retry logic, and legacy workflow compatibility.
-- [ ] 1.2 Reduce `src-tauri/src/main.rs` to a thinner command layer and introduce structured runtime error categories instead of string-only command failures.
-- [ ] 1.3 Preserve current runtime behavior with focused regression coverage while the internal refactor lands.
+- [x] 1.1 Split the pipeline runtime into smaller modules with stable boundaries for Git execution, GitLab execution, failure classification, retry logic, and legacy workflow compatibility.
+- [x] 1.2 Reduce `src-tauri/src/main.rs` to a thinner command layer and introduce structured runtime error categories instead of string-only command failures.
+- [x] 1.3 Preserve current runtime behavior with focused regression coverage while the internal refactor lands.
 
 ## 2. Monitoring And Data Loading
 - [ ] 2.1 Add paginated and filterable pipeline run history queries and update the frontend invoke surface accordingly.
@@ -19,6 +19,6 @@
 - [ ] 4.3 Preserve Chinese-first operator messaging for failures, waiting states, and recovery prompts.
 
 ## 5. Verification
-- [ ] 5.1 Validate the change with `openspec validate enhance-pipeline-runtime-and-monitoring --strict`.
-- [ ] 5.2 Run focused Rust, frontend, and scheduler regression coverage for runtime foundation changes.
+- [x] 5.1 Validate the change with `openspec validate enhance-pipeline-runtime-and-monitoring --strict`.
+- [x] 5.2 Run focused Rust, frontend, and scheduler regression coverage for runtime foundation changes.
 - [ ] 5.3 Re-run full packaging verification after monitoring and runtime changes stabilize.
