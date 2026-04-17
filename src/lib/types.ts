@@ -130,6 +130,7 @@ export type PipelineScheduleInput = {
 };
 
 export type PipelineSchedule = {
+  id: number;
   scheduleOrder: number;
   projectGroupId: number | null;
   cronExpr: string;
@@ -138,6 +139,15 @@ export type PipelineSchedule = {
   enabled: boolean;
   policy: string;
   variables: unknown;
+};
+
+export type PipelineScheduleRuntimeSnapshot = {
+  scheduleId: number;
+  queued: boolean;
+  lastDecision: "started" | "queued" | "skipped" | "idle";
+  lastDecisionAt?: string | null;
+  lastDecisionMessageZh?: string | null;
+  nextTriggerAt?: string | null;
 };
 
 export type PipelineDefinitionListItem = {

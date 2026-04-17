@@ -20,6 +20,7 @@ import {
   createPipelineDefinition,
   deletePipelineDefinition,
   getPipelineDefinitionDetail,
+  getPipelineScheduleRuntimeSnapshots,
   listPipelineDefinitions,
   listProjectGroups,
   readCommandErrorMessage,
@@ -34,6 +35,7 @@ import type {
   PipelineDefinitionDetail,
   PipelineDefinitionListItem,
   PipelineNodeInput,
+  PipelineScheduleRuntimeSnapshot,
   PipelineVariableInput,
   ProjectGroup,
 } from "@/lib/types";
@@ -134,6 +136,7 @@ type NodeDraft = {
 
 type ScheduleDraft = {
   id: string;
+  scheduleId: number | null;
   projectGroupId: string;
   cronExpr: string;
   timezone: string;
@@ -249,6 +252,7 @@ function createScheduleDraft(projectGroupId?: number | null, overrides?: Partial
   const variables = overrides?.variables ?? {};
   return {
     id: nextScheduleDraftId(),
+    scheduleId: overrides?.scheduleId ?? null,
     projectGroupId: overrides?.projectGroupId ?? (projectGroupId ? String(projectGroupId) : ""),
     cronExpr: overrides?.cronExpr ?? "0 9 * * 1-5",
     timezone: overrides?.timezone ?? "Asia/Shanghai",
@@ -328,6 +332,7 @@ function toDraftFromDetail(detail: PipelineDefinitionDetail): PipelineDraft {
     .sort((a, b) => a.scheduleOrder - b.scheduleOrder)
     .map((schedule) =>
       createScheduleDraft(schedule.projectGroupId, {
+        scheduleId: schedule.id,
         projectGroupId: schedule.projectGroupId ? String(schedule.projectGroupId) : "",
         cronExpr: schedule.cronExpr,
         timezone: schedule.timezone,
@@ -475,15 +480,59 @@ function buildPipelineCreatePayload(draft: PipelineDraft) {
   };
 }
 
+function scheduleRuntimeStateLabel(
+  snapshot: PipelineScheduleRuntimeSnapshot | null | undefined,
+  enabled: boolean
+) {
+  if (!enabled) return "已禁用";
+  switch (snapshot?.lastDecision) {
+    case "started":
+      return "最近已触发";
+    case "queued":
+      return "已排队";
+    case "skipped":
+      return "最近跳过";
+    default:
+      return "空闲";
+  }
+}
+
+function scheduleRuntimeMessage(
+  snapshot: PipelineScheduleRuntimeSnapshot | null | undefined,
+  enabled: boolean
+) {
+  if (snapshot?.lastDecisionMessageZh) {
+    return snapshot.lastDecisionMessageZh;
+  }
+  if (!enabled) {
+    return "调度已禁用，不会自动触发。";
+  }
+  return "暂无运行时反馈，可点击“刷新调度状态”查看最新结果。";
+}
+
 function PipelineDraftForm({
   draft,
   projectGroups,
+  scheduleRuntimeSnapshots,
+  loadingScheduleRuntime,
   onChange,
+  onRefreshScheduleRuntime,
 }: {
   draft: PipelineDraft;
   projectGroups: ProjectGroup[];
+  scheduleRuntimeSnapshots?: PipelineScheduleRuntimeSnapshot[];
+  loadingScheduleRuntime?: boolean;
   onChange: (next: PipelineDraft) => void;
+  onRefreshScheduleRuntime?: () => void;
 }) {
+  const scheduleRuntimeById = new Map(
+    (scheduleRuntimeSnapshots ?? []).map((snapshot) => [snapshot.scheduleId, snapshot])
+  );
+
+  function getScheduleRuntimeSnapshot(schedule: ScheduleDraft) {
+    return schedule.scheduleId !== null ? (scheduleRuntimeById.get(schedule.scheduleId) ?? null) : null;
+  }
+
   function updateDraft(next: PipelineDraft, { syncVariables = true }: { syncVariables?: boolean } = {}) {
     if (!syncVariables) {
       onChange(next);
@@ -923,10 +972,41 @@ function PipelineDraftForm({
                         {option.label}
                       </option>
                     ))}
-                  </select>
-                </div>
-              </div>
-            </div>
+	                  </select>
+	                </div>
+	              </div>
+	              {onRefreshScheduleRuntime && schedule.scheduleId !== null ? (
+	                <div
+	                  data-testid="pipeline-schedule-runtime-feedback"
+	                  className="grid gap-2 rounded-md border border-border bg-background p-3 text-xs"
+	                >
+	                  <div className="grid gap-2 md:grid-cols-3">
+	                    <div className="grid gap-1">
+	                      <span className="text-muted-foreground">下一次触发</span>
+	                      <span className="font-mono">
+	                        {getScheduleRuntimeSnapshot(schedule)?.nextTriggerAt ?? (schedule.enabled ? "-" : "已禁用")}
+	                      </span>
+	                    </div>
+	                    <div className="grid gap-1">
+	                      <span className="text-muted-foreground">当前状态</span>
+	                      <span>{scheduleRuntimeStateLabel(getScheduleRuntimeSnapshot(schedule), schedule.enabled)}</span>
+	                    </div>
+	                    <div className="grid gap-1">
+	                      <span className="text-muted-foreground">最近更新</span>
+	                      <span className="font-mono">
+	                        {getScheduleRuntimeSnapshot(schedule)?.lastDecisionAt
+	                          ? formatDateTime(getScheduleRuntimeSnapshot(schedule)?.lastDecisionAt ?? null)
+	                          : "-"}
+	                      </span>
+	                    </div>
+	                  </div>
+	                  <div className="grid gap-1">
+	                    <span className="text-muted-foreground">说明</span>
+	                    <span>{scheduleRuntimeMessage(getScheduleRuntimeSnapshot(schedule), schedule.enabled)}</span>
+	                  </div>
+	                </div>
+	              ) : null}
+	            </div>
           ))}
         </div>
       </section>
@@ -947,6 +1027,10 @@ export function WorkflowsPagePipeline() {
   const [editOpen, setEditOpen] = React.useState(false);
   const [editDraft, setEditDraft] = React.useState<PipelineDraft>(createEmptyPipelineDraft);
   const [editingItem, setEditingItem] = React.useState<PipelineDefinitionListItem | null>(null);
+  const [editScheduleRuntimeSnapshots, setEditScheduleRuntimeSnapshots] = React.useState<
+    PipelineScheduleRuntimeSnapshot[]
+  >([]);
+  const [loadingEditScheduleRuntime, setLoadingEditScheduleRuntime] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
 
   async function refresh({ silent = false }: { silent?: boolean } = {}): Promise<boolean> {
@@ -974,6 +1058,49 @@ export function WorkflowsPagePipeline() {
   React.useEffect(() => {
     void refresh();
   }, []);
+
+  function handleEditOpenChange(open: boolean) {
+    setEditOpen(open);
+    if (!open) {
+      editRequestTokenRef.current += 1;
+      setEditingItem(null);
+      setEditScheduleRuntimeSnapshots([]);
+      setLoadingEditScheduleRuntime(false);
+    }
+  }
+
+  async function refreshEditScheduleRuntime(
+    pipelineDefinitionId: number,
+    {
+      silent = false,
+      clearOnError = false,
+    }: {
+      silent?: boolean;
+      clearOnError?: boolean;
+    } = {}
+  ) {
+    const requestToken = editRequestTokenRef.current;
+    setLoadingEditScheduleRuntime(true);
+    try {
+      const snapshots = await getPipelineScheduleRuntimeSnapshots(pipelineDefinitionId);
+      if (requestToken !== editRequestTokenRef.current) return false;
+      setEditScheduleRuntimeSnapshots(snapshots);
+      return true;
+    } catch (error) {
+      if (requestToken !== editRequestTokenRef.current) return false;
+      if (clearOnError) {
+        setEditScheduleRuntimeSnapshots([]);
+      }
+      if (!silent) {
+        toast.error(readCommandErrorMessage(error, "加载调度运行时状态失败。"));
+      }
+      return false;
+    } finally {
+      if (requestToken === editRequestTokenRef.current) {
+        setLoadingEditScheduleRuntime(false);
+      }
+    }
+  }
 
   async function onCreate() {
     let payload: ReturnType<typeof buildPipelineCreatePayload>;
@@ -1007,7 +1134,9 @@ export function WorkflowsPagePipeline() {
       if (requestToken !== editRequestTokenRef.current) return;
       setEditingItem(item);
       setEditDraft(toDraftFromDetail(detail));
+      setEditScheduleRuntimeSnapshots([]);
       setEditOpen(true);
+      void refreshEditScheduleRuntime(item.id, { clearOnError: true });
     } catch (error) {
       if (requestToken !== editRequestTokenRef.current) return;
       toast.error(readCommandErrorMessage(error, "加载流水线详情失败。"));
@@ -1027,8 +1156,7 @@ export function WorkflowsPagePipeline() {
     setSaving(true);
     try {
       await updatePipelineDefinition({ id: editingItem.id, ...payload });
-      setEditOpen(false);
-      setEditingItem(null);
+      handleEditOpenChange(false);
       if (await refresh({ silent: true })) {
         toast.success("流水线已更新。");
       }
@@ -1139,15 +1267,35 @@ export function WorkflowsPagePipeline() {
           </Table>
         </PanelBody>
       </Panel>
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+      <Dialog open={editOpen} onOpenChange={handleEditOpenChange}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
           <DialogHeader>
             <DialogTitle>编辑流水线定义</DialogTitle>
             <DialogDescription>更新基础信息、节点顺序和调度规则。</DialogDescription>
           </DialogHeader>
-          <PipelineDraftForm draft={editDraft} projectGroups={projectGroups} onChange={setEditDraft} />
+          <PipelineDraftForm
+            draft={editDraft}
+            projectGroups={projectGroups}
+            scheduleRuntimeSnapshots={editScheduleRuntimeSnapshots}
+            loadingScheduleRuntime={loadingEditScheduleRuntime}
+            onChange={setEditDraft}
+            onRefreshScheduleRuntime={
+              editingItem ? () => void refreshEditScheduleRuntime(editingItem.id) : undefined
+            }
+          />
           <DialogFooter>
-            <Button variant="secondary" type="button" onClick={() => setEditOpen(false)}>
+            {editingItem ? (
+              <Button
+                variant="secondary"
+                type="button"
+                onClick={() => void refreshEditScheduleRuntime(editingItem.id)}
+                disabled={loadingEditScheduleRuntime}
+                data-testid="pipeline-schedule-runtime-refresh"
+              >
+                {loadingEditScheduleRuntime ? "刷新中..." : "刷新调度状态"}
+              </Button>
+            ) : null}
+            <Button variant="secondary" type="button" onClick={() => handleEditOpenChange(false)}>
               取消
             </Button>
             <Button type="button" onClick={() => void onSaveEdit()} disabled={saving}>

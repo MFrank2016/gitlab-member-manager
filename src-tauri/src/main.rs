@@ -20,6 +20,7 @@ use crate::models::{
     ManagedProject, PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineNodeInput,
     PipelineRunDetail, PipelineRunExecuteRequest, PipelineRunExecuteResult, PipelineRunListPage,
     PipelineRunListQuery, PipelineRunNodeDiagnostics, PipelineRunRetryRequest,
+    PipelineScheduleRuntimeSnapshot,
     PipelineScheduleInput, PipelineVariableInput, ProjectGroup, ProjectGroupMemberSyncRow,
     ProjectMember, ProjectSummary, WorkflowDefinitionDetail, WorkflowDefinitionListItem,
     WorkflowRunDetail, WorkflowRunExecuteRequest, WorkflowRunExecuteResult, WorkflowRunListItem,
@@ -34,6 +35,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 struct AppState {
     db: SqlitePool,
     gitlab: Mutex<Option<GitLabConfig>>,
+    scheduler_runtime: scheduler::PipelineSchedulerRuntime,
 }
 
 fn init_logging(
@@ -678,6 +680,33 @@ async fn get_pipeline_definition_detail(
     match &result {
         Ok(_) => tracing::info!(id = id, "get_pipeline_definition_detail success"),
         Err(e) => tracing::error!(id = id, error = ?e, "get_pipeline_definition_detail failed"),
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn get_pipeline_schedule_runtime_snapshots(
+    state: State<'_, AppState>,
+    pipeline_definition_id: i64,
+) -> Result<Vec<PipelineScheduleRuntimeSnapshot>, CommandError> {
+    let result = state
+        .scheduler_runtime
+        .list_pipeline_schedule_runtime_snapshots(&state.db, pipeline_definition_id, chrono::Utc::now())
+        .await
+        .map_err(pipeline_command_error);
+
+    match &result {
+        Ok(snapshots) => tracing::info!(
+            pipeline_definition_id = pipeline_definition_id,
+            count = snapshots.len(),
+            "get_pipeline_schedule_runtime_snapshots success"
+        ),
+        Err(error) => tracing::error!(
+            pipeline_definition_id = pipeline_definition_id,
+            error = ?error,
+            "get_pipeline_schedule_runtime_snapshots failed"
+        ),
     }
 
     result
@@ -1426,10 +1455,10 @@ fn main() {
         "[setup] migrated legacy workflow data into pipeline tables"
       );
 
-      let gitlab = match tauri::async_runtime::block_on(db::get_gitlab_config(&db)) {
-        Ok(Some(cfg)) => {
-          tracing::info!("[setup] loaded GitLab config from database");
-          Some(GitLabConfig {
+	      let gitlab = match tauri::async_runtime::block_on(db::get_gitlab_config(&db)) {
+	        Ok(Some(cfg)) => {
+	          tracing::info!("[setup] loaded GitLab config from database");
+	          Some(GitLabConfig {
             base_url: cfg.base_url,
             token: cfg.token,
           })
@@ -1438,16 +1467,18 @@ fn main() {
         Err(e) => {
           tracing::warn!(error = %e, "[setup] failed to load GitLab config from database");
           None
-        }
-      };
+	        }
+	      };
 
-      scheduler::spawn_pipeline_scheduler(db.clone());
-      tracing::info!("[setup] started pipeline scheduler loop");
+	      let scheduler_runtime = scheduler::PipelineSchedulerRuntime::default();
+	      scheduler::spawn_pipeline_scheduler(db.clone(), scheduler_runtime.clone());
+	      tracing::info!("[setup] started pipeline scheduler loop");
 
-      app.manage(AppState {
-        db,
-        gitlab: Mutex::new(gitlab),
-      });
+	      app.manage(AppState {
+	        db,
+	        gitlab: Mutex::new(gitlab),
+	        scheduler_runtime,
+	      });
 
       tracing::info!("Application initialized successfully");
       Ok(())
@@ -1471,10 +1502,11 @@ fn main() {
 	      create_workflow_definition,
 	      create_pipeline_definition,
 	      list_workflow_definitions,
-	      list_pipeline_definitions,
-	      get_workflow_definition_detail,
-	      get_pipeline_definition_detail,
-	      update_workflow_definition,
+		      list_pipeline_definitions,
+		      get_workflow_definition_detail,
+		      get_pipeline_definition_detail,
+		      get_pipeline_schedule_runtime_snapshots,
+		      update_workflow_definition,
 	      update_pipeline_definition,
 	      delete_workflow_definition,
 	      delete_pipeline_definition,

@@ -1313,13 +1313,14 @@ async fn load_pipeline_nodes(
     Ok(nodes)
 }
 
-async fn load_pipeline_schedules(
+pub(crate) async fn list_pipeline_schedules_for_definition(
     pool: &SqlitePool,
     pipeline_definition_id: i64,
 ) -> Result<Vec<PipelineSchedule>> {
     let rows = sqlx::query_as::<
         _,
         (
+            i64,
             i64,
             Option<i64>,
             String,
@@ -1331,7 +1332,7 @@ async fn load_pipeline_schedules(
         ),
     >(
         r#"SELECT
-         schedule_order, project_group_id, cron_expr, timezone, branch, enabled, policy,
+         id, schedule_order, project_group_id, cron_expr, timezone, branch, enabled, policy,
          variables_json
        FROM pipeline_schedules
        WHERE pipeline_definition_id = ?1
@@ -1344,14 +1345,15 @@ async fn load_pipeline_schedules(
     let mut schedules = Vec::with_capacity(rows.len());
     for row in rows {
         schedules.push(PipelineSchedule {
-            schedule_order: row.0,
-            project_group_id: row.1,
-            cron_expr: row.2,
-            timezone: row.3,
-            branch: row.4,
-            enabled: row.5 != 0,
-            policy: row.6,
-            variables: deserialize_json_object(&row.7, "pipeline schedule variables")?,
+            id: row.0,
+            schedule_order: row.1,
+            project_group_id: row.2,
+            cron_expr: row.3,
+            timezone: row.4,
+            branch: row.5,
+            enabled: row.6 != 0,
+            policy: row.7,
+            variables: deserialize_json_object(&row.8, "pipeline schedule variables")?,
         });
     }
 
@@ -1484,7 +1486,7 @@ pub async fn get_pipeline_definition_detail(
 
     let variables = load_pipeline_variables(pool, id).await?;
     let nodes = load_pipeline_nodes(pool, id).await?;
-    let schedules = load_pipeline_schedules(pool, id).await?;
+    let schedules = list_pipeline_schedules_for_definition(pool, id).await?;
 
     Ok(PipelineDefinitionDetail {
         id: row.0,

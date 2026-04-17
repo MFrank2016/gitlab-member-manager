@@ -9,7 +9,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{self, Duration, MissedTickBehavior};
 
-use crate::{db, workflows};
+use crate::{
+    db,
+    models::{PipelineSchedule, PipelineScheduleRuntimeSnapshot},
+    workflows,
+};
 
 const SCHEDULER_TICK_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -25,6 +29,7 @@ struct QueuedScheduleRequest {
 struct SchedulerState {
     last_fired_slots: HashMap<i64, String>,
     queued_requests: VecDeque<QueuedScheduleRequest>,
+    schedule_feedback: HashMap<i64, ScheduleFeedback>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +48,35 @@ pub(crate) struct SchedulerTickSummary {
     pub started_runs: usize,
     pub queued_runs: usize,
     pub skipped_runs: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScheduleDecision {
+    Started,
+    Queued,
+    Skipped,
+}
+
+impl ScheduleDecision {
+    fn as_str(self) -> &'static str {
+        match self {
+            ScheduleDecision::Started => "started",
+            ScheduleDecision::Queued => "queued",
+            ScheduleDecision::Skipped => "skipped",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ScheduleFeedback {
+    last_decision: ScheduleDecision,
+    last_decision_at: String,
+    last_decision_message_zh: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PipelineSchedulerRuntime {
+    state: Arc<Mutex<SchedulerState>>,
 }
 
 async fn load_enabled_pipeline_schedules(pool: &SqlitePool) -> Result<Vec<LoadedPipelineSchedule>> {
@@ -135,6 +169,66 @@ fn schedule_slot_key(
     Ok(None)
 }
 
+fn calculate_next_trigger_at(schedule: &PipelineSchedule, now: DateTime<Utc>) -> Result<Option<String>> {
+    if !schedule.enabled {
+        return Ok(None);
+    }
+
+    let timezone: Tz = schedule.timezone.parse()?;
+    let local_now = now.with_timezone(&timezone);
+    let parser = CronParser::builder().seconds(Seconds::Optional).build();
+    let cron = parser.parse(&schedule.cron_expr)?;
+    let next = cron.find_next_occurrence(&local_now, false)?;
+
+    Ok(Some(next.to_rfc3339()))
+}
+
+fn record_schedule_feedback(
+    state: &mut SchedulerState,
+    schedule_id: i64,
+    decision: ScheduleDecision,
+    decision_at: DateTime<Utc>,
+    message_zh: impl Into<String>,
+) {
+    state.schedule_feedback.insert(
+        schedule_id,
+        ScheduleFeedback {
+            last_decision: decision,
+            last_decision_at: decision_at.to_rfc3339(),
+            last_decision_message_zh: message_zh.into(),
+        },
+    );
+}
+
+fn build_pipeline_schedule_runtime_snapshots(
+    state: &SchedulerState,
+    schedules: &[PipelineSchedule],
+    now: DateTime<Utc>,
+) -> Result<Vec<PipelineScheduleRuntimeSnapshot>> {
+    let mut snapshots = Vec::with_capacity(schedules.len());
+
+    for schedule in schedules {
+        let queued = state
+            .queued_requests
+            .iter()
+            .any(|request| request.schedule_id == schedule.id);
+        let feedback = state.schedule_feedback.get(&schedule.id);
+
+        snapshots.push(PipelineScheduleRuntimeSnapshot {
+            schedule_id: schedule.id,
+            queued,
+            last_decision: feedback
+                .map(|entry| entry.last_decision.as_str().to_string())
+                .unwrap_or_else(|| "idle".to_string()),
+            last_decision_at: feedback.map(|entry| entry.last_decision_at.clone()),
+            last_decision_message_zh: feedback.map(|entry| entry.last_decision_message_zh.clone()),
+            next_trigger_at: calculate_next_trigger_at(schedule, now)?,
+        });
+    }
+
+    Ok(snapshots)
+}
+
 async fn start_scheduled_run(request: &QueuedScheduleRequest, pool: &SqlitePool) -> Result<i64> {
     workflows::execute_scheduled_pipeline_run(
         pool,
@@ -150,6 +244,7 @@ async fn drain_ready_queue(
     state: &mut SchedulerState,
     summary: &mut SchedulerTickSummary,
     active_run_counts: &mut HashMap<i64, i64>,
+    now: DateTime<Utc>,
 ) -> Result<()> {
     let queued_count = state.queued_requests.len();
     if queued_count == 0 {
@@ -178,6 +273,13 @@ async fn drain_ready_queue(
 
         summary.started_runs += 1;
         increment_active_run_count(active_run_counts, request.pipeline_definition_id);
+        record_schedule_feedback(
+            state,
+            request.schedule_id,
+            ScheduleDecision::Started,
+            now,
+            "排队中的调度已在活跃 run 结束后启动。",
+        );
     }
 
     Ok(())
@@ -195,7 +297,7 @@ async fn run_scheduler_tick(
     let mut active_run_counts =
         db::load_active_pipeline_run_counts(pool, &scheduler_pipeline_definition_ids).await?;
 
-    drain_ready_queue(pool, state, &mut summary, &mut active_run_counts).await?;
+    drain_ready_queue(pool, state, &mut summary, &mut active_run_counts, now).await?;
 
     for schedule in schedules {
         let Some(slot_key) = schedule_slot_key(&schedule, now)? else {
@@ -219,14 +321,35 @@ async fn run_scheduler_tick(
                 start_scheduled_run(&request, pool).await?;
                 summary.started_runs += 1;
                 increment_active_run_count(&mut active_run_counts, request.pipeline_definition_id);
+                record_schedule_feedback(
+                    state,
+                    request.schedule_id,
+                    ScheduleDecision::Started,
+                    now,
+                    "调度已触发并启动新的 pipeline run。",
+                );
             }
             "skip_if_running" => {
                 if active_runs > 0 {
                     summary.skipped_runs += 1;
+                    record_schedule_feedback(
+                        state,
+                        request.schedule_id,
+                        ScheduleDecision::Skipped,
+                        now,
+                        "检测到同定义仍有活跃 run，已跳过本次触发。",
+                    );
                 } else {
                     start_scheduled_run(&request, pool).await?;
                     summary.started_runs += 1;
                     increment_active_run_count(&mut active_run_counts, request.pipeline_definition_id);
+                    record_schedule_feedback(
+                        state,
+                        request.schedule_id,
+                        ScheduleDecision::Started,
+                        now,
+                        "调度已触发并启动新的 pipeline run。",
+                    );
                 }
             }
             "queue_after_running" => {
@@ -240,11 +363,25 @@ async fn run_scheduler_tick(
                     if !already_queued {
                         state.queued_requests.push_back(request);
                         summary.queued_runs += 1;
+                        record_schedule_feedback(
+                            state,
+                            schedule.schedule_id,
+                            ScheduleDecision::Queued,
+                            now,
+                            "检测到同定义仍有活跃 run，本次触发已加入排队队列。",
+                        );
                     }
                 } else {
                     start_scheduled_run(&request, pool).await?;
                     summary.started_runs += 1;
                     increment_active_run_count(&mut active_run_counts, request.pipeline_definition_id);
+                    record_schedule_feedback(
+                        state,
+                        request.schedule_id,
+                        ScheduleDecision::Started,
+                        now,
+                        "调度已触发并启动新的 pipeline run。",
+                    );
                 }
             }
             policy => {
@@ -264,9 +401,21 @@ async fn run_scheduler_tick(
     Ok(summary)
 }
 
-pub(crate) fn spawn_pipeline_scheduler(pool: SqlitePool) {
-    let state = Arc::new(Mutex::new(SchedulerState::default()));
+impl PipelineSchedulerRuntime {
+    pub(crate) async fn list_pipeline_schedule_runtime_snapshots(
+        &self,
+        pool: &SqlitePool,
+        pipeline_definition_id: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<PipelineScheduleRuntimeSnapshot>> {
+        let schedules = db::list_pipeline_schedules_for_definition(pool, pipeline_definition_id).await?;
+        let state = self.state.lock().await;
 
+        build_pipeline_schedule_runtime_snapshots(&state, &schedules, now)
+    }
+}
+
+pub(crate) fn spawn_pipeline_scheduler(pool: SqlitePool, runtime: PipelineSchedulerRuntime) {
     tokio::spawn(async move {
         let mut interval = time::interval(SCHEDULER_TICK_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -274,7 +423,7 @@ pub(crate) fn spawn_pipeline_scheduler(pool: SqlitePool) {
         loop {
             interval.tick().await;
             let now = Utc::now();
-            let mut locked_state = state.lock().await;
+            let mut locked_state = runtime.state.lock().await;
 
             match run_scheduler_tick(&pool, &mut locked_state, now).await {
                 Ok(summary)
@@ -596,5 +745,135 @@ mod tests {
         assert_eq!(second_summary.skipped_runs, 0);
         assert!(state.queued_requests.is_empty());
         assert_eq!(count_schedule_runs(&pool, pipeline_definition_id).await, 2);
+    }
+
+    #[tokio::test]
+    async fn schedule_runtime_feedback_reports_next_trigger_before_due_time() {
+        let pool = db::setup_test_pool().await;
+        let runtime = PipelineSchedulerRuntime::default();
+        let (pipeline_definition_id, _project_group_id) =
+            create_project_group_with_schedule(&pool, "skip_if_running").await;
+
+        let snapshots = runtime
+            .list_pipeline_schedule_runtime_snapshots(
+                &pool,
+                pipeline_definition_id,
+                Utc.with_ymd_and_hms(2026, 4, 14, 8, 30, 0)
+                    .single()
+                    .expect("construct snapshot time"),
+            )
+            .await
+            .expect("list schedule runtime snapshots");
+
+        assert_eq!(snapshots.len(), 1);
+        assert!(!snapshots[0].queued);
+        assert_eq!(snapshots[0].last_decision, "idle");
+        assert_eq!(
+            snapshots[0].next_trigger_at.as_deref(),
+            Some("2026-04-14T09:00:00+00:00")
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_runtime_feedback_reports_queued_decision() {
+        let pool = db::setup_test_pool().await;
+        let runtime = PipelineSchedulerRuntime::default();
+        let (pipeline_definition_id, project_group_id) =
+            create_project_group_with_schedule(&pool, "queue_after_running").await;
+        let active_run_id =
+            seed_running_pipeline_run(&pool, pipeline_definition_id, project_group_id).await;
+
+        {
+            let mut state = runtime.state.lock().await;
+            let summary = run_scheduler_tick(
+                &pool,
+                &mut state,
+                Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 30)
+                    .single()
+                    .expect("construct scheduler tick time"),
+            )
+            .await
+            .expect("run scheduler tick");
+            assert_eq!(summary.queued_runs, 1);
+        }
+
+        let snapshots = runtime
+            .list_pipeline_schedule_runtime_snapshots(
+                &pool,
+                pipeline_definition_id,
+                Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 30)
+                    .single()
+                    .expect("construct snapshot time"),
+            )
+            .await
+            .expect("list schedule runtime snapshots");
+
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].queued);
+        assert_eq!(snapshots[0].last_decision, "queued");
+        assert!(
+            snapshots[0]
+                .last_decision_message_zh
+                .as_deref()
+                .unwrap_or_default()
+                .contains("排队")
+        );
+
+        sqlx::query(
+            r#"UPDATE pipeline_runs
+               SET status = 'completed',
+                   finished_at = ?1,
+                   updated_at = ?1
+               WHERE id = ?2"#,
+        )
+        .bind("2026-04-14T09:01:00Z")
+        .bind(active_run_id)
+        .execute(&pool)
+        .await
+        .expect("complete seeded run");
+    }
+
+    #[tokio::test]
+    async fn schedule_runtime_feedback_reports_skipped_decision() {
+        let pool = db::setup_test_pool().await;
+        let runtime = PipelineSchedulerRuntime::default();
+        let (pipeline_definition_id, project_group_id) =
+            create_project_group_with_schedule(&pool, "skip_if_running").await;
+        let mut state = runtime.state.lock().await;
+        seed_running_pipeline_run(&pool, pipeline_definition_id, project_group_id).await;
+
+        let summary = run_scheduler_tick(
+            &pool,
+            &mut state,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 30)
+                .single()
+                .expect("construct scheduler tick time"),
+        )
+        .await
+        .expect("run scheduler tick");
+        assert_eq!(summary.skipped_runs, 1);
+        drop(state);
+
+        let snapshots = runtime
+            .list_pipeline_schedule_runtime_snapshots(
+                &pool,
+                pipeline_definition_id,
+                Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 30)
+                    .single()
+                    .expect("construct snapshot time"),
+            )
+            .await
+            .expect("list schedule runtime snapshots");
+
+        assert_eq!(snapshots.len(), 1);
+        assert!(!snapshots[0].queued);
+        assert_eq!(snapshots[0].last_decision, "skipped");
+        assert!(
+            snapshots[0]
+                .last_decision_message_zh
+                .as_deref()
+                .unwrap_or_default()
+                .contains("跳过")
+        );
     }
 }

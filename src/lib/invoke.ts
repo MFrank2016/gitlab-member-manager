@@ -16,6 +16,7 @@ import type {
   PipelineRunNodeDiagnostics,
   PipelineRunRetryRequest,
   PipelineScheduleInput,
+  PipelineScheduleRuntimeSnapshot,
   PipelineVariableInput,
   ProjectGroup,
   ProjectGroupMemberSyncRow,
@@ -403,6 +404,12 @@ export async function getWorkflowDefinitionDetail(id: number) {
 
 export async function getPipelineDefinitionDetail(id: number) {
   return loggedInvoke<PipelineDefinitionDetail>("get_pipeline_definition_detail", { id });
+}
+
+export async function getPipelineScheduleRuntimeSnapshots(pipelineDefinitionId: number) {
+  return loggedInvoke<PipelineScheduleRuntimeSnapshot[]>("get_pipeline_schedule_runtime_snapshots", {
+    pipeline_definition_id: pipelineDefinitionId,
+  });
 }
 
 export async function updateWorkflowDefinition(args: {

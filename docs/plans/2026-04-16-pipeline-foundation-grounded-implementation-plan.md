@@ -225,7 +225,9 @@ The first monitoring and scheduler follow-up slices are now landed in the isolat
 - focused frontend coverage for both starting and stopping the monitor auto-refresh loop
 - grouped scheduler active-run count loading so one tick no longer performs one database query per due schedule
 - shared-definition scheduler regression coverage to preserve `skip_if_running` behavior within the same tick
+- schedule runtime snapshots for `queued`, `skipped`, and `nextTriggerAt`
+- a first definition-page entry point for schedule runtime feedback with manual refresh support
 
 Still intentionally deferred after these monitoring and scheduler slices:
-- clearer scheduler operator feedback is still pending
+- desktop-only scheduler semantics remain unchanged
 - richer pipeline visualizations are still pending

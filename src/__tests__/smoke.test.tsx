@@ -18,6 +18,7 @@ import {
   updatePipelineDefinition,
 } from "@/lib/invoke";
 import { ProjectGroupsPage } from "@/pages/ProjectGroupsPage";
+import { WorkflowsPagePipeline } from "@/pages/WorkflowsPagePipeline";
 import { WorkflowRunsPage } from "@/pages/WorkflowRunsPage";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -320,6 +321,109 @@ describe("pipeline definition upgrade smoke", () => {
     expect(screen.getByText("节点")).toBeInTheDocument();
     expect(screen.getByText("调度")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /添加调度/i })).toBeInTheDocument();
+  });
+});
+
+describe("pipeline schedule runtime feedback", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("renders schedule runtime feedback in the edit form", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_definitions") {
+        return [
+          {
+            id: 91,
+            name: "release-pipeline",
+            description: "runtime feedback coverage",
+            enabled: true,
+            maxConcurrencyDefault: 2,
+            legacyWorkflowDefinitionId: null,
+            createdAt: "2026-03-18T00:00:00Z",
+            updatedAt: "2026-03-18T00:00:00Z",
+            variablesCount: 1,
+            nodesCount: 1,
+            schedulesCount: 1,
+          },
+        ];
+      }
+      if (cmd === "list_project_groups") {
+        return [
+          {
+            id: 7,
+            name: "release-train",
+            createdAt: "2026-03-18T00:00:00Z",
+            updatedAt: "2026-03-18T00:00:00Z",
+            projectsCount: 2,
+          },
+        ];
+      }
+      if (cmd === "get_pipeline_definition_detail") {
+        expect(args).toEqual({ id: 91 });
+        return {
+          id: 91,
+          name: "release-pipeline",
+          description: "runtime feedback coverage",
+          enabled: true,
+          maxConcurrencyDefault: 2,
+          legacyWorkflowDefinitionId: null,
+          createdAt: "2026-03-18T00:00:00Z",
+          updatedAt: "2026-03-18T00:00:00Z",
+          variables: [],
+          nodes: [
+            {
+              nodeOrder: 0,
+              nodeType: "checkout_branch",
+              parameters: { branch: "${source_branch}" },
+            },
+          ],
+          schedules: [
+            {
+              id: 701,
+              scheduleOrder: 0,
+              projectGroupId: 7,
+              cronExpr: "0 9 * * 1-5",
+              timezone: "Asia/Shanghai",
+              branch: "main",
+              enabled: true,
+              policy: "queue_after_running",
+              variables: {},
+            },
+          ],
+        };
+      }
+      if (cmd === "get_pipeline_schedule_runtime_snapshots") {
+        expect(args).toEqual({ pipeline_definition_id: 91 });
+        return [
+          {
+            scheduleId: 701,
+            queued: true,
+            lastDecision: "queued",
+            lastDecisionAt: "2026-04-17T08:00:00Z",
+            lastDecisionMessageZh: "检测到同定义仍有活跃 run，本次触发已加入排队队列。",
+            nextTriggerAt: "2026-04-18T09:00:00+08:00",
+          },
+        ];
+      }
+      return undefined;
+    });
+
+    render(<WorkflowsPagePipeline />);
+
+    const row = await screen.findByText("release-pipeline");
+    fireEvent.click(within(row.closest("tr") as HTMLElement).getByRole("button", { name: "编辑" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("get_pipeline_schedule_runtime_snapshots", {
+        pipeline_definition_id: 91,
+      });
+    });
+
+    const scheduleRows = await screen.findAllByTestId("pipeline-schedule-row");
+    expect(within(scheduleRows[0]).getByTestId("pipeline-schedule-runtime-feedback")).toBeInTheDocument();
+    expect(within(scheduleRows[0]).getByText("检测到同定义仍有活跃 run，本次触发已加入排队队列。")).toBeInTheDocument();
+    expect(within(scheduleRows[0]).getByText("2026-04-18T09:00:00+08:00")).toBeInTheDocument();
   });
 });
 

@@ -188,6 +188,7 @@ pub struct PipelineScheduleInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineSchedule {
+    pub id: i64,
     pub schedule_order: i64,
     pub project_group_id: Option<i64>,
     pub cron_expr: String,
@@ -196,6 +197,17 @@ pub struct PipelineSchedule {
     pub enabled: bool,
     pub policy: String,
     pub variables: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineScheduleRuntimeSnapshot {
+    pub schedule_id: i64,
+    pub queued: bool,
+    pub last_decision: String,
+    pub last_decision_at: Option<String>,
+    pub last_decision_message_zh: Option<String>,
+    pub next_trigger_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
