@@ -1,7 +1,8 @@
 use crate::models::{
     AppSettings, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
     PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineMigrationSummary, PipelineNode,
-    PipelineNodeInput, PipelineRunDetail, PipelineRunListItem, PipelineRunNode, PipelineRunProject,
+    PipelineNodeInput, PipelineRunDetail, PipelineRunListItem, PipelineRunListPage,
+    PipelineRunListQuery, PipelineRunNode, PipelineRunNodeDiagnostics, PipelineRunProject,
     PipelineSchedule, PipelineScheduleInput, PipelineVariable, PipelineVariableInput, ProjectGroup,
     WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem,
     WorkflowRunProject, WorkflowRunStep, WorkflowStep, WorkflowStepInput,
@@ -259,6 +260,17 @@ fn json_value_to_text(value: Option<&Value>) -> Option<String> {
     }
 }
 
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 fn legacy_variable_to_pipeline_input(key: &str, value: &Value) -> Result<PipelineVariableInput> {
     let config = value
         .as_object()
@@ -400,7 +412,7 @@ struct PipelineRunProjectRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
-struct PipelineRunNodeRow {
+struct PipelineRunNodeSummaryRow {
     id: i64,
     pipeline_run_project_id: i64,
     pipeline_node_id: Option<i64>,
@@ -410,18 +422,23 @@ struct PipelineRunNodeRow {
     status: String,
     started_at: Option<String>,
     finished_at: Option<String>,
-    stdout: String,
-    stderr: String,
     exit_code: Option<i64>,
     summary_message: String,
     error_code: Option<String>,
     title_zh: Option<String>,
     detail_zh: Option<String>,
     suggestion_zh: Option<String>,
-    evidence: Option<String>,
     wait_target: Option<String>,
     last_remote_status: Option<String>,
     remote_pipeline_id: Option<i64>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PipelineRunNodeDiagnosticsRow {
+    id: i64,
+    stdout: String,
+    stderr: String,
+    evidence: Option<String>,
     wait_context_json: Option<String>,
 }
 
@@ -1979,7 +1996,30 @@ pub async fn delete_workflow_definition(pool: &SqlitePool, id: i64) -> Result<()
     Ok(())
 }
 
-pub async fn list_pipeline_runs(pool: &SqlitePool) -> Result<Vec<PipelineRunListItem>> {
+pub async fn list_pipeline_runs(
+    pool: &SqlitePool,
+    query: PipelineRunListQuery,
+) -> Result<PipelineRunListPage> {
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
+    let offset = (page - 1) * page_size;
+    let status_filter = normalize_optional_text(query.status);
+    let pipeline_definition_id = query.pipeline_definition_id;
+    let project_group_id = query.project_group_id;
+
+    let total = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*)
+           FROM pipeline_runs r
+           WHERE (?1 IS NULL OR r.status = ?1)
+             AND (?2 IS NULL OR r.pipeline_definition_id = ?2)
+             AND (?3 IS NULL OR r.project_group_id = ?3)"#,
+    )
+    .bind(status_filter.as_deref())
+    .bind(pipeline_definition_id)
+    .bind(project_group_id)
+    .fetch_one(pool)
+    .await?;
+
     let rows = sqlx::query_as::<_, PipelineRunSummaryRow>(
         r#"SELECT
          r.id,
@@ -2008,9 +2048,18 @@ pub async fn list_pipeline_runs(pool: &SqlitePool) -> Result<Vec<PipelineRunList
        INNER JOIN pipeline_definitions d ON d.id = r.pipeline_definition_id
        INNER JOIN project_groups g ON g.id = r.project_group_id
        LEFT JOIN pipeline_run_projects p ON p.pipeline_run_id = r.id
+       WHERE (?1 IS NULL OR r.status = ?1)
+         AND (?2 IS NULL OR r.pipeline_definition_id = ?2)
+         AND (?3 IS NULL OR r.project_group_id = ?3)
        GROUP BY r.id
-       ORDER BY r.created_at DESC, r.id DESC"#,
+       ORDER BY r.updated_at DESC, r.id DESC
+       LIMIT ?4 OFFSET ?5"#,
     )
+    .bind(status_filter.as_deref())
+    .bind(pipeline_definition_id)
+    .bind(project_group_id)
+    .bind(page_size)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
 
@@ -2045,7 +2094,13 @@ pub async fn list_pipeline_runs(pool: &SqlitePool) -> Result<Vec<PipelineRunList
         });
     }
 
-    Ok(items)
+    Ok(PipelineRunListPage {
+        has_next_page: page * page_size < total,
+        items,
+        page,
+        page_size,
+        total,
+    })
 }
 
 pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<PipelineRunDetail> {
@@ -2099,7 +2154,7 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
     .fetch_all(&mut *tx)
     .await?;
 
-    let node_rows = sqlx::query_as::<_, PipelineRunNodeRow>(
+    let node_rows = sqlx::query_as::<_, PipelineRunNodeSummaryRow>(
         r#"SELECT
          n.id,
          n.pipeline_run_project_id,
@@ -2110,19 +2165,15 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
          n.status,
          n.started_at,
          n.finished_at,
-         n.stdout,
-         n.stderr,
          n.exit_code,
          n.summary_message,
          n.error_code,
          n.title_zh,
          n.detail_zh,
          n.suggestion_zh,
-         n.evidence,
          n.wait_target,
          n.last_remote_status,
-         n.remote_pipeline_id,
-         n.wait_context_json
+         n.remote_pipeline_id
        FROM pipeline_run_nodes n
        INNER JOIN pipeline_run_projects p ON p.id = n.pipeline_run_project_id
        WHERE p.pipeline_run_id = ?1
@@ -2146,25 +2197,18 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
             status: node_row.status,
             started_at: node_row.started_at,
             finished_at: node_row.finished_at,
-            stdout: node_row.stdout,
-            stderr: node_row.stderr,
             exit_code: node_row.exit_code,
             summary_message: node_row.summary_message,
             error_code: node_row.error_code,
             title_zh: node_row.title_zh,
             detail_zh: node_row.detail_zh,
             suggestion_zh: node_row.suggestion_zh,
-            evidence: node_row.evidence,
             wait_target: node_row.wait_target,
             last_remote_status: node_row.last_remote_status,
             remote_pipeline_id: option_i64_to_u64_checked(
                 node_row.remote_pipeline_id,
                 "pipeline_run_nodes.remote_pipeline_id",
             )?,
-            wait_context: node_row
-                .wait_context_json
-                .map(|value| deserialize_json_object(&value, "pipeline run node wait context"))
-                .transpose()?,
         };
         nodes_by_project_id
             .entry(node_row.pipeline_run_project_id)
@@ -2224,6 +2268,37 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
         created_at: row.created_at,
         updated_at: row.updated_at,
         projects,
+    })
+}
+
+pub async fn get_pipeline_run_node_diagnostics(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<PipelineRunNodeDiagnostics> {
+    let row = sqlx::query_as::<_, PipelineRunNodeDiagnosticsRow>(
+        r#"SELECT
+         id,
+         stdout,
+         stderr,
+         evidence,
+         wait_context_json
+       FROM pipeline_run_nodes
+       WHERE id = ?1"#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow!("pipeline run node not found: {id}"))?;
+
+    Ok(PipelineRunNodeDiagnostics {
+        run_node_id: row.id,
+        stdout: row.stdout,
+        stderr: row.stderr,
+        evidence: row.evidence,
+        wait_context: row
+            .wait_context_json
+            .map(|value| deserialize_json_object(&value, "pipeline run node wait context"))
+            .transpose()?,
     })
 }
 
@@ -3586,9 +3661,344 @@ mod tests {
     async fn pipeline_definition_run_list_returns_empty_on_fresh_database() {
         let pool = setup_test_pool().await;
 
-        let listed = list_pipeline_runs(&pool).await.expect("list pipeline runs");
+        let listed = list_pipeline_runs(&pool, PipelineRunListQuery::default())
+            .await
+            .expect("list pipeline runs");
 
-        assert!(listed.is_empty());
+        assert!(listed.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pipeline_run_monitoring_list_defaults_to_first_page_with_recent_results() {
+        let pool = setup_test_pool().await;
+        let pipeline = create_pipeline_definition(
+            &pool,
+            "pagination-pipeline".to_string(),
+            "pagination coverage".to_string(),
+            true,
+            2,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+        let project_group = create_project_group(&pool, "pagination-group".to_string())
+            .await
+            .expect("create project group");
+
+        for index in 0..21_i64 {
+            let timestamp = format!("2026-04-13T10:{index:02}:00Z");
+            let run_id = sqlx::query(
+                r#"INSERT INTO pipeline_runs (
+                 pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+                 trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+               ) VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)"#,
+            )
+            .bind(pipeline.id)
+            .bind(project_group.id)
+            .bind("manual")
+            .bind("running")
+            .bind(format!(r#"{{"ordinal":{index}}}"#))
+            .bind(2_i64)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(&pool)
+            .await
+            .expect("insert pipeline run")
+            .last_insert_rowid();
+
+            sqlx::query(
+                r#"INSERT INTO pipeline_run_projects (
+                 pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+                 repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+               ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, '', ?7, NULL, ?8, ?9)"#,
+            )
+            .bind(run_id)
+            .bind(99500_i64 + index)
+            .bind(format!("project-{index}"))
+            .bind(format!("team/project-{index}"))
+            .bind(format!("D:/repos/project-{index}"))
+            .bind("running")
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(&pool)
+            .await
+            .expect("insert pipeline run project");
+        }
+
+        let listed = list_pipeline_runs(&pool, PipelineRunListQuery::default())
+            .await
+            .expect("list paginated pipeline runs");
+
+        assert_eq!(listed.page, 1);
+        assert_eq!(listed.page_size, 20);
+        assert_eq!(listed.total, 21);
+        assert!(listed.has_next_page);
+        assert_eq!(listed.items.len(), 20);
+        assert_eq!(
+            listed.items[0].run_parameters,
+            serde_json::json!({ "ordinal": 20 })
+        );
+        assert_eq!(
+            listed.items[19].run_parameters,
+            serde_json::json!({ "ordinal": 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_run_monitoring_list_filters_status_definition_and_group() {
+        let pool = setup_test_pool().await;
+        let pipeline_a = create_pipeline_definition(
+            &pool,
+            "filter-pipeline-a".to_string(),
+            "filter coverage a".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition a");
+        let pipeline_b = create_pipeline_definition(
+            &pool,
+            "filter-pipeline-b".to_string(),
+            "filter coverage b".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition b");
+        let group_a = create_project_group(&pool, "filter-group-a".to_string())
+            .await
+            .expect("create group a");
+        let group_b = create_project_group(&pool, "filter-group-b".to_string())
+            .await
+            .expect("create group b");
+
+        for (pipeline_id, group_id, run_status, project_status, ordinal) in [
+            (pipeline_a.id, group_a.id, "completed", "success", 1_i64),
+            (pipeline_a.id, group_b.id, "running", "running", 2_i64),
+            (pipeline_b.id, group_b.id, "running", "running", 3_i64),
+        ] {
+            let timestamp = format!("2026-04-14T09:0{ordinal}:00Z");
+            let run_id = sqlx::query(
+                r#"INSERT INTO pipeline_runs (
+                 pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+                 trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+               ) VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)"#,
+            )
+            .bind(pipeline_id)
+            .bind(group_id)
+            .bind("manual")
+            .bind(run_status)
+            .bind(format!(r#"{{"ordinal":{ordinal}}}"#))
+            .bind(1_i64)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(&pool)
+            .await
+            .expect("insert filtered pipeline run")
+            .last_insert_rowid();
+
+            sqlx::query(
+                r#"INSERT INTO pipeline_run_projects (
+                 pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+                 repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+               ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, '', ?7, NULL, ?8, ?9)"#,
+            )
+            .bind(run_id)
+            .bind(99600_i64 + ordinal)
+            .bind(format!("filter-project-{ordinal}"))
+            .bind(format!("team/filter-project-{ordinal}"))
+            .bind(format!("D:/repos/filter-project-{ordinal}"))
+            .bind(project_status)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(&pool)
+            .await
+            .expect("insert filtered pipeline run project");
+        }
+
+        let listed = list_pipeline_runs(
+            &pool,
+            PipelineRunListQuery {
+                page: Some(1),
+                page_size: Some(20),
+                status: Some("running".to_string()),
+                pipeline_definition_id: Some(pipeline_a.id),
+                project_group_id: Some(group_b.id),
+            },
+        )
+        .await
+        .expect("list filtered pipeline runs");
+
+        assert_eq!(listed.total, 1);
+        assert!(!listed.has_next_page);
+        assert_eq!(listed.items.len(), 1);
+        assert_eq!(listed.items[0].pipeline_definition_id, pipeline_a.id);
+        assert_eq!(listed.items[0].project_group_id, group_b.id);
+        assert_eq!(listed.items[0].status, "running");
+    }
+
+    #[tokio::test]
+    async fn pipeline_run_monitoring_detail_returns_summary_and_lazy_node_diagnostics() {
+        let pool = setup_test_pool().await;
+        let pipeline = create_pipeline_definition(
+            &pool,
+            "lazy-diagnostics-pipeline".to_string(),
+            "lazy diagnostics coverage".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "wait_pipeline".to_string(),
+                parameters: serde_json::json!({ "project": "team/service-a", "ref": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+        let project_group = create_project_group(&pool, "lazy-diagnostics-group".to_string())
+            .await
+            .expect("create project group");
+        let managed_project = create_managed_project(
+            &pool,
+            99701,
+            "service-a".to_string(),
+            "team/service-a".to_string(),
+            "D:/repos/service-a".to_string(),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("create managed project");
+
+        let now = "2026-04-14T10:00:00Z";
+        let run_id = sqlx::query(
+            r#"INSERT INTO pipeline_runs (
+             pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+             trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)"#,
+        )
+        .bind(pipeline.id)
+        .bind(project_group.id)
+        .bind("manual")
+        .bind("waiting")
+        .bind(r#"{"source_branch":"release"}"#)
+        .bind(1_i64)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("insert pipeline run")
+        .last_insert_rowid();
+
+        let run_project_id = sqlx::query(
+            r#"INSERT INTO pipeline_run_projects (
+             pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path,
+             status, summary_message, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11)"#,
+        )
+        .bind(run_id)
+        .bind(managed_project.id)
+        .bind(
+            u64_to_i64_checked(managed_project.gitlab_project_id, "gitlab_project_id")
+                .expect("convert gitlab project id"),
+        )
+        .bind(&managed_project.name)
+        .bind(&managed_project.path_with_namespace)
+        .bind(&managed_project.repo_path)
+        .bind("waiting")
+        .bind("waiting for remote pipeline")
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("insert pipeline run project")
+        .last_insert_rowid();
+
+        let run_node_id = sqlx::query(
+            r#"INSERT INTO pipeline_run_nodes (
+             pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message,
+             error_code, title_zh, detail_zh, suggestion_zh, evidence,
+             wait_target, last_remote_status, remote_pipeline_id, wait_context_json, created_at, updated_at
+           ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, NULL, ?9, NULL, NULL, NULL, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"#,
+        )
+        .bind(run_project_id)
+        .bind(0_i64)
+        .bind("wait_pipeline")
+        .bind(r#"{"project":"team/service-a","ref":"main"}"#)
+        .bind("waiting")
+        .bind(now)
+        .bind("stdout text")
+        .bind("stderr text")
+        .bind("waiting for remote pipeline")
+        .bind("pipeline #777 status=running")
+        .bind("team/service-a@main")
+        .bind("running")
+        .bind(777_i64)
+        .bind(r#"{"kind":"pipeline","webUrl":"https://gitlab.example/p/777"}"#)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("insert pipeline run node")
+        .last_insert_rowid();
+
+        let detail = get_pipeline_run_detail(&pool, run_id)
+            .await
+            .expect("get pipeline run detail");
+        let detail_json = serde_json::to_value(&detail).expect("serialize summary detail");
+        let node_json = &detail_json["projects"][0]["nodes"][0];
+
+        assert_eq!(node_json["waitTarget"], "team/service-a@main");
+        assert_eq!(node_json["lastRemoteStatus"], "running");
+        assert_eq!(node_json["remotePipelineId"], 777);
+        assert!(node_json.get("stdout").is_none());
+        assert!(node_json.get("stderr").is_none());
+        assert!(node_json.get("evidence").is_none());
+        assert!(node_json.get("waitContext").is_none());
+
+        let diagnostics = get_pipeline_run_node_diagnostics(&pool, run_node_id)
+            .await
+            .expect("get pipeline run node diagnostics");
+
+        assert_eq!(diagnostics.stdout, "stdout text");
+        assert_eq!(diagnostics.stderr, "stderr text");
+        assert_eq!(
+            diagnostics.evidence.as_deref(),
+            Some("pipeline #777 status=running")
+        );
+        assert_eq!(
+            diagnostics
+                .wait_context
+                .as_ref()
+                .and_then(|value| value.get("webUrl"))
+                .and_then(Value::as_str),
+            Some("https://gitlab.example/p/777")
+        );
     }
 
     #[tokio::test]
@@ -3951,30 +4361,32 @@ mod tests {
         .await
         .expect("insert newer pipeline run project");
 
-        let listed = list_pipeline_runs(&pool).await.expect("list pipeline runs");
+        let listed = list_pipeline_runs(&pool, PipelineRunListQuery::default())
+            .await
+            .expect("list pipeline runs");
 
-        assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].id, newer_pipeline_run_id);
-        assert_eq!(listed[0].trigger_kind, "schedule");
-        assert_eq!(listed[0].projects_total, 1);
-        assert_eq!(listed[0].projects_running, 1);
+        assert_eq!(listed.items.len(), 2);
+        assert_eq!(listed.items[0].id, newer_pipeline_run_id);
+        assert_eq!(listed.items[0].trigger_kind, "schedule");
+        assert_eq!(listed.items[0].projects_total, 1);
+        assert_eq!(listed.items[0].projects_running, 1);
         assert_eq!(
-            listed[0].run_parameters,
+            listed.items[0].run_parameters,
             serde_json::json!({"target_branch":"release/1.2"})
         );
 
-        assert_eq!(listed[1].id, older_pipeline_run_id);
+        assert_eq!(listed.items[1].id, older_pipeline_run_id);
         assert_eq!(
-            listed[1].legacy_workflow_run_id,
+            listed.items[1].legacy_workflow_run_id,
             Some(legacy_workflow_run_id)
         );
-        assert_eq!(listed[1].projects_total, 4);
-        assert_eq!(listed[1].projects_queued, 1);
-        assert_eq!(listed[1].projects_success, 1);
-        assert_eq!(listed[1].projects_failed, 1);
-        assert_eq!(listed[1].projects_failed_precheck, 1);
+        assert_eq!(listed.items[1].projects_total, 4);
+        assert_eq!(listed.items[1].projects_queued, 1);
+        assert_eq!(listed.items[1].projects_success, 1);
+        assert_eq!(listed.items[1].projects_failed, 1);
+        assert_eq!(listed.items[1].projects_failed_precheck, 1);
         assert_eq!(
-            listed[1].run_parameters,
+            listed.items[1].run_parameters,
             serde_json::json!({
                 "target_branch":"main",
                 "release_window":"morning"
@@ -5043,8 +5455,11 @@ mod tests {
             detail.projects[0].nodes[0].suggestion_zh.as_deref(),
             Some("请检查下游流水线日志并修复失败后重试。")
         );
+        let diagnostics = get_pipeline_run_node_diagnostics(&pool, detail.projects[0].nodes[0].id)
+            .await
+            .expect("get pipeline run node diagnostics");
         assert_eq!(
-            detail.projects[0].nodes[0].evidence.as_deref(),
+            diagnostics.evidence.as_deref(),
             Some("job=deploy status=failed")
         );
     }
@@ -5168,7 +5583,10 @@ mod tests {
         assert_eq!(detail.projects[0].nodes[0].title_zh, None);
         assert_eq!(detail.projects[0].nodes[0].detail_zh, None);
         assert_eq!(detail.projects[0].nodes[0].suggestion_zh, None);
-        assert_eq!(detail.projects[0].nodes[0].evidence, None);
+        let diagnostics = get_pipeline_run_node_diagnostics(&pool, detail.projects[0].nodes[0].id)
+            .await
+            .expect("get pipeline run node diagnostics");
+        assert_eq!(diagnostics.evidence, None);
     }
 
     #[tokio::test]

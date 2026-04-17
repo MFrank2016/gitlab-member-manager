@@ -204,18 +204,22 @@ export type PipelineRunNode = {
   status: PipelineRunNodeStatus;
   startedAt?: string | null;
   finishedAt?: string | null;
-  stdout: string;
-  stderr: string;
   exitCode?: number | null;
   summaryMessage: string;
   errorCode?: string | null;
   titleZh?: string | null;
   detailZh?: string | null;
   suggestionZh?: string | null;
-  evidence?: string | null;
   waitTarget?: string | null;
   lastRemoteStatus?: string | null;
   remotePipelineId?: number | null;
+};
+
+export type PipelineRunNodeDiagnostics = {
+  runNodeId: number;
+  stdout: string;
+  stderr: string;
+  evidence?: string | null;
   waitContext?: unknown | null;
 };
 
@@ -256,6 +260,22 @@ export type PipelineRunListItem = {
   finishedAt?: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type PipelineRunListQuery = {
+  page?: number;
+  pageSize?: number;
+  status?: PipelineRunStatus | null;
+  pipelineDefinitionId?: number | null;
+  projectGroupId?: number | null;
+};
+
+export type PipelineRunListPage = {
+  items: PipelineRunListItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  hasNextPage: boolean;
 };
 
 export type PipelineRunDetail = PipelineRunListItem & {

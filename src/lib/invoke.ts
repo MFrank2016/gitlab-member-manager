@@ -11,7 +11,9 @@ import type {
   PipelineRunDetail,
   PipelineRunExecuteRequest,
   PipelineRunExecuteResult,
-  PipelineRunListItem,
+  PipelineRunListPage,
+  PipelineRunListQuery,
+  PipelineRunNodeDiagnostics,
   PipelineRunRetryRequest,
   PipelineScheduleInput,
   PipelineVariableInput,
@@ -461,8 +463,16 @@ export async function listWorkflowRuns() {
   return loggedInvoke<WorkflowRunListItem[]>("list_workflow_runs");
 }
 
-export async function listPipelineRuns() {
-  return loggedInvoke<PipelineRunListItem[]>("list_pipeline_runs");
+export async function listPipelineRuns(query: PipelineRunListQuery = {}) {
+  return loggedInvoke<PipelineRunListPage>("list_pipeline_runs", {
+    query: {
+      page: query.page ?? 1,
+      pageSize: query.pageSize ?? 20,
+      status: query.status ?? null,
+      pipelineDefinitionId: query.pipelineDefinitionId ?? null,
+      projectGroupId: query.projectGroupId ?? null,
+    },
+  });
 }
 
 export async function executePipelineRun(request: PipelineRunExecuteRequest) {
@@ -525,6 +535,10 @@ export async function getWorkflowRunDetail(id: number) {
 
 export async function getPipelineRunDetail(id: number) {
   return loggedInvoke<PipelineRunDetail>("get_pipeline_run_detail", { id });
+}
+
+export async function getPipelineRunNodeDiagnostics(id: number) {
+  return loggedInvoke<PipelineRunNodeDiagnostics>("get_pipeline_run_node_diagnostics", { id });
 }
 
 export async function syncProjectGroupMembers(args: {

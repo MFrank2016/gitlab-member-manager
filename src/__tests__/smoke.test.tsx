@@ -9,6 +9,7 @@ import {
   executePipelineRun,
   getPipelineDefinitionDetail,
   getPipelineRunDetail,
+  getPipelineRunNodeDiagnostics,
   listPipelineDefinitions,
   listPipelineRuns,
   listWorkflowDefinitions,
@@ -345,7 +346,15 @@ describe("pipeline wrapper smoke", () => {
           schedules: [],
         };
       }
-      if (cmd === "list_pipeline_runs") return [];
+      if (cmd === "list_pipeline_runs") {
+        return {
+          items: [],
+          page: 2,
+          pageSize: 20,
+          total: 0,
+          hasNextPage: false,
+        };
+      }
       if (cmd === "execute_pipeline_run") {
         return {
           pipelineRunId: 302,
@@ -381,6 +390,15 @@ describe("pipeline wrapper smoke", () => {
           createdAt: "2026-03-18T00:00:00Z",
           updatedAt: "2026-03-18T00:00:00Z",
           projects: [],
+        };
+      }
+      if (cmd === "get_pipeline_run_node_diagnostics") {
+        return {
+          runNodeId: 602,
+          stdout: "",
+          stderr: "remote pipeline failed",
+          evidence: "pipeline #777 status=failed",
+          waitContext: { kind: "pipeline" },
         };
       }
       if (cmd === "get_pipeline_definition_detail") {
@@ -495,8 +513,15 @@ describe("pipeline wrapper smoke", () => {
 	      selectedManagedProjectIds: [44],
 	      maxConcurrencyOverride: 1,
 	    });
-	    const pipelineRuns = await listPipelineRuns();
+	    const pipelineRuns = await listPipelineRuns({
+	      page: 2,
+	      pageSize: 20,
+	      status: "running",
+	      pipelineDefinitionId: 11,
+	      projectGroupId: 5,
+	    });
 	    const runDetail = await getPipelineRunDetail(301);
+	    const nodeDiagnostics = await getPipelineRunNodeDiagnostics(602);
 	    const workflowList = await listWorkflowDefinitions();
 
     expect(pipelineList).toEqual([]);
@@ -504,8 +529,10 @@ describe("pipeline wrapper smoke", () => {
 	    expect(pipelineDetail.variables[0].options).toEqual([]);
 	    expect(executeResult.pipelineRunId).toBe(302);
 	    expect(retryResult.pipelineRunId).toBe(303);
-	    expect(pipelineRuns).toEqual([]);
+	    expect(pipelineRuns.items).toEqual([]);
+	    expect(pipelineRuns.page).toBe(2);
 	    expect(runDetail.projects).toEqual([]);
+	    expect(nodeDiagnostics.stderr).toBe("remote pipeline failed");
 	    expect(workflowList[0].name).toBe("legacy-flow");
 
     expect(invokeMock).toHaveBeenCalledWith("list_pipeline_definitions", undefined);
@@ -555,8 +582,17 @@ describe("pipeline wrapper smoke", () => {
 	        maxConcurrencyOverride: 1,
 	      },
 	    });
-	    expect(invokeMock).toHaveBeenCalledWith("list_pipeline_runs", undefined);
+	    expect(invokeMock).toHaveBeenCalledWith("list_pipeline_runs", {
+	      query: {
+	        page: 2,
+	        pageSize: 20,
+	        status: "running",
+	        pipelineDefinitionId: 11,
+	        projectGroupId: 5,
+	      },
+	    });
 	    expect(invokeMock).toHaveBeenCalledWith("get_pipeline_run_detail", { id: 301 });
+	    expect(invokeMock).toHaveBeenCalledWith("get_pipeline_run_node_diagnostics", { id: 602 });
 	    expect(invokeMock).toHaveBeenCalledWith("list_workflow_definitions", undefined);
   });
 
@@ -599,32 +635,38 @@ describe("pipeline run monitor interactions", () => {
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "get_gitlab_config") return null;
       if (cmd === "list_pipeline_runs") {
-        return [
-          {
-            id: 301,
-            pipelineDefinitionId: 21,
-            pipelineDefinitionName: "release-pipeline",
-            projectGroupId: 5,
-            projectGroupName: "release-train",
-            legacyWorkflowRunId: null,
-            sourcePipelineRunId: null,
-            triggerKind: "manual",
-            status: "running",
-            runParameters: { source_branch: "release" },
-            maxConcurrency: 2,
-            projectsTotal: 1,
-            projectsQueued: 0,
-            projectsRunning: 1,
-            projectsSuccess: 0,
-            projectsFailed: 1,
-            projectsCancelled: 0,
-            projectsFailedPrecheck: 0,
-            startedAt: "2026-04-14T10:00:00Z",
-            finishedAt: null,
-            createdAt: "2026-04-14T10:00:00Z",
-            updatedAt: "2026-04-14T10:05:00Z",
-          },
-        ];
+        return {
+          items: [
+            {
+              id: 301,
+              pipelineDefinitionId: 21,
+              pipelineDefinitionName: "release-pipeline",
+              projectGroupId: 5,
+              projectGroupName: "release-train",
+              legacyWorkflowRunId: null,
+              sourcePipelineRunId: null,
+              triggerKind: "manual",
+              status: "running",
+              runParameters: { source_branch: "release" },
+              maxConcurrency: 2,
+              projectsTotal: 1,
+              projectsQueued: 0,
+              projectsRunning: 1,
+              projectsSuccess: 0,
+              projectsFailed: 1,
+              projectsCancelled: 0,
+              projectsFailedPrecheck: 0,
+              startedAt: "2026-04-14T10:00:00Z",
+              finishedAt: null,
+              createdAt: "2026-04-14T10:00:00Z",
+              updatedAt: "2026-04-14T10:05:00Z",
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+          hasNextPage: false,
+        };
       }
       if (cmd === "get_pipeline_run_detail") {
         return {
@@ -672,20 +714,16 @@ describe("pipeline run monitor interactions", () => {
                   status: "waiting",
                   startedAt: "2026-04-14T10:01:00Z",
                   finishedAt: null,
-                  stdout: "",
-                  stderr: "",
-                  exitCode: null,
+	                  exitCode: null,
                   summaryMessage: "等待远端流水线完成",
                   errorCode: null,
                   titleZh: null,
                   detailZh: null,
                   suggestionZh: null,
-                  evidence: null,
-                  waitTarget: "team/service-a@main",
-                  lastRemoteStatus: "running",
-                  remotePipelineId: 777,
-                  waitContext: { kind: "pipeline" },
-                },
+	                  waitTarget: "team/service-a@main",
+	                  lastRemoteStatus: "running",
+	                  remotePipelineId: 777,
+	                },
                 {
                   id: 602,
                   pipelineNodeId: 11,
@@ -695,23 +733,29 @@ describe("pipeline run monitor interactions", () => {
                   status: "failed",
                   startedAt: "2026-04-14T10:02:00Z",
                   finishedAt: "2026-04-14T10:05:00Z",
-                  stdout: "",
-                  stderr: "remote pipeline failed",
-                  exitCode: null,
+	                  exitCode: null,
                   summaryMessage: "远端流水线失败",
                   errorCode: "pipeline_failed",
                   titleZh: "远端流水线失败",
                   detailZh: "目标项目的流水线最终状态为 failed。",
                   suggestionZh: "请先查看远端流水线日志，再决定是否重试。",
-                  evidence: "pipeline #777 status=failed",
-                  waitTarget: null,
-                  lastRemoteStatus: "failed",
-                  remotePipelineId: 777,
-                  waitContext: { kind: "pipeline" },
-                },
+	                  waitTarget: null,
+	                  lastRemoteStatus: "failed",
+	                  remotePipelineId: 777,
+	                },
               ],
             },
           ],
+        };
+      }
+      if (cmd === "get_pipeline_run_node_diagnostics") {
+        expect(args).toEqual({ id: 602 });
+        return {
+          runNodeId: 602,
+          stdout: "",
+          stderr: "remote pipeline failed",
+          evidence: "pipeline #777 status=failed",
+          waitContext: { kind: "pipeline" },
         };
       }
       if (cmd === "cancel_pipeline_run") return undefined;
@@ -733,7 +777,16 @@ describe("pipeline run monitor interactions", () => {
     expect(failureTitleMatches.length).toBeGreaterThan(0);
     expect(screen.getByText("目标项目的流水线最终状态为 failed。")).toBeInTheDocument();
     expect(screen.getByText("请先查看远端流水线日志，再决定是否重试。")).toBeInTheDocument();
-    expect(screen.getByText("pipeline #777 status=failed")).toBeInTheDocument();
+	    expect(screen.queryByText("pipeline #777 status=failed")).not.toBeInTheDocument();
+
+	    fireEvent.click(screen.getAllByRole("button", { name: /鏌ョ湅璇婃柇/i })[1]);
+	    expect(await screen.findByText("pipeline #777 status=failed")).toBeInTheDocument();
+	    expect(await screen.findByText("remote pipeline failed")).toBeInTheDocument();
+	    await waitFor(() => {
+	      expect(invokeMock).toHaveBeenCalledWith("get_pipeline_run_node_diagnostics", {
+	        id: 602,
+	      });
+	    });
 
     fireEvent.click(screen.getByRole("button", { name: /取消运行/i }));
     await waitFor(() => {

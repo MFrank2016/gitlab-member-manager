@@ -1443,7 +1443,11 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("重试"));
-        assert!(detail.projects[0].nodes[0]
+        let diagnostics =
+            db::get_pipeline_run_node_diagnostics(&pool, detail.projects[0].nodes[0].id)
+                .await
+                .expect("get pipeline run node diagnostics");
+        assert!(diagnostics
             .evidence
             .as_deref()
             .unwrap_or_default()
@@ -1710,8 +1714,12 @@ mod tests {
             Some("success")
         );
         assert_eq!(detail.projects[0].nodes[2].remote_pipeline_id, Some(777));
+        let wait_diagnostics =
+            db::get_pipeline_run_node_diagnostics(&pool, detail.projects[0].nodes[2].id)
+                .await
+                .expect("get pipeline run node diagnostics");
         assert_eq!(
-            detail.projects[0].nodes[2]
+            wait_diagnostics
                 .wait_context
                 .as_ref()
                 .and_then(|value| value.get("webUrl"))
@@ -1802,7 +1810,11 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("失败"));
-        assert!(detail.projects[0].nodes[0]
+        let diagnostics =
+            db::get_pipeline_run_node_diagnostics(&pool, detail.projects[0].nodes[0].id)
+                .await
+                .expect("get pipeline run node diagnostics");
+        assert!(diagnostics
             .evidence
             .as_deref()
             .unwrap_or_default()

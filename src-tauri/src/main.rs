@@ -18,12 +18,12 @@ use crate::gitlab::GitLabConfig;
 use crate::models::{
     AppSettings, BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert,
     ManagedProject, PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineNodeInput,
-    PipelineRunDetail, PipelineRunExecuteRequest, PipelineRunExecuteResult, PipelineRunListItem,
-    PipelineRunRetryRequest, PipelineScheduleInput, PipelineVariableInput, ProjectGroup,
-    ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary, WorkflowDefinitionDetail,
-    WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunExecuteRequest,
-    WorkflowRunExecuteResult, WorkflowRunListItem, WorkflowRunRetryFailedRequest,
-    WorkflowStepInput,
+    PipelineRunDetail, PipelineRunExecuteRequest, PipelineRunExecuteResult, PipelineRunListPage,
+    PipelineRunListQuery, PipelineRunNodeDiagnostics, PipelineRunRetryRequest,
+    PipelineScheduleInput, PipelineVariableInput, ProjectGroup, ProjectGroupMemberSyncRow,
+    ProjectMember, ProjectSummary, WorkflowDefinitionDetail, WorkflowDefinitionListItem,
+    WorkflowRunDetail, WorkflowRunExecuteRequest, WorkflowRunExecuteResult, WorkflowRunListItem,
+    WorkflowRunRetryFailedRequest, WorkflowStepInput,
 };
 use sqlx::SqlitePool;
 use std::sync::Mutex;
@@ -810,13 +810,20 @@ async fn list_workflow_runs(
 #[tauri::command]
 async fn list_pipeline_runs(
     state: State<'_, AppState>,
-) -> Result<Vec<PipelineRunListItem>, CommandError> {
-    let result = db::list_pipeline_runs(&state.db)
+    query: Option<PipelineRunListQuery>,
+) -> Result<PipelineRunListPage, CommandError> {
+    let result = db::list_pipeline_runs(&state.db, query.unwrap_or_default())
         .await
         .map_err(pipeline_command_error);
 
     match &result {
-        Ok(runs) => tracing::info!(count = runs.len(), "list_pipeline_runs success"),
+        Ok(runs) => tracing::info!(
+            count = runs.items.len(),
+            page = runs.page,
+            page_size = runs.page_size,
+            total = runs.total,
+            "list_pipeline_runs success"
+        ),
         Err(e) => tracing::error!(error = ?e, "list_pipeline_runs failed"),
     }
 
@@ -992,6 +999,27 @@ async fn get_pipeline_run_detail(
     match &result {
         Ok(_) => tracing::info!(id = id, "get_pipeline_run_detail success"),
         Err(e) => tracing::error!(id = id, error = ?e, "get_pipeline_run_detail failed"),
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn get_pipeline_run_node_diagnostics(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<PipelineRunNodeDiagnostics, CommandError> {
+    let result = db::get_pipeline_run_node_diagnostics(&state.db, id)
+        .await
+        .map_err(pipeline_command_error);
+
+    match &result {
+        Ok(_) => tracing::info!(id = id, "get_pipeline_run_node_diagnostics success"),
+        Err(e) => tracing::error!(
+            id = id,
+            error = ?e,
+            "get_pipeline_run_node_diagnostics failed"
+        ),
     }
 
     result
@@ -1460,7 +1488,8 @@ fn main() {
 	      list_pipeline_runs,
 	      get_workflow_run_detail,
 	      get_pipeline_run_detail,
-      sync_project_group_members,
+	      get_pipeline_run_node_diagnostics,
+	      sync_project_group_members,
       upsert_local_members,
       list_local_members,
       delete_local_members,

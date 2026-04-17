@@ -4,8 +4,8 @@
 - [x] 1.3 Preserve current runtime behavior with focused regression coverage while the internal refactor lands.
 
 ## 2. Monitoring And Data Loading
-- [ ] 2.1 Add paginated and filterable pipeline run history queries and update the frontend invoke surface accordingly.
-- [ ] 2.2 Split pipeline run detail loading into summary-first data and on-demand heavy detail such as node logs and technical evidence.
+- [x] 2.1 Add paginated and filterable pipeline run history queries and update the frontend invoke surface accordingly.
+- [x] 2.2 Split pipeline run detail loading into summary-first data and on-demand heavy detail such as node logs and technical evidence.
 - [ ] 2.3 Add active-run auto-refresh behavior in the run monitor and stop refreshing automatically once runs are terminal.
 
 ## 3. Scheduler And Operator Feedback

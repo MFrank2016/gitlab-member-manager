@@ -257,6 +257,31 @@ pub struct PipelineRunListItem {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunListQuery {
+    #[serde(default)]
+    pub page: Option<i64>,
+    #[serde(default)]
+    pub page_size: Option<i64>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub pipeline_definition_id: Option<i64>,
+    #[serde(default)]
+    pub project_group_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunListPage {
+    pub items: Vec<PipelineRunListItem>,
+    pub page: i64,
+    pub page_size: i64,
+    pub total: i64,
+    pub has_next_page: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineRunNode {
@@ -268,18 +293,24 @@ pub struct PipelineRunNode {
     pub status: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
-    pub stdout: String,
-    pub stderr: String,
     pub exit_code: Option<i64>,
     pub summary_message: String,
     pub error_code: Option<String>,
     pub title_zh: Option<String>,
     pub detail_zh: Option<String>,
     pub suggestion_zh: Option<String>,
-    pub evidence: Option<String>,
     pub wait_target: Option<String>,
     pub last_remote_status: Option<String>,
     pub remote_pipeline_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineRunNodeDiagnostics {
+    pub run_node_id: i64,
+    pub stdout: String,
+    pub stderr: String,
+    pub evidence: Option<String>,
     pub wait_context: Option<Value>,
 }
 

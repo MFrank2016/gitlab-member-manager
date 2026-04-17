@@ -210,8 +210,19 @@ The runtime-foundation slice is now landed in the isolated `pipeline-runtime-fou
 - focused OpenSpec, frontend smoke, pipeline runtime, GitLab runtime, and scheduler regression verification
 
 Still intentionally deferred after this slice:
-- run-history pagination is still pending
-- run-detail lazy loading is still pending
+- active-run auto-refresh is still pending
+- scheduler query optimization is still pending
+- richer pipeline visualizations are still pending
+
+## Status Note: Monitoring Slice
+
+The first monitoring and data-loading slice is now landed in the isolated `pipeline-runtime-foundation` worktree and has completed:
+- paginated and filterable pipeline run history queries with a `page/items/total/has_next_page` response shape
+- summary-first pipeline run detail loading
+- dedicated lazy node diagnostics loading for stdout, stderr, evidence, and wait context
+- frontend monitor updates for pagination, lightweight filters, and on-demand diagnostics expansion
+
+Still intentionally deferred after this monitoring slice:
 - active-run auto-refresh is still pending
 - scheduler query optimization is still pending
 - richer pipeline visualizations are still pending
