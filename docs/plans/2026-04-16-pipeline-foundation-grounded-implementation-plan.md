@@ -214,16 +214,18 @@ Still intentionally deferred after this slice:
 - scheduler query optimization is still pending
 - richer pipeline visualizations are still pending
 
-## Status Note: Monitoring Slices
+## Status Note: Monitoring And Scheduler Slices
 
-The first two monitoring and data-loading slices are now landed in the isolated `pipeline-runtime-foundation` worktree and have completed:
+The first monitoring and scheduler follow-up slices are now landed in the isolated `pipeline-runtime-foundation` worktree and have completed:
 - paginated and filterable pipeline run history queries with a `page/items/total/has_next_page` response shape
 - summary-first pipeline run detail loading
 - dedicated lazy node diagnostics loading for stdout, stderr, evidence, and wait context
 - frontend monitor updates for pagination, lightweight filters, and on-demand diagnostics expansion
 - active-run auto-refresh for the selected run with automatic stop once the run reaches a terminal state
 - focused frontend coverage for both starting and stopping the monitor auto-refresh loop
+- grouped scheduler active-run count loading so one tick no longer performs one database query per due schedule
+- shared-definition scheduler regression coverage to preserve `skip_if_running` behavior within the same tick
 
-Still intentionally deferred after these monitoring slices:
-- scheduler query optimization is still pending
+Still intentionally deferred after these monitoring and scheduler slices:
+- clearer scheduler operator feedback is still pending
 - richer pipeline visualizations are still pending

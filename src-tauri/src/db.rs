@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 use sqlx::{
     migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    Sqlite, SqlitePool, Transaction,
+    QueryBuilder, Sqlite, SqlitePool, Transaction,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
@@ -2103,6 +2103,39 @@ pub async fn list_pipeline_runs(
     })
 }
 
+pub(crate) async fn load_active_pipeline_run_counts(
+    pool: &SqlitePool,
+    pipeline_definition_ids: &[i64],
+) -> Result<HashMap<i64, i64>> {
+    let unique_pipeline_definition_ids = pipeline_definition_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if unique_pipeline_definition_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut query_builder = QueryBuilder::<Sqlite>::new(
+        r#"SELECT pipeline_definition_id, COUNT(*)
+           FROM pipeline_runs
+           WHERE status IN ('pending', 'running', 'cancelling')
+             AND pipeline_definition_id IN ("#,
+    );
+    let mut separated = query_builder.separated(", ");
+    for pipeline_definition_id in unique_pipeline_definition_ids {
+        separated.push_bind(pipeline_definition_id);
+    }
+    separated.push_unseparated(")");
+    query_builder.push(" GROUP BY pipeline_definition_id");
+
+    let rows = query_builder
+        .build_query_as::<(i64, i64)>()
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows.into_iter().collect())
+}
+
 pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<PipelineRunDetail> {
     let mut tx = pool.begin().await?;
 
@@ -3856,6 +3889,86 @@ mod tests {
         assert_eq!(listed.items[0].pipeline_definition_id, pipeline_a.id);
         assert_eq!(listed.items[0].project_group_id, group_b.id);
         assert_eq!(listed.items[0].status, "running");
+    }
+
+    #[tokio::test]
+    async fn active_pipeline_run_counts_group_by_definition_and_ignore_terminal_statuses() {
+        let pool = setup_test_pool().await;
+        let project_group = create_project_group(&pool, "active-count-group".to_string())
+            .await
+            .expect("create project group");
+        let pipeline_a = create_pipeline_definition(
+            &pool,
+            "active-count-pipeline-a".to_string(),
+            "active count coverage a".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition a");
+        let pipeline_b = create_pipeline_definition(
+            &pool,
+            "active-count-pipeline-b".to_string(),
+            "active count coverage b".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition b");
+
+        for (pipeline_definition_id, status, ordinal) in [
+            (pipeline_a.id, "running", 1_i64),
+            (pipeline_a.id, "pending", 2_i64),
+            (pipeline_a.id, "completed", 3_i64),
+            (pipeline_b.id, "cancelling", 4_i64),
+            (pipeline_b.id, "partial_failed", 5_i64),
+        ] {
+            let timestamp = format!("2026-04-17T09:0{ordinal}:00Z");
+            sqlx::query(
+                r#"INSERT INTO pipeline_runs (
+                     pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+                     trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+                   ) VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)"#,
+            )
+            .bind(pipeline_definition_id)
+            .bind(project_group.id)
+            .bind("schedule")
+            .bind(status)
+            .bind("{}")
+            .bind(1_i64)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(&pool)
+            .await
+            .expect("insert pipeline run");
+        }
+
+        let counts = load_active_pipeline_run_counts(
+            &pool,
+            &[pipeline_a.id, pipeline_b.id, pipeline_b.id + 1000],
+        )
+        .await
+        .expect("load active pipeline run counts");
+
+        assert_eq!(counts.get(&pipeline_a.id), Some(&2));
+        assert_eq!(counts.get(&pipeline_b.id), Some(&1));
+        assert!(
+            !counts.contains_key(&(pipeline_b.id + 1000)),
+            "unexpected active count entry for missing pipeline definition"
+        );
     }
 
     #[tokio::test]

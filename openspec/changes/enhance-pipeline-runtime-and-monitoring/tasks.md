@@ -9,7 +9,7 @@
 - [x] 2.3 Add active-run auto-refresh behavior in the run monitor and stop refreshing automatically once runs are terminal.
 
 ## 3. Scheduler And Operator Feedback
-- [ ] 3.1 Improve scheduler tick efficiency so active-run checks do not scale as one database query per schedule.
+- [x] 3.1 Improve scheduler tick efficiency so active-run checks do not scale as one database query per schedule.
 - [ ] 3.2 Add clearer schedule-state feedback, including queued, skipped, and next-trigger visibility.
 - [ ] 3.3 Keep desktop-only scheduler semantics unchanged unless explicitly expanded in a later change.
 

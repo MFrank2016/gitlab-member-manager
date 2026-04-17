@@ -4,12 +4,12 @@ use chrono_tz::Tz;
 use croner::parser::{CronParser, Seconds};
 use serde_json::Value;
 use sqlx::SqlitePool;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{self, Duration, MissedTickBehavior};
 
-use crate::workflows;
+use crate::{db, workflows};
 
 const SCHEDULER_TICK_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -89,17 +89,30 @@ async fn load_enabled_pipeline_schedules(pool: &SqlitePool) -> Result<Vec<Loaded
     Ok(schedules)
 }
 
-async fn count_active_pipeline_runs(pool: &SqlitePool, pipeline_definition_id: i64) -> Result<i64> {
-    sqlx::query_scalar::<_, i64>(
-        r#"SELECT COUNT(*)
-           FROM pipeline_runs
-           WHERE pipeline_definition_id = ?1
-             AND status IN ('pending', 'running', 'cancelling')"#,
-    )
-    .bind(pipeline_definition_id)
-    .fetch_one(pool)
-    .await
-    .map_err(Into::into)
+fn active_run_count(active_run_counts: &HashMap<i64, i64>, pipeline_definition_id: i64) -> i64 {
+    active_run_counts
+        .get(&pipeline_definition_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn increment_active_run_count(active_run_counts: &mut HashMap<i64, i64>, pipeline_definition_id: i64) {
+    *active_run_counts.entry(pipeline_definition_id).or_insert(0) += 1;
+}
+
+fn collect_scheduler_pipeline_definition_ids(
+    state: &SchedulerState,
+    schedules: &[LoadedPipelineSchedule],
+) -> Vec<i64> {
+    let mut pipeline_definition_ids = BTreeSet::new();
+    for queued in &state.queued_requests {
+        pipeline_definition_ids.insert(queued.pipeline_definition_id);
+    }
+    for schedule in schedules {
+        pipeline_definition_ids.insert(schedule.pipeline_definition_id);
+    }
+
+    pipeline_definition_ids.into_iter().collect()
 }
 
 fn schedule_slot_key(
@@ -136,6 +149,7 @@ async fn drain_ready_queue(
     pool: &SqlitePool,
     state: &mut SchedulerState,
     summary: &mut SchedulerTickSummary,
+    active_run_counts: &mut HashMap<i64, i64>,
 ) -> Result<()> {
     let queued_count = state.queued_requests.len();
     if queued_count == 0 {
@@ -147,7 +161,7 @@ async fn drain_ready_queue(
             break;
         };
 
-        if count_active_pipeline_runs(pool, request.pipeline_definition_id).await? > 0 {
+        if active_run_count(active_run_counts, request.pipeline_definition_id) > 0 {
             state.queued_requests.push_back(request);
             continue;
         }
@@ -163,6 +177,7 @@ async fn drain_ready_queue(
         }
 
         summary.started_runs += 1;
+        increment_active_run_count(active_run_counts, request.pipeline_definition_id);
     }
 
     Ok(())
@@ -174,9 +189,15 @@ async fn run_scheduler_tick(
     now: DateTime<Utc>,
 ) -> Result<SchedulerTickSummary> {
     let mut summary = SchedulerTickSummary::default();
-    drain_ready_queue(pool, state, &mut summary).await?;
+    let schedules = load_enabled_pipeline_schedules(pool).await?;
+    let scheduler_pipeline_definition_ids =
+        collect_scheduler_pipeline_definition_ids(state, &schedules);
+    let mut active_run_counts =
+        db::load_active_pipeline_run_counts(pool, &scheduler_pipeline_definition_ids).await?;
 
-    for schedule in load_enabled_pipeline_schedules(pool).await? {
+    drain_ready_queue(pool, state, &mut summary, &mut active_run_counts).await?;
+
+    for schedule in schedules {
         let Some(slot_key) = schedule_slot_key(&schedule, now)? else {
             continue;
         };
@@ -185,7 +206,7 @@ async fn run_scheduler_tick(
             continue;
         }
 
-        let active_runs = count_active_pipeline_runs(pool, schedule.pipeline_definition_id).await?;
+        let active_runs = active_run_count(&active_run_counts, schedule.pipeline_definition_id);
         let request = QueuedScheduleRequest {
             schedule_id: schedule.schedule_id,
             pipeline_definition_id: schedule.pipeline_definition_id,
@@ -197,6 +218,7 @@ async fn run_scheduler_tick(
             "allow_parallel" => {
                 start_scheduled_run(&request, pool).await?;
                 summary.started_runs += 1;
+                increment_active_run_count(&mut active_run_counts, request.pipeline_definition_id);
             }
             "skip_if_running" => {
                 if active_runs > 0 {
@@ -204,6 +226,7 @@ async fn run_scheduler_tick(
                 } else {
                     start_scheduled_run(&request, pool).await?;
                     summary.started_runs += 1;
+                    increment_active_run_count(&mut active_run_counts, request.pipeline_definition_id);
                 }
             }
             "queue_after_running" => {
@@ -221,6 +244,7 @@ async fn run_scheduler_tick(
                 } else {
                     start_scheduled_run(&request, pool).await?;
                     summary.started_runs += 1;
+                    increment_active_run_count(&mut active_run_counts, request.pipeline_definition_id);
                 }
             }
             policy => {
@@ -329,6 +353,36 @@ mod tests {
         .expect("count scheduled pipeline runs")
     }
 
+    async fn insert_schedule_row(
+        pool: &SqlitePool,
+        pipeline_definition_id: i64,
+        schedule_order: i64,
+        project_group_id: i64,
+        policy: &str,
+    ) {
+        let now = "2026-04-14T08:59:00Z";
+        sqlx::query(
+            r#"INSERT INTO pipeline_schedules (
+                 pipeline_definition_id, schedule_order, project_group_id, cron_expr, timezone, branch,
+                 enabled, policy, variables_json, created_at, updated_at
+               ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
+        )
+        .bind(pipeline_definition_id)
+        .bind(schedule_order)
+        .bind(project_group_id)
+        .bind("0 9 14 4 *")
+        .bind("UTC")
+        .bind(Some("main"))
+        .bind(1_i64)
+        .bind(policy)
+        .bind("{}")
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("insert pipeline schedule");
+    }
+
     async fn seed_running_pipeline_run(
         pool: &SqlitePool,
         pipeline_definition_id: i64,
@@ -425,6 +479,37 @@ mod tests {
         assert_eq!(summary.queued_runs, 0);
         assert_eq!(summary.skipped_runs, 0);
         assert_eq!(count_schedule_runs(&pool, pipeline_definition_id).await, 2);
+    }
+
+    #[tokio::test]
+    async fn pipeline_schedule_runtime_shared_definition_skip_if_running_starts_only_once() {
+        let pool = db::setup_test_pool().await;
+        let (pipeline_definition_id, project_group_id) =
+            create_project_group_with_schedule(&pool, "skip_if_running").await;
+        let mut state = SchedulerState::default();
+        insert_schedule_row(
+            &pool,
+            pipeline_definition_id,
+            1,
+            project_group_id,
+            "skip_if_running",
+        )
+        .await;
+
+        let summary = run_scheduler_tick(
+            &pool,
+            &mut state,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 30)
+                .single()
+                .expect("construct scheduler tick time"),
+        )
+        .await
+        .expect("run scheduler tick");
+
+        assert_eq!(summary.started_runs, 1);
+        assert_eq!(summary.queued_runs, 0);
+        assert_eq!(summary.skipped_runs, 1);
+        assert_eq!(count_schedule_runs(&pool, pipeline_definition_id).await, 1);
     }
 
     #[tokio::test]
