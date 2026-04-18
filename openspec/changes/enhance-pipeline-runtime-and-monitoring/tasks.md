@@ -14,7 +14,7 @@
 - [ ] 3.3 Keep desktop-only scheduler semantics unchanged unless explicitly expanded in a later change.
 
 ## 4. Visualization And UX
-- [ ] 4.1 Break the pipeline definition editor into smaller editing sections and reduce dependence on raw JSON editing for built-in nodes.
+- [x] 4.1 Break the pipeline definition editor into smaller editing sections and reduce dependence on raw JSON editing for built-in nodes.
 - [ ] 4.2 Add richer pipeline run visualizations such as DAG, project-by-node matrix, or timeline views for operator troubleshooting.
 - [x] 4.3 Preserve Chinese-first operator messaging for failures, waiting states, and recovery prompts.
 
