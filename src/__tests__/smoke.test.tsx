@@ -427,6 +427,275 @@ describe("pipeline schedule runtime feedback", () => {
   });
 });
 
+describe("pipeline definition structured editor guardrails", () => {
+  const projectGroup = {
+    id: 7,
+    name: "release-train",
+    createdAt: "2026-03-18T00:00:00Z",
+    updatedAt: "2026-03-18T00:00:00Z",
+    projectsCount: 2,
+  };
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  function setupPipelineEditorMocks(detail: {
+    id: number;
+    name: string;
+    description: string;
+    enabled: boolean;
+    maxConcurrencyDefault: number;
+    variables: Array<Record<string, unknown>>;
+    nodes: Array<Record<string, unknown>>;
+    schedules: Array<Record<string, unknown>>;
+  }) {
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_definitions") {
+        return [
+          {
+            id: detail.id,
+            name: detail.name,
+            description: detail.description,
+            enabled: detail.enabled,
+            maxConcurrencyDefault: detail.maxConcurrencyDefault,
+            legacyWorkflowDefinitionId: null,
+            createdAt: "2026-03-18T00:00:00Z",
+            updatedAt: "2026-03-18T00:00:00Z",
+            variablesCount: detail.variables.length,
+            nodesCount: detail.nodes.length,
+            schedulesCount: detail.schedules.length,
+          },
+        ];
+      }
+      if (cmd === "list_project_groups") return [projectGroup];
+      if (cmd === "get_pipeline_definition_detail") {
+        expect(args).toEqual({ id: detail.id });
+        return {
+          id: detail.id,
+          name: detail.name,
+          description: detail.description,
+          enabled: detail.enabled,
+          maxConcurrencyDefault: detail.maxConcurrencyDefault,
+          legacyWorkflowDefinitionId: null,
+          createdAt: "2026-03-18T00:00:00Z",
+          updatedAt: "2026-03-18T00:00:00Z",
+          variables: detail.variables,
+          nodes: detail.nodes,
+          schedules: detail.schedules,
+        };
+      }
+      if (cmd === "get_pipeline_schedule_runtime_snapshots") return [];
+      if (cmd === "update_pipeline_definition") return undefined;
+      return undefined;
+    });
+  }
+
+  async function openEditDialog(name: string) {
+    render(<WorkflowsPagePipeline />);
+
+    const row = await screen.findByText(name);
+    fireEvent.click(within(row.closest("tr") as HTMLElement).getByRole("button", { name: "编辑" }));
+
+    await screen.findByRole("heading", { name: "编辑流水线定义" });
+    return screen.getByRole("dialog");
+  }
+
+  it("supports structured editing for nested custom-node parameters", async () => {
+    setupPipelineEditorMocks({
+      id: 151,
+      name: "custom-node-structured-editor",
+      description: "structured editor red phase",
+      enabled: true,
+      maxConcurrencyDefault: 2,
+      variables: [],
+      nodes: [
+        {
+          nodeOrder: 0,
+          nodeType: "custom_release_gate",
+          parameters: {},
+        },
+      ],
+      schedules: [],
+    });
+
+    const dialog = await openEditDialog("custom-node-structured-editor");
+    const editor = within(dialog).getByTestId("pipeline-node-structured-editor-0");
+
+    fireEvent.click(within(editor).getByRole("button", { name: "添加字段" }));
+    const rootField = within(editor).getAllByTestId("structured-json-field-row")[0];
+    fireEvent.change(within(rootField).getByLabelText("键名"), {
+      target: { value: "targets" },
+    });
+    fireEvent.change(within(rootField).getByLabelText("值类型"), {
+      target: { value: "array" },
+    });
+
+    const arrayEditor = within(rootField).getByTestId("structured-json-array-editor");
+    fireEvent.click(within(arrayEditor).getByRole("button", { name: "添加项" }));
+    const firstItem = within(arrayEditor).getAllByTestId("structured-json-array-item")[0];
+    fireEvent.change(within(firstItem).getByLabelText("值类型"), {
+      target: { value: "object" },
+    });
+
+    const nestedObject = within(firstItem).getByTestId("structured-json-object-editor");
+    fireEvent.click(within(nestedObject).getByRole("button", { name: "添加字段" }));
+    const nestedField = within(nestedObject).getAllByTestId("structured-json-field-row")[0];
+    fireEvent.change(within(nestedField).getByLabelText("键名"), {
+      target: { value: "project" },
+    });
+    fireEvent.change(within(nestedField).getByLabelText("字符串值"), {
+      target: { value: "team/service-a" },
+    });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "update_pipeline_definition",
+        expect.objectContaining({
+          id: 151,
+          nodes: [
+            {
+              nodeType: "custom_release_gate",
+              parameters: {
+                targets: [{ project: "team/service-a" }],
+              },
+            },
+          ],
+        })
+      );
+    });
+  });
+
+  it("edits schedule variables through the structured editor path", async () => {
+    setupPipelineEditorMocks({
+      id: 152,
+      name: "schedule-variables-structured-editor",
+      description: "schedule variable red phase",
+      enabled: true,
+      maxConcurrencyDefault: 2,
+      variables: [],
+      nodes: [
+        {
+          nodeOrder: 0,
+          nodeType: "checkout_branch",
+          parameters: { branch: "${source_branch}" },
+        },
+      ],
+      schedules: [
+        {
+          id: 701,
+          scheduleOrder: 0,
+          projectGroupId: 7,
+          cronExpr: "0 9 * * 1-5",
+          timezone: "Asia/Shanghai",
+          branch: null,
+          enabled: true,
+          policy: "skip_if_running",
+          variables: {},
+        },
+      ],
+    });
+
+    const dialog = await openEditDialog("schedule-variables-structured-editor");
+    const scheduleEditor = within(dialog).getByTestId("pipeline-schedule-variables-editor-0");
+
+    fireEvent.click(within(scheduleEditor).getByRole("button", { name: "添加字段" }));
+    const rootField = within(scheduleEditor).getAllByTestId("structured-json-field-row")[0];
+    fireEvent.change(within(rootField).getByLabelText("键名"), {
+      target: { value: "release_window" },
+    });
+    fireEvent.change(within(rootField).getByLabelText("值类型"), {
+      target: { value: "object" },
+    });
+
+    const nestedObject = within(rootField).getByTestId("structured-json-object-editor");
+    fireEvent.click(within(nestedObject).getByRole("button", { name: "添加字段" }));
+    const nestedField = within(nestedObject).getAllByTestId("structured-json-field-row")[0];
+    fireEvent.change(within(nestedField).getByLabelText("键名"), {
+      target: { value: "lane" },
+    });
+    fireEvent.change(within(nestedField).getByLabelText("字符串值"), {
+      target: { value: "stable" },
+    });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "update_pipeline_definition",
+        expect.objectContaining({
+          id: 152,
+          schedules: [
+            expect.objectContaining({
+              projectGroupId: 7,
+              variables: {
+                release_window: {
+                  lane: "stable",
+                },
+              },
+            }),
+          ],
+        })
+      );
+    });
+  });
+
+  it("preserves the last valid structured value across invalid advanced JSON edits", async () => {
+    setupPipelineEditorMocks({
+      id: 153,
+      name: "structured-json-fallback",
+      description: "advanced json fallback red phase",
+      enabled: true,
+      maxConcurrencyDefault: 2,
+      variables: [],
+      nodes: [
+        {
+          nodeOrder: 0,
+          nodeType: "custom_release_gate",
+          parameters: {
+            target: { project: "team/service-a" },
+            approvals: 2,
+          },
+        },
+      ],
+      schedules: [],
+    });
+
+    const dialog = await openEditDialog("structured-json-fallback");
+    const editor = within(dialog).getByTestId("pipeline-node-structured-editor-0");
+
+    expect(within(editor).getByRole("button", { name: "结构化模式" })).toBeInTheDocument();
+    fireEvent.click(within(editor).getByRole("button", { name: "JSON 模式" }));
+    fireEvent.change(within(editor).getByLabelText("高级 JSON"), {
+      target: { value: '{"target":' },
+    });
+    expect(within(editor).getByText("JSON 格式无效，已保留最近一次有效值。")).toBeInTheDocument();
+
+    fireEvent.click(within(editor).getByRole("button", { name: "结构化模式" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "update_pipeline_definition",
+        expect.objectContaining({
+          id: 153,
+          nodes: [
+            {
+              nodeType: "custom_release_gate",
+              parameters: {
+                target: { project: "team/service-a" },
+                approvals: 2,
+              },
+            },
+          ],
+        })
+      );
+    });
+  });
+});
+
 describe("pipeline wrapper smoke", () => {
   beforeEach(() => {
     invokeMock.mockReset();
