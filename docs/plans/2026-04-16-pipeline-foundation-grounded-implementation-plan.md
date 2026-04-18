@@ -235,6 +235,7 @@ The first monitoring and scheduler follow-up slices are now landed in the isolat
 - a first pipeline visualization slice with a project-by-node matrix inside the run monitor
 - matrix/list view switching that keeps the existing project table as a fallback while enabling denser cross-project troubleshooting
 - matrix cell selection wired into the existing lower project-detail panel so operators can drill down without changing backend contracts
+- MSI packaging verification rerun passed with `pnpm tauri bundle --bundles msi -v`
 
 Still intentionally deferred after these monitoring and scheduler slices:
 - desktop-only scheduler semantics remain unchanged and stay limited to the current in-process `30s` tick with `MissedTickBehavior::Skip`
