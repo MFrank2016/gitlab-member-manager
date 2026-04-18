@@ -231,7 +231,10 @@ The first monitoring and scheduler follow-up slices are now landed in the isolat
 - a thinner pipeline definition page container with the draft form moved into focused editor sections
 - structured JSON editing for custom node parameters and schedule variables, with advanced JSON fallback retained
 - hybrid built-in node editing that keeps known fields explicit while moving extra parameters off raw textarea-first editing
+- a first pipeline visualization slice with a project-by-node matrix inside the run monitor
+- matrix/list view switching that keeps the existing project table as a fallback while enabling denser cross-project troubleshooting
+- matrix cell selection wired into the existing lower project-detail panel so operators can drill down without changing backend contracts
 
 Still intentionally deferred after these monitoring and scheduler slices:
 - desktop-only scheduler semantics remain unchanged
-- richer pipeline visualizations are still pending
+- DAG- and timeline-oriented follow-up visualizations are still pending

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { PipelineRunProjectMatrix } from "@/components/pipeline-run-monitor/PipelineRunProjectMatrix";
 import { Button } from "@/components/ui/button";
 import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -119,6 +120,7 @@ type FilterState = {
 type NodeDiagnosticsMap = Record<number, PipelineRunNodeDiagnostics | null | undefined>;
 type ExpandedNodeMap = Record<number, boolean | undefined>;
 type LoadingNodeMap = Record<number, boolean | undefined>;
+type ProjectViewMode = "list" | "matrix";
 
 function emptyRunPage(): PipelineRunListPage {
   return {
@@ -322,6 +324,7 @@ export function WorkflowRunsPagePipeline() {
   const [loadingDetail, setLoadingDetail] = React.useState(false);
   const [cancelling, setCancelling] = React.useState(false);
   const [retrying, setRetrying] = React.useState(false);
+  const [projectViewMode, setProjectViewMode] = React.useState<ProjectViewMode>("list");
   const [expandedNodes, setExpandedNodes] = React.useState<ExpandedNodeMap>({});
   const [nodeDiagnosticsById, setNodeDiagnosticsById] = React.useState<NodeDiagnosticsMap>({});
   const [loadingNodeDiagnosticsById, setLoadingNodeDiagnosticsById] = React.useState<LoadingNodeMap>({});
@@ -742,38 +745,69 @@ export function WorkflowRunsPagePipeline() {
 
         <div className="space-y-4 xl:col-span-3">
           <Panel>
-            <PanelHeader>
+            <PanelHeader className="flex-wrap gap-2">
               <h3 className="font-semibold">项目级状态</h3>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant={projectViewMode === "list" ? "secondary" : "outline"}
+                  size="sm"
+                  data-testid="pipeline-run-project-view-list"
+                  aria-pressed={projectViewMode === "list"}
+                  onClick={() => setProjectViewMode("list")}
+                >
+                  列表
+                </Button>
+                <Button
+                  variant={projectViewMode === "matrix" ? "secondary" : "outline"}
+                  size="sm"
+                  data-testid="pipeline-run-project-view-matrix"
+                  aria-pressed={projectViewMode === "matrix"}
+                  onClick={() => setProjectViewMode("matrix")}
+                >
+                  矩阵
+                </Button>
+              </div>
             </PanelHeader>
             <PanelBody>
               {loadingDetail ? (
                 <p className="text-sm text-muted-foreground">正在加载运行详情...</p>
               ) : selectedRunDetail ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>项目</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>摘要</TableHead>
-                      <TableHead>结束时间</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {selectedRunDetail.projects.map((project) => (
-                      <TableRow key={project.id} className={selectedProjectId === project.id ? "bg-muted/50" : ""}>
-                        <TableCell>
-                          <button type="button" className="text-left text-sm font-medium hover:underline" onClick={() => setSelectedProjectId(project.id)}>
-                            {project.projectName}
-                          </button>
-                          <div className="font-mono text-xs text-muted-foreground">{project.projectPathWithNamespace}</div>
-                        </TableCell>
-                        <TableCell>{statusPill(project.status, PROJECT_STATUS_CLASS)}</TableCell>
-                        <TableCell className="text-xs">{project.summaryMessage || "-"}</TableCell>
-                        <TableCell className="font-mono text-xs">{formatDateTime(project.finishedAt)}</TableCell>
+                projectViewMode === "matrix" ? (
+                  <PipelineRunProjectMatrix
+                    projects={selectedRunDetail.projects}
+                    selectedProjectId={selectedProjectId}
+                    onSelectProject={setSelectedProjectId}
+                    nodeTypeLabel={nodeTypeLabel}
+                    statusLabel={status => STATUS_TEXT[status] ?? status.replaceAll("_", " ")}
+                    remoteStatusLabel={remoteStatusLabel}
+                  />
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>项目</TableHead>
+                        <TableHead>状态</TableHead>
+                        <TableHead>摘要</TableHead>
+                        <TableHead>结束时间</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {selectedRunDetail.projects.map((project) => (
+                        <TableRow key={project.id} className={selectedProjectId === project.id ? "bg-muted/50" : ""}>
+                          <TableCell>
+                            <button type="button" className="text-left text-sm font-medium hover:underline" onClick={() => setSelectedProjectId(project.id)}>
+                              {project.projectName}
+                            </button>
+                            <div className="font-mono text-xs text-muted-foreground">{project.projectPathWithNamespace}</div>
+                          </TableCell>
+                          <TableCell>{statusPill(project.status, PROJECT_STATUS_CLASS)}</TableCell>
+                          <TableCell className="text-xs">{project.summaryMessage || "-"}</TableCell>
+                          <TableCell className="font-mono text-xs">{formatDateTime(project.finishedAt)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )
               ) : (
                 <p className="text-sm text-muted-foreground">请选择一个运行查看项目状态。</p>
               )}

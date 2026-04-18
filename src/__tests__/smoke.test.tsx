@@ -1004,6 +1004,197 @@ describe("pipeline run monitor interactions", () => {
     invokeMock.mockReset();
   });
 
+  it("renders a project-by-node matrix view for cross-project troubleshooting", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_runs") {
+        return {
+          items: [
+            {
+              id: 401,
+              pipelineDefinitionId: 21,
+              pipelineDefinitionName: "release-pipeline",
+              projectGroupId: 5,
+              projectGroupName: "release-train",
+              legacyWorkflowRunId: null,
+              sourcePipelineRunId: null,
+              triggerKind: "manual",
+              status: "running",
+              runParameters: { source_branch: "release" },
+              maxConcurrency: 2,
+              projectsTotal: 2,
+              projectsQueued: 0,
+              projectsRunning: 1,
+              projectsSuccess: 0,
+              projectsFailed: 1,
+              projectsCancelled: 0,
+              projectsFailedPrecheck: 0,
+              startedAt: "2026-04-18T00:00:00Z",
+              finishedAt: null,
+              createdAt: "2026-04-18T00:00:00Z",
+              updatedAt: "2026-04-18T00:05:00Z",
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "get_pipeline_run_detail") {
+        expect(args).toEqual({ id: 401 });
+        return {
+          id: 401,
+          pipelineDefinitionId: 21,
+          pipelineDefinitionName: "release-pipeline",
+          projectGroupId: 5,
+          projectGroupName: "release-train",
+          legacyWorkflowRunId: null,
+          sourcePipelineRunId: null,
+          triggerKind: "manual",
+          status: "running",
+          runParameters: { source_branch: "release" },
+          maxConcurrency: 2,
+          projectsTotal: 2,
+          projectsQueued: 0,
+          projectsRunning: 1,
+          projectsSuccess: 0,
+          projectsFailed: 1,
+          projectsCancelled: 0,
+          projectsFailedPrecheck: 0,
+          startedAt: "2026-04-18T00:00:00Z",
+          finishedAt: null,
+          createdAt: "2026-04-18T00:00:00Z",
+          updatedAt: "2026-04-18T00:05:00Z",
+          projects: [
+            {
+              id: 5001,
+              managedProjectId: 6001,
+              gitlabProjectId: 7001,
+              projectName: "service-a",
+              projectPathWithNamespace: "team/service-a",
+              repoPath: "D:/repos/service-a",
+              status: "running",
+              summaryMessage: "waiting on remote pipeline",
+              startedAt: "2026-04-18T00:00:10Z",
+              finishedAt: null,
+              nodes: [
+                {
+                  id: 8001,
+                  pipelineNodeId: 10,
+                  nodeOrder: 0,
+                  nodeType: "wait_pipeline",
+                  renderedParameters: { project: "team/service-a", ref: "main" },
+                  status: "waiting",
+                  startedAt: "2026-04-18T00:00:10Z",
+                  finishedAt: null,
+                  exitCode: null,
+                  summaryMessage: "waiting on upstream",
+                  errorCode: null,
+                  titleZh: null,
+                  detailZh: null,
+                  suggestionZh: null,
+                  waitTarget: "team/service-a@main",
+                  lastRemoteStatus: "running",
+                  remotePipelineId: 777,
+                },
+                {
+                  id: 8002,
+                  pipelineNodeId: 11,
+                  nodeOrder: 1,
+                  nodeType: "trigger_pipeline",
+                  renderedParameters: { project: "team/service-a", ref: "main" },
+                  status: "pending",
+                  startedAt: null,
+                  finishedAt: null,
+                  exitCode: null,
+                  summaryMessage: "pending",
+                  errorCode: null,
+                  titleZh: null,
+                  detailZh: null,
+                  suggestionZh: null,
+                  waitTarget: null,
+                  lastRemoteStatus: null,
+                  remotePipelineId: null,
+                },
+              ],
+            },
+            {
+              id: 5002,
+              managedProjectId: 6002,
+              gitlabProjectId: 7002,
+              projectName: "service-b",
+              projectPathWithNamespace: "team/service-b",
+              repoPath: "D:/repos/service-b",
+              status: "failed",
+              summaryMessage: "remote pipeline failed",
+              startedAt: "2026-04-18T00:00:20Z",
+              finishedAt: "2026-04-18T00:04:30Z",
+              nodes: [
+                {
+                  id: 8101,
+                  pipelineNodeId: 10,
+                  nodeOrder: 0,
+                  nodeType: "wait_pipeline",
+                  renderedParameters: { project: "team/service-b", ref: "main" },
+                  status: "success",
+                  startedAt: "2026-04-18T00:00:20Z",
+                  finishedAt: "2026-04-18T00:01:00Z",
+                  exitCode: null,
+                  summaryMessage: "upstream done",
+                  errorCode: null,
+                  titleZh: null,
+                  detailZh: null,
+                  suggestionZh: null,
+                  waitTarget: "team/service-b@main",
+                  lastRemoteStatus: "success",
+                  remotePipelineId: 778,
+                },
+                {
+                  id: 8102,
+                  pipelineNodeId: 11,
+                  nodeOrder: 1,
+                  nodeType: "trigger_pipeline",
+                  renderedParameters: { project: "team/service-b", ref: "main" },
+                  status: "failed",
+                  startedAt: "2026-04-18T00:01:00Z",
+                  finishedAt: "2026-04-18T00:04:30Z",
+                  exitCode: null,
+                  summaryMessage: "service-b trigger failed",
+                  errorCode: "pipeline_failed",
+                  titleZh: "service-b 远端流水线失败",
+                  detailZh: "service-b target pipeline ended with failed",
+                  suggestionZh: "inspect remote pipeline before retry",
+                  waitTarget: null,
+                  lastRemoteStatus: "failed",
+                  remotePipelineId: 778,
+                },
+              ],
+            },
+          ],
+        };
+      }
+      return undefined;
+    });
+
+    render(<WorkflowRunsPage />);
+
+    await screen.findByText("#401");
+    fireEvent.click(await screen.findByTestId("pipeline-run-project-view-matrix"));
+
+    const matrix = await screen.findByTestId("pipeline-run-project-matrix");
+    const waitingCell = within(matrix).getByTestId("pipeline-run-matrix-cell-5001-0");
+    const failedCell = within(matrix).getByTestId("pipeline-run-matrix-cell-5002-1");
+
+    expect(within(waitingCell).getByText("等待中")).toBeInTheDocument();
+    expect(within(waitingCell).getByText("远端: 运行中")).toBeInTheDocument();
+    expect(within(failedCell).getByText("失败")).toBeInTheDocument();
+
+    fireEvent.click(failedCell);
+
+    expect(await screen.findByText("service-b 远端流水线失败")).toBeInTheDocument();
+    expect(screen.getByText("service-b target pipeline ended with failed")).toBeInTheDocument();
+  });
+
   it("operator messaging: renders Chinese remote status labels in the run monitor", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "get_gitlab_config") return null;
