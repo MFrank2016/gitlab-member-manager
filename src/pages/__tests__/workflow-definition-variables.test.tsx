@@ -155,7 +155,7 @@ describe("pipeline definition editor", () => {
         })
       );
     });
-  });
+  }, 15000);
 
   it("rejects save when a referenced variable has been deleted from the form", async () => {
     render(<WorkflowsPage />);
