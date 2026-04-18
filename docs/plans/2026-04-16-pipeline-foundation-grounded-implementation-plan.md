@@ -227,6 +227,7 @@ The first monitoring and scheduler follow-up slices are now landed in the isolat
 - shared-definition scheduler regression coverage to preserve `skip_if_running` behavior within the same tick
 - schedule runtime snapshots for `queued`, `skipped`, and `nextTriggerAt`
 - a first definition-page entry point for schedule runtime feedback with manual refresh support
+- Chinese-first operator messaging for frontend payload validation, raw GitLab config guard failures, and remote wait-status labels in the run monitor
 
 Still intentionally deferred after these monitoring and scheduler slices:
 - desktop-only scheduler semantics remain unchanged

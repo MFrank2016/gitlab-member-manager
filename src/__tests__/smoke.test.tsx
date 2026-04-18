@@ -700,7 +700,7 @@ describe("pipeline wrapper smoke", () => {
 	    expect(invokeMock).toHaveBeenCalledWith("list_workflow_definitions", undefined);
   });
 
-  it("rejects invalid pipeline variable options before invoking the backend", async () => {
+  it("operator messaging: rejects invalid pipeline variable options with Chinese helper text", async () => {
     invokeMock.mockResolvedValue(undefined);
 
     await expect(
@@ -724,7 +724,7 @@ describe("pipeline wrapper smoke", () => {
         ],
         schedules: [],
       })
-    ).rejects.toThrow("pipeline variable options must be an array");
+    ).rejects.toThrow("pipeline variable options 必须是数组");
 
     expect(invokeMock).not.toHaveBeenCalled();
   });
@@ -735,7 +735,7 @@ describe("pipeline run monitor interactions", () => {
     invokeMock.mockReset();
   });
 
-  it("renders wait metadata, Chinese failure info, and pipeline run actions", async () => {
+  it("operator messaging: renders Chinese remote status labels in the run monitor", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "get_gitlab_config") return null;
       if (cmd === "list_pipeline_runs") {
@@ -875,7 +875,8 @@ describe("pipeline run monitor interactions", () => {
     expect(await screen.findByRole("heading", { name: "流水线运行" })).toBeInTheDocument();
     expect(await screen.findByText("等待目标")).toBeInTheDocument();
     expect(screen.getByText("team/service-a@main")).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
+    const remoteStatusLabel = screen.getByText("最近远端状态");
+    expect(within(remoteStatusLabel.parentElement as HTMLElement).getByText("运行中")).toBeInTheDocument();
     expect(screen.getByText("远端流水线 #777")).toBeInTheDocument();
     const failureTitleMatches = await screen.findAllByText("远端流水线失败");
     expect(failureTitleMatches.length).toBeGreaterThan(0);

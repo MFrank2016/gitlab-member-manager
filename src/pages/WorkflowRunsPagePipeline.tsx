@@ -67,6 +67,19 @@ const STATUS_TEXT: Record<string, string> = {
   skipped: "已跳过",
 };
 
+const REMOTE_STATUS_TEXT: Record<string, string> = {
+  pending: "待处理",
+  running: "运行中",
+  waiting: "等待中",
+  success: "成功",
+  failed: "失败",
+  cancelled: "已取消",
+  canceled: "已取消",
+  skipped: "已跳过",
+  manual: "需手动处理",
+  created: "已创建",
+};
+
 const TRIGGER_KIND_TEXT: Record<string, string> = {
   manual: "手动触发",
   retry_failed: "重试失败项目",
@@ -136,6 +149,12 @@ function nodeTypeLabel(nodeType: string) {
 
 function triggerKindLabel(triggerKind: string) {
   return TRIGGER_KIND_TEXT[triggerKind] ?? triggerKind;
+}
+
+function remoteStatusLabel(status: string | null | undefined) {
+  if (!status) return "-";
+  const normalized = status.trim().toLowerCase();
+  return REMOTE_STATUS_TEXT[normalized] ?? status;
 }
 
 function toJsonText(value: unknown) {
@@ -219,7 +238,7 @@ function PipelineNodeCard({
           <span className="text-muted-foreground">等待目标</span>
           <span>{node.waitTarget}</span>
           <span className="text-muted-foreground">最近远端状态</span>
-          <span>{node.lastRemoteStatus ?? "-"}</span>
+          <span>{remoteStatusLabel(node.lastRemoteStatus)}</span>
           {typeof node.remotePipelineId === "number" ? <span>远端流水线 #{node.remotePipelineId}</span> : null}
         </div>
       ) : null}

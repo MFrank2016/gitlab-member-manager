@@ -16,7 +16,7 @@
 ## 4. Visualization And UX
 - [ ] 4.1 Break the pipeline definition editor into smaller editing sections and reduce dependence on raw JSON editing for built-in nodes.
 - [ ] 4.2 Add richer pipeline run visualizations such as DAG, project-by-node matrix, or timeline views for operator troubleshooting.
-- [ ] 4.3 Preserve Chinese-first operator messaging for failures, waiting states, and recovery prompts.
+- [x] 4.3 Preserve Chinese-first operator messaging for failures, waiting states, and recovery prompts.
 
 ## 5. Verification
 - [x] 5.1 Validate the change with `openspec validate enhance-pipeline-runtime-and-monitoring --strict`.

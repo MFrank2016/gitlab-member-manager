@@ -87,11 +87,9 @@ fn require_cfg(state: &AppState) -> Result<GitLabConfig, String> {
     state
         .gitlab
         .lock()
-        .map_err(|_| "Mutex poisoned".to_string())?
+        .map_err(|_| "内部状态锁异常，请重试。".to_string())?
         .clone()
-        .ok_or_else(|| {
-            "GitLab config not set. Please configure Base URL and Token in Settings.".to_string()
-        })
+        .ok_or_else(|| "尚未配置 GitLab，请先在设置中填写 Base URL 和 Token。".to_string())
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {

@@ -86,7 +86,7 @@ function normalizeJsonObject(value: unknown, fieldName: string): Record<string, 
   if (typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
   }
-  throw new Error(`${fieldName} must be an object`);
+  throw new Error(`${fieldName} 必须是对象`);
 }
 
 function normalizeJsonArray(value: unknown, fieldName: string): unknown[] {
@@ -96,7 +96,7 @@ function normalizeJsonArray(value: unknown, fieldName: string): unknown[] {
   if (Array.isArray(value)) {
     return value;
   }
-  throw new Error(`${fieldName} must be an array`);
+  throw new Error(`${fieldName} 必须是数组`);
 }
 
 /**
