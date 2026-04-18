@@ -228,6 +228,7 @@ The first monitoring and scheduler follow-up slices are now landed in the isolat
 - schedule runtime snapshots for `queued`, `skipped`, and `nextTriggerAt`
 - a first definition-page entry point for schedule runtime feedback with manual refresh support
 - Chinese-first operator messaging for frontend payload validation, raw GitLab config guard failures, and remote wait-status labels in the run monitor
+- explicit scheduler regression coverage that a delayed desktop tick does not backfill a missed due slot
 - a thinner pipeline definition page container with the draft form moved into focused editor sections
 - structured JSON editing for custom node parameters and schedule variables, with advanced JSON fallback retained
 - hybrid built-in node editing that keeps known fields explicit while moving extra parameters off raw textarea-first editing
@@ -236,5 +237,5 @@ The first monitoring and scheduler follow-up slices are now landed in the isolat
 - matrix cell selection wired into the existing lower project-detail panel so operators can drill down without changing backend contracts
 
 Still intentionally deferred after these monitoring and scheduler slices:
-- desktop-only scheduler semantics remain unchanged
+- desktop-only scheduler semantics remain unchanged and stay limited to the current in-process `30s` tick with `MissedTickBehavior::Skip`
 - DAG- and timeline-oriented follow-up visualizations are still pending

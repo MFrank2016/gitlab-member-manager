@@ -693,6 +693,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_schedule_runtime_does_not_backfill_missed_due_slot() {
+        let pool = db::setup_test_pool().await;
+        let (pipeline_definition_id, _project_group_id) =
+            create_project_group_with_schedule(&pool, "skip_if_running").await;
+        let mut state = SchedulerState::default();
+
+        let summary = run_scheduler_tick(
+            &pool,
+            &mut state,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 5, 0)
+                .single()
+                .expect("construct delayed scheduler tick time"),
+        )
+        .await
+        .expect("run delayed scheduler tick");
+
+        assert_eq!(summary.started_runs, 0);
+        assert_eq!(summary.queued_runs, 0);
+        assert_eq!(summary.skipped_runs, 0);
+        assert_eq!(count_schedule_runs(&pool, pipeline_definition_id).await, 0);
+    }
+
+    #[tokio::test]
     async fn pipeline_schedule_runtime_queue_after_running_starts_after_active_run_completes() {
         let pool = db::setup_test_pool().await;
         let (pipeline_definition_id, project_group_id) =

@@ -11,7 +11,7 @@
 ## 3. Scheduler And Operator Feedback
 - [x] 3.1 Improve scheduler tick efficiency so active-run checks do not scale as one database query per schedule.
 - [x] 3.2 Add clearer schedule-state feedback, including queued, skipped, and next-trigger visibility.
-- [ ] 3.3 Keep desktop-only scheduler semantics unchanged unless explicitly expanded in a later change.
+- [x] 3.3 Keep desktop-only scheduler semantics unchanged unless explicitly expanded in a later change.
 
 ## 4. Visualization And UX
 - [x] 4.1 Break the pipeline definition editor into smaller editing sections and reduce dependence on raw JSON editing for built-in nodes.
