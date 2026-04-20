@@ -1900,9 +1900,13 @@ mod tests {
             rendered_parameters: serde_json::json!({}),
         };
 
-        let operation =
-            build_execution_step_operation(&step.step_type, &step.rendered_parameters, &project)
-                .expect("build execution step operation");
+        let operation = build_execution_step_operation(
+            &step.step_type,
+            &step.rendered_parameters,
+            &project,
+            std::path::Path::new(&project.repo_path),
+        )
+        .expect("build execution step operation");
 
         assert_eq!(
             operation.to_args(),
@@ -1933,7 +1937,7 @@ mod tests {
             updated_at: now_rfc3339(),
         };
 
-        let error = run_repository_precheck(&project)
+        let error = run_repository_precheck(std::path::Path::new(&project.repo_path))
             .await
             .expect_err("dirty worktree should fail repo precheck");
 
@@ -1961,7 +1965,7 @@ mod tests {
             branch: "missing-branch".to_string(),
         };
 
-        let error = run_execution_step_prechecks(&project, &operation)
+        let error = run_execution_step_prechecks(std::path::Path::new(&project.repo_path), &project, &operation)
             .await
             .expect_err("missing branch should fail step prechecks");
 

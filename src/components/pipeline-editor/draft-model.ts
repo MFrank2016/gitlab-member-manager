@@ -49,6 +49,18 @@ export const BUILTIN_NODE_TYPES: BuiltinNodeTypeDefinition[] = [
     defaults: { remote: "origin" },
   },
   {
+    value: "set_working_path",
+    label: "设置执行路径",
+    fields: [
+      {
+        key: "path",
+        label: "目标路径",
+        placeholder: "${repo_root}/subdir 或 ../another-repo",
+      },
+    ],
+    defaults: { path: "" },
+  },
+  {
     value: "check_pipeline",
     label: "检查远端流水线",
     fields: [

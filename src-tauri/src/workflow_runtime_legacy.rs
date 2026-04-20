@@ -1,7 +1,7 @@
 use crate::db::{self, WorkflowExecutionStepDef};
 use crate::git_executor::{
     build_execution_step_operation, execute_git_command, run_execution_step_prechecks,
-    run_repository_precheck,
+    LocalExecutionContext, StepOperation,
 };
 use crate::models::ManagedProject;
 use crate::runtime_support::{
@@ -34,6 +34,30 @@ struct RetrySourceRun {
     workflow_definition_id: i64,
     project_group_id: i64,
     run_parameters: Value,
+}
+
+fn summarize_invalid_step_parameters(error: &str) -> String {
+    format!("步骤参数无效：{error}")
+}
+
+fn summarize_step_precheck_failure(error: &str) -> String {
+    if error.contains("working path does not exist")
+        || error.contains("repository path does not exist")
+    {
+        return "步骤预检查失败：执行路径不存在，请检查路径配置。".to_string();
+    }
+    if error.contains("working path is not a directory")
+        || error.contains("repository path is not a directory")
+    {
+        return "步骤预检查失败：执行路径不是目录，请检查路径配置。".to_string();
+    }
+    if error.contains("current working path is not available for relative resolution") {
+        return "步骤预检查失败：当前执行路径不可用，无法解析相对路径。".to_string();
+    }
+    if error.contains("path is not a git worktree") {
+        return "步骤预检查失败：当前执行路径不是 Git 工作区。".to_string();
+    }
+    format!("步骤预检查失败：{error}")
 }
 
 async fn insert_workflow_run_row(
@@ -523,9 +547,6 @@ pub(crate) async fn execute_project_plan(
     workflow_run_id: i64,
     plan: &ProjectExecutionPlan,
 ) -> Result<ProjectOutcome> {
-    let repo_lease = get_repo_lease(&plan.project.repo_path).await;
-    let _repo_guard = repo_lease.lock().await;
-
     if maybe_cancel_project(
         pool,
         workflow_run_id,
@@ -539,39 +560,7 @@ pub(crate) async fn execute_project_plan(
     }
 
     mark_project_running(pool, plan.run_project_id).await?;
-
-    if let Err(error) = run_repository_precheck(&plan.project).await {
-        if maybe_cancel_project(
-            pool,
-            workflow_run_id,
-            plan,
-            0,
-            "cancelled during repository precheck",
-        )
-        .await?
-        {
-            return Ok(ProjectOutcome::Cancelled);
-        }
-
-        let summary = format!("repo precheck failed: {error}");
-        if let Some(first_step) = plan.steps.first() {
-            mark_step_running(pool, first_step.run_step_id).await?;
-            mark_step_finished(
-                pool,
-                first_step.run_step_id,
-                "failed",
-                "",
-                "",
-                None,
-                &summary,
-            )
-            .await?;
-            mark_remaining_steps_skipped(pool, &plan.steps, 1, "skipped after precheck failure")
-                .await?;
-        }
-        mark_project_finished(pool, plan.run_project_id, "failed_precheck", &summary).await?;
-        return Ok(ProjectOutcome::FailedPrecheck);
-    }
+    let mut execution_context = LocalExecutionContext::new(&plan.project);
 
     if maybe_cancel_project(
         pool,
@@ -616,10 +605,11 @@ pub(crate) async fn execute_project_plan(
             &step.step_type,
             &step.rendered_parameters,
             &plan.project,
+            execution_context.working_dir(),
         ) {
             Ok(operation) => operation,
             Err(error) => {
-                let summary = format!("invalid step parameters: {error}");
+                let summary = summarize_invalid_step_parameters(&error.to_string());
                 mark_step_finished(pool, step.run_step_id, "failed", "", "", None, &summary)
                     .await?;
                 mark_remaining_steps_skipped(
@@ -635,93 +625,177 @@ pub(crate) async fn execute_project_plan(
             }
         };
 
-        if let Err(error) = run_execution_step_prechecks(&plan.project, &operation).await {
-            if maybe_cancel_project(
-                pool,
-                workflow_run_id,
-                plan,
-                step_index,
-                "cancelled during step precheck",
-            )
-            .await?
-            {
-                return Ok(ProjectOutcome::Cancelled);
-            }
+        match &operation {
+            StepOperation::SetWorkingPath { target_path } => {
+                if let Err(error) = run_execution_step_prechecks(
+                    execution_context.working_dir(),
+                    &plan.project,
+                    &operation,
+                )
+                .await
+                {
+                    if maybe_cancel_project(
+                        pool,
+                        workflow_run_id,
+                        plan,
+                        step_index,
+                        "cancelled during step precheck",
+                    )
+                    .await?
+                    {
+                        return Ok(ProjectOutcome::Cancelled);
+                    }
 
-            let summary = format!("step precheck failed: {error}");
-            mark_step_finished(pool, step.run_step_id, "failed", "", "", None, &summary).await?;
-            mark_remaining_steps_skipped(
-                pool,
-                &plan.steps,
-                step_index + 1,
-                "skipped after previous step failure",
-            )
-            .await?;
-            mark_project_finished(pool, plan.run_project_id, "failed_precheck", &summary).await?;
-            return Ok(ProjectOutcome::FailedPrecheck);
-        }
+                    let summary = summarize_step_precheck_failure(&error.to_string());
+                    mark_step_finished(pool, step.run_step_id, "failed", "", "", None, &summary)
+                        .await?;
+                    mark_remaining_steps_skipped(
+                        pool,
+                        &plan.steps,
+                        step_index + 1,
+                        "skipped after previous step failure",
+                    )
+                    .await?;
+                    mark_project_finished(pool, plan.run_project_id, "failed_precheck", &summary)
+                        .await?;
+                    return Ok(ProjectOutcome::FailedPrecheck);
+                }
 
-        if maybe_cancel_project(
-            pool,
-            workflow_run_id,
-            plan,
-            step_index,
-            "cancelled before step execution",
-        )
-        .await?
-        {
-            return Ok(ProjectOutcome::Cancelled);
-        }
-
-        let command_result =
-            execute_git_command(plan.project.repo_path.clone(), operation.to_args()).await?;
-
-        if command_result.success {
-            mark_step_finished(
-                pool,
-                step.run_step_id,
-                "success",
-                &command_result.stdout,
-                &command_result.stderr,
-                command_result.exit_code,
-                "step completed",
-            )
-            .await?;
-
-            if step_index + 1 < plan.steps.len() {
                 if maybe_cancel_project(
                     pool,
                     workflow_run_id,
                     plan,
-                    step_index + 1,
-                    "cancelled after safe execution boundary",
+                    step_index,
+                    "cancelled before step execution",
                 )
                 .await?
                 {
                     return Ok(ProjectOutcome::Cancelled);
                 }
+
+                execution_context.update_working_dir(target_path.clone());
+                let summary = format!("执行路径已切换到 {}", target_path.display());
+                mark_step_finished(pool, step.run_step_id, "success", "", "", Some(0), &summary)
+                    .await?;
+
+                if step_index + 1 < plan.steps.len() {
+                    if maybe_cancel_project(
+                        pool,
+                        workflow_run_id,
+                        plan,
+                        step_index + 1,
+                        "cancelled after safe execution boundary",
+                    )
+                    .await?
+                    {
+                        return Ok(ProjectOutcome::Cancelled);
+                    }
+                }
             }
-        } else {
-            let summary = format!("git command failed at step {}", step.step_type);
-            mark_step_finished(
-                pool,
-                step.run_step_id,
-                "failed",
-                &command_result.stdout,
-                &command_result.stderr,
-                command_result.exit_code,
-                &summary,
-            )
-            .await?;
-            mark_remaining_steps_skipped(
-                pool,
-                &plan.steps,
-                step_index + 1,
-                "skipped after previous step failure",
-            )
-            .await?;
-            mark_project_finished(pool, plan.run_project_id, "failed", &summary).await?;
-            return Ok(ProjectOutcome::Failed);
+            _ => {
+                let repo_lease = get_repo_lease(&execution_context.working_dir_display()).await;
+                let _repo_guard = repo_lease.lock().await;
+
+                if let Err(error) = run_execution_step_prechecks(
+                    execution_context.working_dir(),
+                    &plan.project,
+                    &operation,
+                )
+                .await
+                {
+                    if maybe_cancel_project(
+                        pool,
+                        workflow_run_id,
+                        plan,
+                        step_index,
+                        "cancelled during step precheck",
+                    )
+                    .await?
+                    {
+                        return Ok(ProjectOutcome::Cancelled);
+                    }
+
+                    let summary = summarize_step_precheck_failure(&error.to_string());
+                    mark_step_finished(pool, step.run_step_id, "failed", "", "", None, &summary)
+                        .await?;
+                    mark_remaining_steps_skipped(
+                        pool,
+                        &plan.steps,
+                        step_index + 1,
+                        "skipped after previous step failure",
+                    )
+                    .await?;
+                    mark_project_finished(pool, plan.run_project_id, "failed_precheck", &summary)
+                        .await?;
+                    return Ok(ProjectOutcome::FailedPrecheck);
+                }
+
+                if maybe_cancel_project(
+                    pool,
+                    workflow_run_id,
+                    plan,
+                    step_index,
+                    "cancelled before step execution",
+                )
+                .await?
+                {
+                    return Ok(ProjectOutcome::Cancelled);
+                }
+
+                let command_result = execute_git_command(
+                    execution_context.working_dir_display(),
+                    operation.to_args(),
+                )
+                .await?;
+
+                if command_result.success {
+                    mark_step_finished(
+                        pool,
+                        step.run_step_id,
+                        "success",
+                        &command_result.stdout,
+                        &command_result.stderr,
+                        command_result.exit_code,
+                        "step completed",
+                    )
+                    .await?;
+
+                    if step_index + 1 < plan.steps.len() {
+                        if maybe_cancel_project(
+                            pool,
+                            workflow_run_id,
+                            plan,
+                            step_index + 1,
+                            "cancelled after safe execution boundary",
+                        )
+                        .await?
+                        {
+                            return Ok(ProjectOutcome::Cancelled);
+                        }
+                    }
+                } else {
+                    let summary = format!("Git 命令执行失败：步骤 {}", step.step_type);
+                    mark_step_finished(
+                        pool,
+                        step.run_step_id,
+                        "failed",
+                        &command_result.stdout,
+                        &command_result.stderr,
+                        command_result.exit_code,
+                        &summary,
+                    )
+                    .await?;
+                    mark_remaining_steps_skipped(
+                        pool,
+                        &plan.steps,
+                        step_index + 1,
+                        "skipped after previous step failure",
+                    )
+                    .await?;
+                    mark_project_finished(pool, plan.run_project_id, "failed", &summary).await?;
+                    return Ok(ProjectOutcome::Failed);
+                }
+            }
         }
     }
 
@@ -1290,5 +1364,79 @@ mod tests {
         assert_eq!(detail.projects[0].steps[0].status, "success");
         assert_eq!(detail.projects[0].steps[1].status, "success");
         assert_eq!(detail.projects[0].steps[2].status, "success");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn working_path_workflow_runtime_reports_non_git_directory_in_chinese() {
+        let pool = setup_test_pool().await;
+        let root = make_temp_test_dir("workflow_working_path_non_git_root");
+        let (origin_repo, _) = create_repo_fixture(&root);
+        let plain_dir = root.join("plain-dir");
+        std::fs::create_dir_all(&plain_dir).expect("create plain dir");
+
+        let managed = db::create_managed_project(
+            &pool,
+            88102,
+            "workflow-working-path-non-git-project".to_string(),
+            "team/workflow-working-path-non-git-project".to_string(),
+            origin_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+        let group = db::create_project_group(
+            &pool,
+            "workflow-working-path-non-git-group".to_string(),
+        )
+        .await
+        .expect("create project group");
+        db::add_projects_to_group(&pool, group.id, vec![managed.id])
+            .await
+            .expect("add project to group");
+
+        let workflow = db::create_workflow_definition(
+            &pool,
+            "workflow-working-path-non-git".to_string(),
+            "working path non git directory test".to_string(),
+            true,
+            serde_json::json!({}),
+            1,
+            vec![
+                WorkflowStepInput {
+                    step_type: "set_working_path".to_string(),
+                    parameters: serde_json::json!({ "path": plain_dir.to_string_lossy() }),
+                },
+                WorkflowStepInput {
+                    step_type: "checkout_branch".to_string(),
+                    parameters: serde_json::json!({ "branch": "main" }),
+                },
+            ],
+        )
+        .await
+        .expect("create workflow definition");
+
+        let run_id = execute_workflow_run(&pool, workflow.id, group.id, serde_json::json!({}), Some(1))
+            .await
+            .expect("execute workflow run");
+
+        let detail = wait_for_terminal_workflow_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "failed_precheck");
+        assert_eq!(detail.projects[0].steps.len(), 2);
+        assert_eq!(detail.projects[0].steps[0].status, "success");
+        assert_eq!(detail.projects[0].steps[1].status, "failed");
+        assert!(
+            detail.projects[0].steps[0]
+                .summary_message
+                .contains("执行路径已切换到")
+        );
+        assert!(
+            detail.projects[0].steps[1]
+                .summary_message
+                .contains("Git 工作区")
+        );
     }
 }

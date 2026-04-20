@@ -2,7 +2,7 @@ use crate::failure_envelope::{build_failure_envelope, FailureEnvelope};
 use crate::models::ManagedProject;
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant};
 
 const GIT_COMMAND_TIMEOUT_SECS: u64 = 120;
@@ -17,6 +17,9 @@ pub(crate) struct CommandResult {
 
 #[derive(Debug)]
 pub(crate) enum StepOperation {
+    SetWorkingPath {
+        target_path: PathBuf,
+    },
     CheckoutBranch {
         branch: String,
     },
@@ -36,6 +39,9 @@ pub(crate) enum StepOperation {
 impl StepOperation {
     pub(crate) fn to_args(&self) -> Vec<String> {
         match self {
+            Self::SetWorkingPath { .. } => {
+                unreachable!("set_working_path does not execute a git command")
+            }
             Self::CheckoutBranch { branch } => vec!["checkout".to_string(), branch.clone()],
             Self::GitPull { remote, branch } => vec![
                 "pull".to_string(),
@@ -54,6 +60,32 @@ impl StepOperation {
                 args
             }
         }
+    }
+
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalExecutionContext {
+    working_dir: PathBuf,
+}
+
+impl LocalExecutionContext {
+    pub(crate) fn new(project: &ManagedProject) -> Self {
+        Self {
+            working_dir: PathBuf::from(&project.repo_path),
+        }
+    }
+
+    pub(crate) fn working_dir(&self) -> &Path {
+        &self.working_dir
+    }
+
+    pub(crate) fn working_dir_display(&self) -> String {
+        self.working_dir.display().to_string()
+    }
+
+    pub(crate) fn update_working_dir(&mut self, next_working_dir: PathBuf) {
+        self.working_dir = next_working_dir;
     }
 }
 
@@ -76,12 +108,31 @@ fn read_optional_string_param(parameters: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn resolve_target_working_path(parameters: &Value, working_dir: &Path) -> Result<PathBuf> {
+    let rendered_path = read_required_string_param(parameters, "path")?;
+    let candidate = PathBuf::from(rendered_path);
+    if candidate.is_absolute() {
+        return Ok(candidate);
+    }
+    if !working_dir.is_dir() {
+        return Err(anyhow!(
+            "current working path is not available for relative resolution: {}",
+            working_dir.display()
+        ));
+    }
+    Ok(working_dir.join(candidate))
+}
+
 pub(crate) fn build_execution_step_operation(
     step_type: &str,
     rendered_parameters: &Value,
     project: &ManagedProject,
+    working_dir: &Path,
 ) -> Result<StepOperation> {
     match step_type {
+        "set_working_path" => Ok(StepOperation::SetWorkingPath {
+            target_path: resolve_target_working_path(rendered_parameters, working_dir)?,
+        }),
         "checkout_branch" => Ok(StepOperation::CheckoutBranch {
             branch: read_required_string_param(rendered_parameters, "branch")?,
         }),
@@ -178,9 +229,19 @@ pub(crate) async fn execute_git_command(
     .context("join git command task")?
 }
 
-async fn ensure_clean_worktree(repo_path: &str) -> Result<()> {
+fn ensure_working_path_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Err(anyhow!("working path does not exist: {}", path.display()));
+    }
+    if !path.is_dir() {
+        return Err(anyhow!("working path is not a directory: {}", path.display()));
+    }
+    Ok(())
+}
+
+async fn ensure_clean_worktree(repo_path: &Path) -> Result<()> {
     let status_result = execute_git_command(
-        repo_path.to_string(),
+        repo_path.display().to_string(),
         vec!["status".to_string(), "--porcelain".to_string()],
     )
     .await?;
@@ -196,9 +257,9 @@ async fn ensure_clean_worktree(repo_path: &str) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_remote_exists(repo_path: &str, remote: &str) -> Result<()> {
+async fn ensure_remote_exists(repo_path: &Path, remote: &str) -> Result<()> {
     let result = execute_git_command(
-        repo_path.to_string(),
+        repo_path.display().to_string(),
         vec![
             "remote".to_string(),
             "get-url".to_string(),
@@ -217,9 +278,9 @@ async fn ensure_remote_exists(repo_path: &str, remote: &str) -> Result<()> {
     }
 }
 
-async fn ensure_branch_exists(repo_path: &str, branch: &str, remote: &str) -> Result<()> {
+async fn ensure_branch_exists(repo_path: &Path, branch: &str, remote: &str) -> Result<()> {
     let local = execute_git_command(
-        repo_path.to_string(),
+        repo_path.display().to_string(),
         vec![
             "rev-parse".to_string(),
             "--verify".to_string(),
@@ -233,7 +294,7 @@ async fn ensure_branch_exists(repo_path: &str, branch: &str, remote: &str) -> Re
 
     let remote_ref = format!("{remote}/{branch}");
     let remote_result = execute_git_command(
-        repo_path.to_string(),
+        repo_path.display().to_string(),
         vec![
             "rev-parse".to_string(),
             "--verify".to_string(),
@@ -252,54 +313,44 @@ async fn ensure_branch_exists(repo_path: &str, branch: &str, remote: &str) -> Re
     ))
 }
 
-pub(crate) async fn run_repository_precheck(project: &ManagedProject) -> Result<()> {
-    let repo_path = Path::new(&project.repo_path);
-    if !repo_path.exists() {
-        return Err(anyhow!(
-            "repository path does not exist: {}",
-            project.repo_path
-        ));
-    }
-    if !repo_path.is_dir() {
-        return Err(anyhow!(
-            "repository path is not a directory: {}",
-            project.repo_path
-        ));
-    }
-
+pub(crate) async fn run_repository_precheck(repo_path: &Path) -> Result<()> {
+    ensure_working_path_exists(repo_path)?;
     let inside_repo = execute_git_command(
-        project.repo_path.clone(),
+        repo_path.display().to_string(),
         vec!["rev-parse".to_string(), "--is-inside-work-tree".to_string()],
     )
     .await?;
     if !inside_repo.success || inside_repo.stdout.trim() != "true" {
-        return Err(anyhow!("path is not a git worktree: {}", project.repo_path));
+        return Err(anyhow!("path is not a git worktree: {}", repo_path.display()));
     }
 
-    ensure_clean_worktree(&project.repo_path).await?;
+    ensure_clean_worktree(repo_path).await?;
     Ok(())
 }
 
 pub(crate) async fn run_execution_step_prechecks(
+    working_dir: &Path,
     project: &ManagedProject,
     operation: &StepOperation,
 ) -> Result<()> {
     match operation {
+        StepOperation::SetWorkingPath { target_path } => ensure_working_path_exists(target_path),
         StepOperation::CheckoutBranch { branch } => {
-            ensure_clean_worktree(&project.repo_path).await?;
-            ensure_branch_exists(&project.repo_path, branch, &project.default_remote).await
+            run_repository_precheck(working_dir).await?;
+            ensure_branch_exists(working_dir, branch, &project.default_remote).await
         }
         StepOperation::GitPull { remote, branch } => {
-            ensure_clean_worktree(&project.repo_path).await?;
-            ensure_remote_exists(&project.repo_path, remote).await?;
-            ensure_branch_exists(&project.repo_path, branch, remote).await
+            run_repository_precheck(working_dir).await?;
+            ensure_remote_exists(working_dir, remote).await?;
+            ensure_branch_exists(working_dir, branch, remote).await
         }
         StepOperation::GitMerge { from } => {
-            ensure_clean_worktree(&project.repo_path).await?;
-            ensure_branch_exists(&project.repo_path, from, &project.default_remote).await
+            run_repository_precheck(working_dir).await?;
+            ensure_branch_exists(working_dir, from, &project.default_remote).await
         }
         StepOperation::GitPush { remote, .. } => {
-            ensure_remote_exists(&project.repo_path, remote).await
+            run_repository_precheck(working_dir).await?;
+            ensure_remote_exists(working_dir, remote).await
         }
     }
 }

@@ -96,6 +96,7 @@ const NODE_TYPE_TEXT: Record<string, string> = {
   trigger_pipeline: "触发远端流水线",
   wait_pipeline: "等待远端流水线",
 };
+NODE_TYPE_TEXT.set_working_path = "设置执行路径";
 
 const DEFAULT_RUN_PAGE_SIZE = 20;
 const AUTO_REFRESH_INTERVAL_MS = 10_000;

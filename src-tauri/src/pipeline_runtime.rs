@@ -2,14 +2,14 @@ use crate::db::{self, PipelineExecutionNodeDef};
 use crate::failure_envelope::{build_failure_envelope, FailureEnvelope};
 use crate::git_executor::{
     self, build_execution_step_operation, execute_git_command, run_execution_step_prechecks,
-    run_repository_precheck,
+    LocalExecutionContext, StepOperation,
 };
 use crate::gitlab::{self, GitLabConfig};
 use crate::gitlab_executor::{self, WaitMetadata};
 use crate::models::{ManagedProject, PipelineVariable};
 use crate::runtime_support::{
-    derive_run_final_status, get_repo_lease, normalize_run_parameters, now_rfc3339, render_value,
-    ProjectExecutionStep, ProjectOutcome,
+    derive_run_final_status, get_repo_lease, normalize_run_parameters, now_rfc3339,
+    render_value, ProjectExecutionStep, ProjectOutcome,
 };
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
@@ -130,6 +130,37 @@ fn render_pipeline_nodes_for_run(
 }
 
 fn classify_precheck_failure(error: &str) -> FailureEnvelope {
+    if error.contains("working path does not exist")
+        || error.contains("repository path does not exist")
+    {
+        return build_failure_envelope(
+            "git.working_path_missing",
+            "执行路径不存在",
+            "设置的执行路径不存在，无法继续执行当前节点。".to_string(),
+            "请检查路径变量和目录是否正确后重试。",
+            error.to_string(),
+        );
+    }
+    if error.contains("working path is not a directory")
+        || error.contains("repository path is not a directory")
+    {
+        return build_failure_envelope(
+            "git.working_path_not_directory",
+            "执行路径不是目录",
+            "设置的执行路径不是目录，无法继续执行当前节点。".to_string(),
+            "请检查路径配置，确保它指向一个存在的目录后重试。",
+            error.to_string(),
+        );
+    }
+    if error.contains("current working path is not available for relative resolution") {
+        return build_failure_envelope(
+            "git.relative_working_path_resolution_failed",
+            "无法解析相对路径",
+            "当前执行路径不可用，无法基于上一个上下文解析相对路径。".to_string(),
+            "请先切换到有效目录，或直接改用绝对路径后重试。",
+            error.to_string(),
+        );
+    }
     if error.contains("repository worktree is not clean") {
         return build_failure_envelope(
             "git.worktree_dirty",
@@ -648,9 +679,6 @@ async fn execute_pipeline_project_plan(
     plan: &PipelineProjectExecutionPlan,
     gitlab_cfg: Option<&GitLabConfig>,
 ) -> Result<ProjectOutcome> {
-    let repo_lease = get_repo_lease(&plan.project.repo_path).await;
-    let _repo_guard = repo_lease.lock().await;
-
     if maybe_cancel_pipeline_project(
         pool,
         pipeline_run_id,
@@ -664,51 +692,7 @@ async fn execute_pipeline_project_plan(
     }
 
     mark_pipeline_project_running(pool, plan.run_project_id).await?;
-
-    if let Err(error) = run_repository_precheck(&plan.project).await {
-        if maybe_cancel_pipeline_project(
-            pool,
-            pipeline_run_id,
-            plan,
-            0,
-            "cancelled during repository precheck",
-        )
-        .await?
-        {
-            return Ok(ProjectOutcome::Cancelled);
-        }
-
-        let envelope = classify_precheck_failure(&error.to_string());
-        if let Some(first_node) = plan.nodes.first() {
-            mark_pipeline_node_running(pool, first_node.run_node_id).await?;
-            mark_pipeline_node_finished(
-                pool,
-                first_node.run_node_id,
-                "failed",
-                "",
-                "",
-                None,
-                &envelope.title_zh,
-                Some(&envelope),
-            )
-            .await?;
-            mark_remaining_pipeline_nodes_skipped(
-                pool,
-                &plan.nodes,
-                1,
-                "skipped after precheck failure",
-            )
-            .await?;
-        }
-        mark_pipeline_project_finished(
-            pool,
-            plan.run_project_id,
-            "failed_precheck",
-            &envelope.title_zh,
-        )
-        .await?;
-        return Ok(ProjectOutcome::FailedPrecheck);
-    }
+    let mut execution_context = LocalExecutionContext::new(&plan.project);
 
     if maybe_cancel_pipeline_project(
         pool,
@@ -1167,6 +1151,7 @@ async fn execute_pipeline_project_plan(
             &execution_step.step_type,
             &execution_step.rendered_parameters,
             &plan.project,
+            execution_context.working_dir(),
         ) {
             Ok(operation) => operation,
             Err(error) => {
@@ -1200,113 +1185,223 @@ async fn execute_pipeline_project_plan(
             }
         };
 
-        if let Err(error) = run_execution_step_prechecks(&plan.project, &operation).await {
-            if maybe_cancel_pipeline_project(
-                pool,
-                pipeline_run_id,
-                plan,
-                node_index,
-                "cancelled during node precheck",
-            )
-            .await?
-            {
-                return Ok(ProjectOutcome::Cancelled);
-            }
+        match &operation {
+            StepOperation::SetWorkingPath { target_path } => {
+                if let Err(error) = run_execution_step_prechecks(
+                    execution_context.working_dir(),
+                    &plan.project,
+                    &operation,
+                )
+                .await
+                {
+                    if maybe_cancel_pipeline_project(
+                        pool,
+                        pipeline_run_id,
+                        plan,
+                        node_index,
+                        "cancelled during node precheck",
+                    )
+                    .await?
+                    {
+                        return Ok(ProjectOutcome::Cancelled);
+                    }
 
-            let envelope = classify_precheck_failure(&error.to_string());
-            mark_pipeline_node_finished(
-                pool,
-                node.run_node_id,
-                "failed",
-                "",
-                "",
-                None,
-                &envelope.title_zh,
-                Some(&envelope),
-            )
-            .await?;
-            mark_remaining_pipeline_nodes_skipped(
-                pool,
-                &plan.nodes,
-                node_index + 1,
-                "skipped after previous node failure",
-            )
-            .await?;
-            mark_pipeline_project_finished(
-                pool,
-                plan.run_project_id,
-                "failed_precheck",
-                &envelope.title_zh,
-            )
-            .await?;
-            return Ok(ProjectOutcome::FailedPrecheck);
-        }
+                    let envelope = classify_precheck_failure(&error.to_string());
+                    mark_pipeline_node_finished(
+                        pool,
+                        node.run_node_id,
+                        "failed",
+                        "",
+                        "",
+                        None,
+                        &envelope.title_zh,
+                        Some(&envelope),
+                    )
+                    .await?;
+                    mark_remaining_pipeline_nodes_skipped(
+                        pool,
+                        &plan.nodes,
+                        node_index + 1,
+                        "skipped after previous node failure",
+                    )
+                    .await?;
+                    mark_pipeline_project_finished(
+                        pool,
+                        plan.run_project_id,
+                        "failed_precheck",
+                        &envelope.title_zh,
+                    )
+                    .await?;
+                    return Ok(ProjectOutcome::FailedPrecheck);
+                }
 
-        if maybe_cancel_pipeline_project(
-            pool,
-            pipeline_run_id,
-            plan,
-            node_index,
-            "cancelled before node execution",
-        )
-        .await?
-        {
-            return Ok(ProjectOutcome::Cancelled);
-        }
-
-        let command_result =
-            execute_git_command(plan.project.repo_path.clone(), operation.to_args()).await?;
-
-        if command_result.success {
-            mark_pipeline_node_finished(
-                pool,
-                node.run_node_id,
-                "success",
-                &command_result.stdout,
-                &command_result.stderr,
-                command_result.exit_code,
-                "node completed",
-                None,
-            )
-            .await?;
-
-            if node_index + 1 < plan.nodes.len() {
                 if maybe_cancel_pipeline_project(
                     pool,
                     pipeline_run_id,
                     plan,
-                    node_index + 1,
-                    "cancelled after safe execution boundary",
+                    node_index,
+                    "cancelled before node execution",
                 )
                 .await?
                 {
                     return Ok(ProjectOutcome::Cancelled);
                 }
-            }
-        } else {
-            let envelope =
-                git_executor::classify_git_command_failure(&node.node_type, &command_result);
-            mark_pipeline_node_finished(
-                pool,
-                node.run_node_id,
-                "failed",
-                &command_result.stdout,
-                &command_result.stderr,
-                command_result.exit_code,
-                &envelope.title_zh,
-                Some(&envelope),
-            )
-            .await?;
-            mark_remaining_pipeline_nodes_skipped(
-                pool,
-                &plan.nodes,
-                node_index + 1,
-                "skipped after previous node failure",
-            )
-            .await?;
-            mark_pipeline_project_finished(pool, plan.run_project_id, "failed", &envelope.title_zh)
+
+                execution_context.update_working_dir(target_path.clone());
+                let summary = format!("执行路径已切换到 {}", target_path.display());
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "success",
+                    "",
+                    "",
+                    Some(0),
+                    &summary,
+                    None,
+                )
                 .await?;
-            return Ok(ProjectOutcome::Failed);
+
+                if node_index + 1 < plan.nodes.len() {
+                    if maybe_cancel_pipeline_project(
+                        pool,
+                        pipeline_run_id,
+                        plan,
+                        node_index + 1,
+                        "cancelled after safe execution boundary",
+                    )
+                    .await?
+                    {
+                        return Ok(ProjectOutcome::Cancelled);
+                    }
+                }
+            }
+            _ => {
+                let repo_lease = get_repo_lease(&execution_context.working_dir_display()).await;
+                let _repo_guard = repo_lease.lock().await;
+
+                if let Err(error) = run_execution_step_prechecks(
+                    execution_context.working_dir(),
+                    &plan.project,
+                    &operation,
+                )
+                .await
+                {
+                    if maybe_cancel_pipeline_project(
+                        pool,
+                        pipeline_run_id,
+                        plan,
+                        node_index,
+                        "cancelled during node precheck",
+                    )
+                    .await?
+                    {
+                        return Ok(ProjectOutcome::Cancelled);
+                    }
+
+                    let envelope = classify_precheck_failure(&error.to_string());
+                    mark_pipeline_node_finished(
+                        pool,
+                        node.run_node_id,
+                        "failed",
+                        "",
+                        "",
+                        None,
+                        &envelope.title_zh,
+                        Some(&envelope),
+                    )
+                    .await?;
+                    mark_remaining_pipeline_nodes_skipped(
+                        pool,
+                        &plan.nodes,
+                        node_index + 1,
+                        "skipped after previous node failure",
+                    )
+                    .await?;
+                    mark_pipeline_project_finished(
+                        pool,
+                        plan.run_project_id,
+                        "failed_precheck",
+                        &envelope.title_zh,
+                    )
+                    .await?;
+                    return Ok(ProjectOutcome::FailedPrecheck);
+                }
+
+                if maybe_cancel_pipeline_project(
+                    pool,
+                    pipeline_run_id,
+                    plan,
+                    node_index,
+                    "cancelled before node execution",
+                )
+                .await?
+                {
+                    return Ok(ProjectOutcome::Cancelled);
+                }
+
+                let command_result = execute_git_command(
+                    execution_context.working_dir_display(),
+                    operation.to_args(),
+                )
+                .await?;
+
+                if command_result.success {
+                    mark_pipeline_node_finished(
+                        pool,
+                        node.run_node_id,
+                        "success",
+                        &command_result.stdout,
+                        &command_result.stderr,
+                        command_result.exit_code,
+                        "node completed",
+                        None,
+                    )
+                    .await?;
+
+                    if node_index + 1 < plan.nodes.len() {
+                        if maybe_cancel_pipeline_project(
+                            pool,
+                            pipeline_run_id,
+                            plan,
+                            node_index + 1,
+                            "cancelled after safe execution boundary",
+                        )
+                        .await?
+                        {
+                            return Ok(ProjectOutcome::Cancelled);
+                        }
+                    }
+                } else {
+                    let envelope =
+                        git_executor::classify_git_command_failure(&node.node_type, &command_result);
+                    mark_pipeline_node_finished(
+                        pool,
+                        node.run_node_id,
+                        "failed",
+                        &command_result.stdout,
+                        &command_result.stderr,
+                        command_result.exit_code,
+                        &envelope.title_zh,
+                        Some(&envelope),
+                    )
+                    .await?;
+                    mark_remaining_pipeline_nodes_skipped(
+                        pool,
+                        &plan.nodes,
+                        node_index + 1,
+                        "skipped after previous node failure",
+                    )
+                    .await?;
+                    mark_pipeline_project_finished(
+                        pool,
+                        plan.run_project_id,
+                        "failed",
+                        &envelope.title_zh,
+                    )
+                    .await?;
+                    return Ok(ProjectOutcome::Failed);
+                }
+            }
         }
     }
 
@@ -1876,5 +1971,81 @@ mod tests {
         assert_eq!(detail.projects[0].nodes.len(), 2);
         assert_eq!(detail.projects[0].nodes[0].status, "success");
         assert_eq!(detail.projects[0].nodes[1].status, "success");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn working_path_pipeline_runtime_reports_missing_target_path_in_chinese() {
+        let pool = setup_test_pool().await;
+        let root = make_temp_test_dir("pipeline_working_path_missing_root");
+        let (origin_repo, _) = create_repo_fixture(&root);
+        let missing_target = root.join("missing-target");
+
+        let managed = db::create_managed_project(
+            &pool,
+            88002,
+            "pipeline-working-path-missing-project".to_string(),
+            "team/pipeline-working-path-missing-project".to_string(),
+            origin_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+        let group = db::create_project_group(
+            &pool,
+            "pipeline-working-path-missing-group".to_string(),
+        )
+        .await
+        .expect("create project group");
+        db::add_projects_to_group(&pool, group.id, vec![managed.id])
+            .await
+            .expect("add project to group");
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "pipeline-working-path-missing".to_string(),
+            "working path pipeline invalid path test".to_string(),
+            true,
+            1,
+            vec![],
+            vec![
+                PipelineNodeInput {
+                    node_type: "set_working_path".to_string(),
+                    parameters: serde_json::json!({ "path": missing_target.to_string_lossy() }),
+                },
+                PipelineNodeInput {
+                    node_type: "checkout_branch".to_string(),
+                    parameters: serde_json::json!({ "branch": "main" }),
+                },
+            ],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let run_id = execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+            .await
+            .expect("execute pipeline run");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "failed_precheck");
+        assert_eq!(detail.projects[0].nodes.len(), 2);
+        assert_eq!(detail.projects[0].nodes[0].status, "failed");
+        assert_eq!(detail.projects[0].nodes[1].status, "skipped");
+        assert!(
+            detail.projects[0].nodes[0]
+                .summary_message
+                .contains("路径")
+        );
+        assert!(
+            detail.projects[0].nodes[0]
+                .title_zh
+                .as_deref()
+                .unwrap_or("")
+                .contains("路径")
+        );
     }
 }
