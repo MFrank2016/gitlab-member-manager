@@ -1,13 +1,14 @@
 {
   "name": "gitlab-member-manager",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:release-identity": "node --test scripts/release-identity.test.mjs",
     "test:release-update": "node --test scripts/release-update.test.mjs",
     "release:update": "node scripts/release-update.mjs",
     "tauri": "tauri"
