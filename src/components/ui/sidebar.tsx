@@ -60,7 +60,7 @@ export function Sidebar({
           {!collapsed && (
             <div className="leading-tight">
               <div className="text-sm font-semibold tracking-tight">Gitlab助手 By 清风</div>
-              <div className="text-xs text-muted-foreground">GitLab Member Manager</div>
+              <div className="text-xs text-muted-foreground">Gitlab Manager</div>
             </div>
           )}
         </div>

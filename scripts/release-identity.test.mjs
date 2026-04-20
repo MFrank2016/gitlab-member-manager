@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const APP_NAME = "GitLab Member Manager";
+const APP_NAME = "Gitlab Manager";
 
 test("installer-facing app identity stays stable", async () => {
   const tauriConfig = JSON.parse(await readFile("src-tauri/tauri.conf.json", "utf8"));
@@ -24,5 +24,5 @@ test("installer-facing app identity stays stable", async () => {
     new RegExp(APP_NAME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     "侧边栏品牌文案应和安装产品名保持一致",
   );
-  assert.match(readme, /^# GitLab Member Manager$/m);
+  assert.match(readme, /^# Gitlab Manager$/m);
 });

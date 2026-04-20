@@ -1,4 +1,4 @@
-# GitLab Member Manager
+# Gitlab Manager
 
 一个面向**日常运维/交付场景**的 GitLab 项目成员管理桌面工具（Tauri 2 + React 18 + Rust + SQLite）。
 
