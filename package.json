@@ -1,7 +1,7 @@
 {
   "name": "gitlab-member-manager",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:release-identity": "node --test scripts/release-identity.test.mjs",
     "test:release-update": "node --test scripts/release-update.test.mjs",
+    "test:windows-subsystem": "node --test scripts/windows-subsystem.test.mjs",
     "release:update": "node scripts/release-update.mjs",
     "tauri": "tauri"
   },

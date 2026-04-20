@@ -1,5 +1,10 @@
 # UPDATE
 
+## 2026-04-20 v0.1.5
+- 修复 Windows 安装版启动时额外弹出终端窗口的问题
+- 发布版启用 windows_subsystem=windows，保持开发版控制台能力不变
+- 新增 Windows 子系统回归测试，防止后续打包再次回退到 console 子系统
+
 ## 2026-04-20 v0.1.4
 - 统一品牌名为 Gitlab Manager，更新安装产品名和窗口标题
 - 同步 README 与侧边栏展示文案，避免界面与安装包名称不一致
