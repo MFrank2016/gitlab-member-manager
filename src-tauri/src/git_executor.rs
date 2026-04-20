@@ -322,3 +322,49 @@ pub(crate) fn classify_git_command_failure(
         evidence,
     )
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    pub(crate) fn make_temp_test_dir(prefix: &str) -> PathBuf {
+        let unique = format!(
+            "{prefix}_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
+    }
+
+    pub(crate) fn run_git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("execute git");
+        if !output.status.success() {
+            panic!(
+                "git {:?} failed: stdout={}, stderr={}",
+                args,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    pub(crate) fn setup_git_repo_with_branches(repo: &Path, branches: &[&str]) {
+        std::fs::create_dir_all(repo).expect("create repo dir");
+        run_git(repo, &["init", "-b", "main"]);
+        run_git(repo, &["config", "user.email", "ci@example.com"]);
+        run_git(repo, &["config", "user.name", "CI"]);
+        std::fs::write(repo.join("README.md"), "hello\n").expect("write readme");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "init"]);
+        for branch in branches {
+            run_git(repo, &["branch", branch]);
+        }
+    }
+}

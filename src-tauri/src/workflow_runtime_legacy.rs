@@ -1159,3 +1159,136 @@ pub(crate) async fn retry_failed_workflow_run(
     )
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::execute_workflow_run;
+    use crate::db;
+    use crate::git_executor::test_support::{make_temp_test_dir, setup_git_repo_with_branches};
+    use crate::models::WorkflowStepInput;
+    use serial_test::serial;
+    use sqlx::{migrate::Migrator, sqlite::SqlitePoolOptions, SqlitePool};
+    use std::path::PathBuf;
+    use std::str::FromStr;
+    use tokio::time::{sleep, Duration};
+
+    static MIGRATOR: Migrator = sqlx::migrate!();
+
+    async fn setup_test_pool() -> SqlitePool {
+        let db_path = make_temp_test_dir("workflow_working_path_db").join("test.sqlite3");
+        let db_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str(&db_url)
+            .expect("parse sqlite url")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect sqlite");
+        MIGRATOR.run(&pool).await.expect("run migrations");
+        pool
+    }
+
+    async fn wait_for_terminal_workflow_run_status(
+        pool: &SqlitePool,
+        run_id: i64,
+        timeout_ms: u64,
+    ) -> crate::models::WorkflowRunDetail {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            let detail = db::get_workflow_run_detail(pool, run_id)
+                .await
+                .expect("load workflow run detail while waiting");
+            if detail.status == "completed"
+                || detail.status == "partial_failed"
+                || detail.status == "cancelled"
+            {
+                return detail;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("workflow run {run_id} did not reach terminal status in {timeout_ms}ms");
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn create_repo_fixture(root: &PathBuf) -> (PathBuf, PathBuf) {
+        let origin_repo = root.join("origin-repo");
+        let first_target = root.join("target-a");
+        let final_target = first_target.join("nested").join("target-b");
+        setup_git_repo_with_branches(&origin_repo, &["release"]);
+        std::fs::create_dir_all(first_target.join("nested")).expect("create target-a dir");
+        setup_git_repo_with_branches(&final_target, &["target-only"]);
+        (origin_repo, final_target)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn working_path_relative_resolution_uses_latest_context_in_workflow_runtime() {
+        let pool = setup_test_pool().await;
+        let root = make_temp_test_dir("workflow_working_path_root");
+        let (origin_repo, final_target) = create_repo_fixture(&root);
+        let first_target = final_target
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("find target-a parent")
+            .to_path_buf();
+
+        let managed = db::create_managed_project(
+            &pool,
+            88101,
+            "workflow-working-path-project".to_string(),
+            "team/workflow-working-path-project".to_string(),
+            origin_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+        let group = db::create_project_group(&pool, "workflow-working-path-group".to_string())
+            .await
+            .expect("create project group");
+        db::add_projects_to_group(&pool, group.id, vec![managed.id])
+            .await
+            .expect("add project to group");
+
+        let workflow = db::create_workflow_definition(
+            &pool,
+            "workflow-working-path".to_string(),
+            "working path relative resolution red test".to_string(),
+            true,
+            serde_json::json!({}),
+            1,
+            vec![
+                WorkflowStepInput {
+                    step_type: "set_working_path".to_string(),
+                    parameters: serde_json::json!({ "path": first_target.to_string_lossy() }),
+                },
+                WorkflowStepInput {
+                    step_type: "set_working_path".to_string(),
+                    parameters: serde_json::json!({ "path": "nested/target-b" }),
+                },
+                WorkflowStepInput {
+                    step_type: "checkout_branch".to_string(),
+                    parameters: serde_json::json!({ "branch": "target-only" }),
+                },
+            ],
+        )
+        .await
+        .expect("create workflow definition");
+
+        let run_id = execute_workflow_run(&pool, workflow.id, group.id, serde_json::json!({}), Some(1))
+            .await
+            .expect("execute workflow run");
+
+        let detail = wait_for_terminal_workflow_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.status, "completed");
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "success");
+        assert_eq!(detail.projects[0].steps.len(), 3);
+        assert_eq!(detail.projects[0].steps[0].status, "success");
+        assert_eq!(detail.projects[0].steps[1].status, "success");
+        assert_eq!(detail.projects[0].steps[2].status, "success");
+    }
+}
