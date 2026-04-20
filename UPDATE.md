@@ -1,5 +1,10 @@
 # UPDATE
 
+## 2026-04-20 v0.1.6
+- 重新构建 Rust release 二进制，确保 Windows GUI 子系统修复真正进入安装包
+- 修正上一版仅重新打包旧 EXE 的问题，补发不弹终端的新 MSI
+- 继续保留 Windows 子系统回归测试，防止后续发布再次带出 console 可执行文件
+
 ## 2026-04-20 v0.1.5
 - 修复 Windows 安装版启动时额外弹出终端窗口的问题
 - 发布版启用 windows_subsystem=windows，保持开发版控制台能力不变
