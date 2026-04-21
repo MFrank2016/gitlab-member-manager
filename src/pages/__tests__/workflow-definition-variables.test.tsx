@@ -113,6 +113,7 @@ describe("pipeline definition editor", () => {
         "create_pipeline_definition",
         expect.objectContaining({
           name: "release-pipeline",
+          max_concurrency_default: 2,
           variables: [
             {
               key: "source_branch",
@@ -157,6 +158,26 @@ describe("pipeline definition editor", () => {
     });
   }, 15000);
 
+  it("keeps create disabled until the draft is valid and shows a readiness summary", async () => {
+    render(<WorkflowsPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "新建流水线" }));
+
+    const createButton = screen.getByRole("button", { name: /^创建$/ });
+    expect(createButton).toBeDisabled();
+    expect(screen.getByText("请先填写流水线名称。")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("流水线名称"), {
+      target: { value: "release-pipeline" },
+    });
+
+    await waitFor(() => {
+      expect(createButton).not.toBeDisabled();
+    });
+
+    expect(screen.getByText("已就绪：1 个变量，1 个节点，0 个调度。")).toBeInTheDocument();
+  });
+
   it("rejects save when a referenced variable has been deleted from the form", async () => {
     render(<WorkflowsPage />);
 
@@ -168,11 +189,11 @@ describe("pipeline definition editor", () => {
     const firstRow = await screen.findByTestId("pipeline-variable-row");
     fireEvent.click(within(firstRow).getByRole("button", { name: /删除变量 source_branch/i }));
 
-    fireEvent.click(screen.getByRole("button", { name: /^创建$/ }));
-
+    const createButton = screen.getByRole("button", { name: /^创建$/ });
     await waitFor(() => {
-      expect(toastErrorMock).toHaveBeenCalledWith(expect.stringContaining("source_branch"));
+      expect(createButton).toBeDisabled();
     });
+    expect(screen.getByText(/source_branch/)).toBeInTheDocument();
     expect(invokeMock).not.toHaveBeenCalledWith(
       "create_pipeline_definition",
       expect.anything()

@@ -17,6 +17,7 @@ import {
   createVariableDraft,
   ensureVariableRows,
   normalizeBuiltinParameters,
+  remapNodeDraftForType,
   scheduleRuntimeMessage,
   scheduleRuntimeStateLabel,
   type NodeDraft,
@@ -250,11 +251,7 @@ function PipelineNodeCard({
               }
 
               const nextNodeType = event.target.value;
-              return {
-                ...current,
-                nodeType: nextNodeType,
-                parameters: normalizeBuiltinParameters(nextNodeType, current.parameters),
-              };
+              return remapNodeDraftForType(current, nextNodeType);
             })
           }
           aria-label={`节点 ${index + 1} 类型`}

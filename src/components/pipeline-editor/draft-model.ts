@@ -190,6 +190,36 @@ export function normalizeBuiltinParameters(nodeType: string, parameters: Record<
   return normalized;
 }
 
+export function remapNodeDraftForType(node: NodeDraft, nextNodeType: string): NodeDraft {
+  const sourceParameters = isRecord(node.parameters) ? node.parameters : {};
+  const builtin = BUILTIN_NODE_MAP.get(nextNodeType);
+
+  if (!builtin) {
+    return {
+      ...node,
+      nodeType: nextNodeType,
+      parameters: sourceParameters,
+    };
+  }
+
+  const nextParameters: Record<string, unknown> = {};
+  for (const field of builtin.fields) {
+    const raw = sourceParameters[field.key];
+    nextParameters[field.key] =
+      typeof raw === "string"
+        ? raw
+        : raw === undefined || raw === null
+          ? (builtin.defaults[field.key] ?? "")
+          : String(raw);
+  }
+
+  return {
+    ...node,
+    nodeType: nextNodeType,
+    parameters: nextParameters,
+  };
+}
+
 export function createNodeDraft(nodeType = "checkout_branch", parameters: unknown = undefined): NodeDraft {
   const base = isRecord(parameters) ? parameters : {};
   return {
@@ -448,6 +478,28 @@ export function buildPipelineCreatePayload(draft: PipelineDraft) {
     nodes,
     schedules,
   };
+}
+
+export function getPipelineDraftReadiness(draft: PipelineDraft) {
+  if (!draft.name.trim()) {
+    return {
+      ready: false,
+      message: "请先填写流水线名称。",
+    };
+  }
+
+  try {
+    const payload = buildPipelineCreatePayload(draft);
+    return {
+      ready: true,
+      message: `已就绪：${payload.variables.length} 个变量，${payload.nodes.length} 个节点，${payload.schedules.length} 个调度。`,
+    };
+  } catch (error) {
+    return {
+      ready: false,
+      message: error instanceof Error ? error.message : "请先完善流水线配置。",
+    };
+  }
 }
 
 export function scheduleRuntimeStateLabel(

@@ -17,6 +17,7 @@ import { PipelineDraftForm } from "@/components/pipeline-editor/PipelineDraftFor
 import {
   buildPipelineCreatePayload,
   createEmptyPipelineDraft,
+  getPipelineDraftReadiness,
   toDraftFromDetail,
   type PipelineDraft,
 } from "@/components/pipeline-editor/draft-model";
@@ -42,6 +43,7 @@ export function WorkflowsPagePipeline() {
   const [createOpen, setCreateOpen] = React.useState(false);
   const [createDraft, setCreateDraft] = React.useState<PipelineDraft>(createEmptyPipelineDraft);
   const [creating, setCreating] = React.useState(false);
+  const createReadiness = getPipelineDraftReadiness(createDraft);
 
   const [editOpen, setEditOpen] = React.useState(false);
   const [editDraft, setEditDraft] = React.useState<PipelineDraft>(createEmptyPipelineDraft);
@@ -202,11 +204,14 @@ export function WorkflowsPagePipeline() {
                   <DialogDescription>配置节点顺序、变量和调度策略。</DialogDescription>
                 </DialogHeader>
                 <PipelineDraftForm draft={createDraft} projectGroups={projectGroups} onChange={setCreateDraft} />
+                <p className={createReadiness.ready ? "text-sm text-muted-foreground" : "text-sm text-destructive"}>
+                  {createReadiness.message}
+                </p>
                 <DialogFooter>
                   <Button variant="secondary" type="button" onClick={() => setCreateDraft(createEmptyPipelineDraft())}>
                     清空
                   </Button>
-                  <Button type="button" onClick={() => void onCreate()} disabled={creating}>
+                  <Button type="button" onClick={() => void onCreate()} disabled={creating || !createReadiness.ready}>
                     创建
                   </Button>
                 </DialogFooter>

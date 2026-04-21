@@ -4,6 +4,7 @@ import {
   BUILTIN_NODE_MAP,
   buildPipelineCreatePayload,
   normalizeBuiltinParameters,
+  remapNodeDraftForType,
   type PipelineDraft,
 } from "@/components/pipeline-editor/draft-model";
 
@@ -59,5 +60,30 @@ describe("pipeline draft model working path node", () => {
         parameters: { path: "D:/repos/project-a" },
       },
     ]);
+  });
+
+  it("drops incompatible extra parameters when switching to another builtin node type", () => {
+    expect(
+      remapNodeDraftForType(
+        {
+          id: "node-1",
+          nodeType: "check_pipeline",
+          parameters: {
+            project: "team/service-a",
+            ref: "${source_branch}",
+            sha: "abc123",
+            unexpected: "should-be-removed",
+          },
+        },
+        "trigger_pipeline"
+      )
+    ).toEqual({
+      id: "node-1",
+      nodeType: "trigger_pipeline",
+      parameters: {
+        project: "team/service-a",
+        ref: "${source_branch}",
+      },
+    });
   });
 });
