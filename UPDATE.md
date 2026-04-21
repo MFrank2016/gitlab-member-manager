@@ -1,5 +1,8 @@
 # UPDATE
 
+## 2026-04-21 v0.1.7
+- 修复 Windows 安装版在 setup 阶段启动调度器时缺少 Tokio reactor 导致的闪退问题
+
 ## 2026-04-20 v0.1.6
 - 重新构建 Rust release 二进制，确保 Windows GUI 子系统修复真正进入安装包
 - 修正上一版仅重新打包旧 EXE 的问题，补发不弹终端的新 MSI

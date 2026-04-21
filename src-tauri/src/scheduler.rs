@@ -416,7 +416,7 @@ impl PipelineSchedulerRuntime {
 }
 
 pub(crate) fn spawn_pipeline_scheduler(pool: SqlitePool, runtime: PipelineSchedulerRuntime) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut interval = time::interval(SCHEDULER_TICK_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 

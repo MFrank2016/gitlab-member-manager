@@ -13,6 +13,9 @@ mod scheduler;
 mod workflow_runtime_legacy;
 mod workflows;
 
+#[cfg(test)]
+mod scheduler_spawn_tests;
+
 use tauri::Manager;
 
 use crate::errors::{CommandError, CommandErrorCategory};
