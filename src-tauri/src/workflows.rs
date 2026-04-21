@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(detail.projects[0].steps[0].status, "failed");
         assert!(detail.projects[0].steps[0]
             .summary_message
-            .contains("precheck failed"));
+            .contains("步骤预检查失败"));
     }
 
     #[tokio::test]
