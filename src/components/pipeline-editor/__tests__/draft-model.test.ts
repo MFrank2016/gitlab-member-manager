@@ -10,6 +10,18 @@ import {
 } from "@/components/pipeline-editor/draft-model";
 
 describe("pipeline draft model working path node", () => {
+  it("registers switch_project as a builtin node with a managed project selector field", () => {
+    const builtin = BUILTIN_NODE_MAP.get("switch_project");
+
+    expect(builtin).toBeDefined();
+    expect(builtin?.fields).toEqual([
+      expect.objectContaining({
+        key: "managedProjectId",
+        label: "项目",
+      }),
+    ]);
+  });
+
   it("registers set_working_path as a builtin node with a variable-friendly path field", () => {
     const builtin = BUILTIN_NODE_MAP.get("set_working_path");
 
@@ -59,6 +71,33 @@ describe("pipeline draft model working path node", () => {
       {
         nodeType: "set_working_path",
         parameters: { path: "D:/repos/project-a" },
+      },
+    ]);
+  });
+
+  it("serializes switch_project nodes through the create payload builder", () => {
+    const draft: PipelineDraft = {
+      name: "release-pipeline",
+      description: "",
+      enabled: true,
+      maxConcurrencyDefault: "1",
+      variableRows: [],
+      nodes: [
+        {
+          id: "node-1",
+          nodeType: "switch_project",
+          parameters: normalizeBuiltinParameters("switch_project", {
+            managedProjectId: "42",
+          }),
+        },
+      ],
+      schedules: [],
+    };
+
+    expect(buildPipelineCreatePayload(draft).nodes).toEqual([
+      {
+        nodeType: "switch_project",
+        parameters: { managedProjectId: "42" },
       },
     ]);
   });

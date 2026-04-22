@@ -604,8 +604,8 @@ pub(crate) async fn execute_project_plan(
         let operation = match build_execution_step_operation(
             &step.step_type,
             &step.rendered_parameters,
-            &plan.project,
-            execution_context.working_dir(),
+            Some(&plan.project),
+            Some(execution_context.working_dir()),
         ) {
             Ok(operation) => operation,
             Err(error) => {

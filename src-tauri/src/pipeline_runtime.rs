@@ -39,14 +39,20 @@ struct PipelineProjectExecutionNode {
 #[derive(Debug, Clone)]
 struct PipelineProjectExecutionPlan {
     run_project_id: i64,
-    project: ManagedProject,
+    project: Option<ManagedProject>,
     nodes: Vec<PipelineProjectExecutionNode>,
+}
+
+#[derive(Debug, Clone)]
+struct PipelineSegmentSeed {
+    project: Option<ManagedProject>,
+    nodes: Vec<RenderedPipelineNodeDefinition>,
 }
 
 #[derive(Debug)]
 struct PipelineRetrySourceRun {
     pipeline_definition_id: i64,
-    project_group_id: i64,
+    project_group_id: Option<i64>,
     run_parameters: Value,
 }
 
@@ -127,6 +133,81 @@ fn render_pipeline_nodes_for_run(
         });
     }
     Ok(rendered_nodes)
+}
+
+fn node_requires_active_project(node_type: &str) -> bool {
+    matches!(
+        node_type,
+        "checkout_branch"
+            | "git_pull"
+            | "git_merge"
+            | "git_push"
+            | "check_pipeline"
+            | "trigger_pipeline"
+            | "wait_pipeline"
+    )
+}
+
+fn read_switch_project_id(parameters: &Value) -> Result<i64> {
+    match parameters.get("managedProjectId") {
+        Some(Value::String(raw)) => raw
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| anyhow!("managedProjectId must be a positive integer")),
+        Some(Value::Number(value)) => value
+            .as_i64()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| anyhow!("managedProjectId must be a positive integer")),
+        _ => Err(anyhow!("managedProjectId is required")),
+    }
+}
+
+async fn load_enabled_managed_project(pool: &SqlitePool, managed_project_id: i64) -> Result<ManagedProject> {
+    let project = db::list_managed_projects(pool)
+        .await?
+        .into_iter()
+        .find(|item| item.id == managed_project_id)
+        .ok_or_else(|| anyhow!("managed project not found: {managed_project_id}"))?;
+
+    if !project.enabled {
+        return Err(anyhow!("managed project is disabled: {managed_project_id}"));
+    }
+
+    Ok(project)
+}
+
+async fn build_pipeline_segment_seeds(
+    pool: &SqlitePool,
+    rendered_nodes: &[RenderedPipelineNodeDefinition],
+) -> Result<Vec<PipelineSegmentSeed>> {
+    let mut segments = Vec::<PipelineSegmentSeed>::new();
+    let mut current_project: Option<ManagedProject> = None;
+    let mut current_nodes = Vec::<RenderedPipelineNodeDefinition>::new();
+
+    for node in rendered_nodes {
+        if node.node_type == "switch_project" {
+            if !current_nodes.is_empty() {
+                segments.push(PipelineSegmentSeed {
+                    project: current_project.take(),
+                    nodes: std::mem::take(&mut current_nodes),
+                });
+            }
+
+            let managed_project_id = read_switch_project_id(&node.rendered_parameters)?;
+            current_project = Some(load_enabled_managed_project(pool, managed_project_id).await?);
+        }
+
+        current_nodes.push(node.clone());
+    }
+
+    if !current_nodes.is_empty() {
+        segments.push(PipelineSegmentSeed {
+            project: current_project,
+            nodes: current_nodes,
+        });
+    }
+
+    Ok(segments)
 }
 
 fn classify_precheck_failure(error: &str) -> FailureEnvelope {
@@ -226,6 +307,16 @@ fn classify_invalid_execution_parameters(error: &str) -> FailureEnvelope {
     )
 }
 
+fn classify_missing_active_project(node_type: &str) -> FailureEnvelope {
+    build_failure_envelope(
+        "pipeline.active_project_missing",
+        "未选择项目",
+        format!("节点 {node_type} 执行前未选择项目，请先添加或前移“切换项目”节点。"),
+        "请先在当前节点之前添加“切换项目”节点，并指定一个已配置的托管项目后重试。",
+        node_type.to_string(),
+    )
+}
+
 async fn load_runtime_gitlab_config(pool: &SqlitePool) -> Result<Option<GitLabConfig>> {
     Ok(db::get_gitlab_config(pool).await?.map(|cfg| GitLabConfig {
         base_url: cfg.base_url,
@@ -236,7 +327,7 @@ async fn load_runtime_gitlab_config(pool: &SqlitePool) -> Result<Option<GitLabCo
 async fn insert_pipeline_run_row(
     tx: &mut Transaction<'_, Sqlite>,
     pipeline_definition_id: i64,
-    project_group_id: i64,
+    project_group_id: Option<i64>,
     source_pipeline_run_id: Option<i64>,
     trigger_kind: &str,
     run_parameters: &Value,
@@ -270,15 +361,31 @@ async fn insert_pipeline_run_row(
 async fn insert_pipeline_run_project_row(
     tx: &mut Transaction<'_, Sqlite>,
     pipeline_run_id: i64,
-    project: &ManagedProject,
+    project: Option<&ManagedProject>,
 ) -> Result<i64> {
     let now = now_rfc3339();
-    let gitlab_project_id = i64::try_from(project.gitlab_project_id).map_err(|_| {
-        anyhow!(
-            "gitlab_project_id out of range: {}",
-            project.gitlab_project_id
-        )
-    })?;
+    let (managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path) =
+        match project {
+            Some(project) => (
+                Some(project.id),
+                i64::try_from(project.gitlab_project_id).map_err(|_| {
+                    anyhow!(
+                        "gitlab_project_id out of range: {}",
+                        project.gitlab_project_id
+                    )
+                })?,
+                project.name.clone(),
+                project.path_with_namespace.clone(),
+                project.repo_path.clone(),
+            ),
+            None => (
+                None,
+                0,
+                "未选择项目".to_string(),
+                "__unselected_project__".to_string(),
+                "__unselected_project__".to_string(),
+            ),
+        };
     let result = sqlx::query(
         r#"INSERT INTO pipeline_run_projects (
          pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace, repo_path,
@@ -286,11 +393,11 @@ async fn insert_pipeline_run_project_row(
        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', NULL, NULL, ?8, ?9)"#,
     )
     .bind(pipeline_run_id)
-    .bind(project.id)
+    .bind(managed_project_id)
     .bind(gitlab_project_id)
-    .bind(&project.name)
-    .bind(&project.path_with_namespace)
-    .bind(&project.repo_path)
+    .bind(&project_name)
+    .bind(&project_path_with_namespace)
+    .bind(&repo_path)
     .bind("queued")
     .bind(&now)
     .bind(&now)
@@ -332,7 +439,7 @@ async fn insert_pipeline_run_node_row(
 async fn seed_pipeline_run_and_children(
     pool: &SqlitePool,
     pipeline_definition_id: i64,
-    project_group_id: i64,
+    project_group_id: Option<i64>,
     source_pipeline_run_id: Option<i64>,
     trigger_kind: &str,
     run_parameters: &Value,
@@ -355,7 +462,7 @@ async fn seed_pipeline_run_and_children(
     let mut plans = Vec::with_capacity(projects.len());
     for project in projects {
         let run_project_id =
-            insert_pipeline_run_project_row(&mut tx, pipeline_run_id, &project).await?;
+            insert_pipeline_run_project_row(&mut tx, pipeline_run_id, Some(&project)).await?;
         let mut project_nodes = Vec::with_capacity(rendered_nodes.len());
         for rendered_node in rendered_nodes {
             let run_node_id =
@@ -368,7 +475,55 @@ async fn seed_pipeline_run_and_children(
         }
         plans.push(PipelineProjectExecutionPlan {
             run_project_id,
-            project,
+            project: Some(project),
+            nodes: project_nodes,
+        });
+    }
+
+    tx.commit().await?;
+    Ok((pipeline_run_id, plans))
+}
+
+async fn seed_pipeline_run_for_segments(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+    project_group_id: Option<i64>,
+    source_pipeline_run_id: Option<i64>,
+    trigger_kind: &str,
+    run_parameters: &Value,
+    max_concurrency: i64,
+    segments: Vec<PipelineSegmentSeed>,
+) -> Result<(i64, Vec<PipelineProjectExecutionPlan>)> {
+    let mut tx = pool.begin().await?;
+    let pipeline_run_id = insert_pipeline_run_row(
+        &mut tx,
+        pipeline_definition_id,
+        project_group_id,
+        source_pipeline_run_id,
+        trigger_kind,
+        run_parameters,
+        max_concurrency,
+    )
+    .await?;
+
+    let mut plans = Vec::with_capacity(segments.len());
+    for segment in segments {
+        let run_project_id =
+            insert_pipeline_run_project_row(&mut tx, pipeline_run_id, segment.project.as_ref())
+                .await?;
+        let mut project_nodes = Vec::with_capacity(segment.nodes.len());
+        for rendered_node in &segment.nodes {
+            let run_node_id =
+                insert_pipeline_run_node_row(&mut tx, run_project_id, rendered_node).await?;
+            project_nodes.push(PipelineProjectExecutionNode {
+                run_node_id,
+                node_type: rendered_node.node_type.clone(),
+                rendered_parameters: rendered_node.rendered_parameters.clone(),
+            });
+        }
+        plans.push(PipelineProjectExecutionPlan {
+            run_project_id,
+            project: segment.project,
             nodes: project_nodes,
         });
     }
@@ -692,7 +847,7 @@ async fn execute_pipeline_project_plan(
     }
 
     mark_pipeline_project_running(pool, plan.run_project_id).await?;
-    let mut execution_context = LocalExecutionContext::new(&plan.project);
+    let mut execution_context = plan.project.as_ref().map(LocalExecutionContext::new);
 
     if maybe_cancel_pipeline_project(
         pool,
@@ -739,6 +894,55 @@ async fn execute_pipeline_project_plan(
             rendered_parameters: node.rendered_parameters.clone(),
         };
 
+        if node.node_type == "switch_project" {
+            let summary = match plan.project.as_ref() {
+                Some(project) => format!("已切换到项目 {}", project.name),
+                None => "当前节点未配置目标项目".to_string(),
+            };
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "success",
+                "",
+                "",
+                Some(0),
+                &summary,
+                None,
+            )
+            .await?;
+            continue;
+        }
+
+        if plan.project.is_none() && node_requires_active_project(node.node_type.as_str()) {
+            let envelope = classify_missing_active_project(&node.node_type);
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "failed",
+                "",
+                "",
+                None,
+                &envelope.title_zh,
+                Some(&envelope),
+            )
+            .await?;
+            mark_remaining_pipeline_nodes_skipped(
+                pool,
+                &plan.nodes,
+                node_index + 1,
+                "skipped after previous node failure",
+            )
+            .await?;
+            mark_pipeline_project_finished(
+                pool,
+                plan.run_project_id,
+                "failed_precheck",
+                &envelope.title_zh,
+            )
+            .await?;
+            return Ok(ProjectOutcome::FailedPrecheck);
+        }
+
         if matches!(
             node.node_type.as_str(),
             "check_pipeline" | "wait_pipeline" | "trigger_pipeline"
@@ -778,7 +982,9 @@ async fn execute_pipeline_project_plan(
 
             let project_path = match gitlab_executor::read_pipeline_project_param(
                 &node.rendered_parameters,
-                &plan.project,
+                plan.project
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("active managed project is required for GitLab nodes"))?,
             ) {
                 Ok(value) => value,
                 Err(error) => {
@@ -813,7 +1019,9 @@ async fn execute_pipeline_project_plan(
             };
             let reference = gitlab_executor::read_pipeline_reference_param(
                 &node.rendered_parameters,
-                &plan.project,
+                plan.project
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("active managed project is required for GitLab nodes"))?,
             );
             let sha =
                 match gitlab_executor::read_optional_string_param(&node.rendered_parameters, "sha")
@@ -1150,8 +1358,8 @@ async fn execute_pipeline_project_plan(
         let operation = match build_execution_step_operation(
             &execution_step.step_type,
             &execution_step.rendered_parameters,
-            &plan.project,
-            execution_context.working_dir(),
+            plan.project.as_ref(),
+            execution_context.as_ref().map(|context| context.working_dir()),
         ) {
             Ok(operation) => operation,
             Err(error) => {
@@ -1188,8 +1396,13 @@ async fn execute_pipeline_project_plan(
         match &operation {
             StepOperation::SetWorkingPath { target_path } => {
                 if let Err(error) = run_execution_step_prechecks(
-                    execution_context.working_dir(),
-                    &plan.project,
+                    execution_context
+                        .as_ref()
+                        .map(|context| context.working_dir())
+                        .ok_or_else(|| anyhow!("execution context is missing working directory"))?,
+                    plan.project
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("active managed project is required"))?,
                     &operation,
                 )
                 .await
@@ -1247,7 +1460,12 @@ async fn execute_pipeline_project_plan(
                     return Ok(ProjectOutcome::Cancelled);
                 }
 
-                execution_context.update_working_dir(target_path.clone());
+                if let Some(context) = execution_context.as_mut() {
+                    context.update_working_dir(target_path.clone());
+                } else {
+                    execution_context =
+                        Some(LocalExecutionContext::from_working_dir(target_path.clone()));
+                }
                 let summary = format!("执行路径已切换到 {}", target_path.display());
                 mark_pipeline_node_finished(
                     pool,
@@ -1276,12 +1494,22 @@ async fn execute_pipeline_project_plan(
                 }
             }
             _ => {
-                let repo_lease = get_repo_lease(&execution_context.working_dir_display()).await;
+                let working_dir_display = execution_context
+                    .as_ref()
+                    .map(|context| context.working_dir_display())
+                    .ok_or_else(|| anyhow!("execution context is missing working directory"))?;
+                let working_dir = execution_context
+                    .as_ref()
+                    .map(|context| context.working_dir())
+                    .ok_or_else(|| anyhow!("execution context is missing working directory"))?;
+                let repo_lease = get_repo_lease(&working_dir_display).await;
                 let _repo_guard = repo_lease.lock().await;
 
                 if let Err(error) = run_execution_step_prechecks(
-                    execution_context.working_dir(),
-                    &plan.project,
+                    working_dir,
+                    plan.project
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("active managed project is required"))?,
                     &operation,
                 )
                 .await
@@ -1340,7 +1568,7 @@ async fn execute_pipeline_project_plan(
                 }
 
                 let command_result = execute_git_command(
-                    execution_context.working_dir_display(),
+                    working_dir_display,
                     operation.to_args(),
                 )
                 .await?;
@@ -1569,7 +1797,7 @@ async fn load_pipeline_retry_source_run(
     source_pipeline_run_id: i64,
 ) -> Result<PipelineRetrySourceRun> {
     let (pipeline_definition_id, project_group_id, status, run_parameters_json) =
-        sqlx::query_as::<_, (i64, i64, String, String)>(
+        sqlx::query_as::<_, (i64, Option<i64>, String, String)>(
             r#"SELECT pipeline_definition_id, project_group_id, status, run_parameters_json
            FROM pipeline_runs
            WHERE id = ?1"#,
@@ -1628,7 +1856,7 @@ async fn load_failed_pipeline_project_ids_for_retry(
 async fn start_pipeline_run_with_projects(
     pool: &SqlitePool,
     pipeline_definition_id: i64,
-    project_group_id: i64,
+    project_group_id: Option<i64>,
     run_parameters: Value,
     max_concurrency_override: Option<i64>,
     source_pipeline_run_id: Option<i64>,
@@ -1691,49 +1919,161 @@ async fn start_pipeline_run_with_projects(
     Ok(pipeline_run_id)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn start_pipeline_run_with_segments(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+    max_concurrency_override: Option<i64>,
+    source_pipeline_run_id: Option<i64>,
+    trigger_kind: &str,
+    run_parameters: Value,
+    selected_managed_project_ids: Option<&HashSet<i64>>,
+) -> Result<i64> {
+    let pipeline = db::load_pipeline_definition_for_execution(pool, pipeline_definition_id).await?;
+    let gitlab_cfg = load_runtime_gitlab_config(pool).await?;
+    let run_parameters = normalize_pipeline_run_parameters(&pipeline.variables, run_parameters)?;
+    let rendered_nodes = render_pipeline_nodes_for_run(&pipeline.nodes, &run_parameters)?;
+    let max_concurrency = match max_concurrency_override {
+        Some(value) if value >= 1 => value,
+        Some(value) => {
+            return Err(anyhow!(
+                "max_concurrency_override must be >= 1, got {value}"
+            ))
+        }
+        None => pipeline.max_concurrency_default,
+    };
+    if max_concurrency < 1 {
+        return Err(anyhow!("pipeline max concurrency must be >= 1"));
+    }
+
+    let mut segments = build_pipeline_segment_seeds(pool, &rendered_nodes).await?;
+    if let Some(selected_project_ids) = selected_managed_project_ids {
+        segments.retain(|segment| {
+            segment
+                .project
+                .as_ref()
+                .map(|project| selected_project_ids.contains(&project.id))
+                .unwrap_or(false)
+        });
+        if segments.is_empty() {
+            return Err(anyhow!(
+                "pipeline retry resolved to zero project segments after filtering"
+            ));
+        }
+    }
+
+    let (pipeline_run_id, plans) = seed_pipeline_run_for_segments(
+        pool,
+        pipeline.id,
+        None,
+        source_pipeline_run_id,
+        trigger_kind,
+        &run_parameters,
+        max_concurrency,
+        segments,
+    )
+    .await?;
+
+    if plans.is_empty() {
+        mark_pipeline_run_finished(pool, pipeline_run_id, "completed").await?;
+        return Ok(pipeline_run_id);
+    }
+
+    let pool_for_task = pool.clone();
+    tokio::spawn(async move {
+        if let Err(error) = run_pipeline_in_background(
+            pool_for_task.clone(),
+            pipeline_run_id,
+            plans,
+            max_concurrency,
+            gitlab_cfg,
+        )
+        .await
+        {
+            tracing::error!(
+                pipeline_run_id = pipeline_run_id,
+                error = %error,
+                "pipeline background execution failed"
+            );
+            let _ = mark_pipeline_run_finished(&pool_for_task, pipeline_run_id, "partial_failed")
+                .await;
+        }
+    });
+
+    Ok(pipeline_run_id)
+}
+
 pub(crate) async fn execute_pipeline_run(
     pool: &SqlitePool,
     pipeline_definition_id: i64,
-    project_group_id: i64,
+    project_group_id: Option<i64>,
     run_parameters: Value,
     max_concurrency_override: Option<i64>,
 ) -> Result<i64> {
-    let mut projects = db::list_project_group_projects(pool, project_group_id).await?;
-    projects.retain(|project| project.enabled);
+    match project_group_id {
+        Some(project_group_id) => {
+            let mut projects = db::list_project_group_projects(pool, project_group_id).await?;
+            projects.retain(|project| project.enabled);
 
-    start_pipeline_run_with_projects(
-        pool,
-        pipeline_definition_id,
-        project_group_id,
-        run_parameters,
-        max_concurrency_override,
-        None,
-        "manual",
-        projects,
-    )
-    .await
+            start_pipeline_run_with_projects(
+                pool,
+                pipeline_definition_id,
+                Some(project_group_id),
+                run_parameters,
+                max_concurrency_override,
+                None,
+                "manual",
+                projects,
+            )
+            .await
+        }
+        None => start_pipeline_run_with_segments(
+            pool,
+            pipeline_definition_id,
+            max_concurrency_override,
+            None,
+            "manual",
+            run_parameters,
+            None,
+        )
+        .await,
+    }
 }
 
 pub(crate) async fn execute_scheduled_pipeline_run(
     pool: &SqlitePool,
     pipeline_definition_id: i64,
-    project_group_id: i64,
+    project_group_id: Option<i64>,
     run_parameters: Value,
 ) -> Result<i64> {
-    let mut projects = db::list_project_group_projects(pool, project_group_id).await?;
-    projects.retain(|project| project.enabled);
+    match project_group_id {
+        Some(project_group_id) => {
+            let mut projects = db::list_project_group_projects(pool, project_group_id).await?;
+            projects.retain(|project| project.enabled);
 
-    start_pipeline_run_with_projects(
-        pool,
-        pipeline_definition_id,
-        project_group_id,
-        run_parameters,
-        None,
-        None,
-        "schedule",
-        projects,
-    )
-    .await
+            start_pipeline_run_with_projects(
+                pool,
+                pipeline_definition_id,
+                Some(project_group_id),
+                run_parameters,
+                None,
+                None,
+                "schedule",
+                projects,
+            )
+            .await
+        }
+        None => start_pipeline_run_with_segments(
+            pool,
+            pipeline_definition_id,
+            None,
+            None,
+            "schedule",
+            run_parameters,
+            None,
+        )
+        .await,
+    }
 }
 
 pub(crate) async fn cancel_pipeline_run(pool: &SqlitePool, pipeline_run_id: i64) -> Result<()> {
@@ -1813,7 +2153,23 @@ pub(crate) async fn retry_pipeline_run(
     };
 
     let retry_project_id_set = retry_project_ids.iter().copied().collect::<HashSet<_>>();
-    let mut projects = db::list_project_group_projects(pool, source_run.project_group_id).await?;
+    if source_run.project_group_id.is_none() {
+        return start_pipeline_run_with_segments(
+            pool,
+            source_run.pipeline_definition_id,
+            max_concurrency_override,
+            Some(source_pipeline_run_id),
+            "retry_failed",
+            source_run.run_parameters,
+            Some(&retry_project_id_set),
+        )
+        .await;
+    }
+
+    let source_project_group_id = source_run
+        .project_group_id
+        .expect("checked source project group above");
+    let mut projects = db::list_project_group_projects(pool, source_project_group_id).await?;
     projects.retain(|project| project.enabled);
 
     let enabled_project_ids = projects
@@ -1842,7 +2198,7 @@ pub(crate) async fn retry_pipeline_run(
     start_pipeline_run_with_projects(
         pool,
         source_run.pipeline_definition_id,
-        source_run.project_group_id,
+        Some(source_project_group_id),
         source_run.run_parameters,
         max_concurrency_override,
         Some(source_pipeline_run_id),
@@ -1914,6 +2270,112 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn switch_project_pipeline_runtime_runs_without_project_group() {
+        let pool = setup_test_pool().await;
+        let root = make_temp_test_dir("pipeline_switch_project_root");
+        let (origin_repo, _) = create_repo_fixture(&root);
+
+        let managed = db::create_managed_project(
+            &pool,
+            88010,
+            "pipeline-switch-project".to_string(),
+            "team/pipeline-switch-project".to_string(),
+            origin_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "pipeline-switch-project".to_string(),
+            "switch project pipeline runtime red test".to_string(),
+            true,
+            1,
+            vec![],
+            vec![
+                PipelineNodeInput {
+                    node_type: "switch_project".to_string(),
+                    parameters: serde_json::json!({ "managedProjectId": managed.id.to_string() }),
+                },
+                PipelineNodeInput {
+                    node_type: "checkout_branch".to_string(),
+                    parameters: serde_json::json!({ "branch": "release" }),
+                },
+            ],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(1))
+            .await
+            .expect("execute pipeline run without project group");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.status, "completed");
+        assert_eq!(detail.project_group_id, None);
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].managed_project_id, Some(managed.id));
+        assert_eq!(detail.projects[0].status, "success");
+        assert_eq!(detail.projects[0].nodes.len(), 2);
+        assert_eq!(detail.projects[0].nodes[0].node_type, "switch_project");
+        assert_eq!(detail.projects[0].nodes[0].status, "success");
+        assert_eq!(detail.projects[0].nodes[1].node_type, "checkout_branch");
+        assert_eq!(detail.projects[0].nodes[1].status, "success");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pipeline_runtime_reports_missing_switch_project_in_chinese() {
+        let pool = setup_test_pool().await;
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "pipeline-missing-switch-project".to_string(),
+            "missing switch project runtime red test".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "release" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(1))
+            .await
+            .expect("execute pipeline run without switch_project");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.status, "partial_failed");
+        assert_eq!(detail.project_group_id, None);
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].project_name, "未选择项目");
+        assert_eq!(detail.projects[0].status, "failed_precheck");
+        assert_eq!(detail.projects[0].nodes.len(), 1);
+        assert_eq!(detail.projects[0].nodes[0].status, "failed");
+        assert!(
+            detail.projects[0].nodes[0]
+                .summary_message
+                .contains("未选择项目")
+        );
+        assert!(
+            detail.projects[0].nodes[0]
+                .detail_zh
+                .as_deref()
+                .unwrap_or_default()
+                .contains("切换项目")
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn working_path_pipeline_runtime_switches_following_git_nodes_to_latest_context() {
         let pool = setup_test_pool().await;
         let root = make_temp_test_dir("pipeline_working_path_root");
@@ -1960,7 +2422,7 @@ mod tests {
         .await
         .expect("create pipeline definition");
 
-        let run_id = execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+        let run_id = execute_pipeline_run(&pool, pipeline.id, Some(group.id), serde_json::json!({}), Some(1))
             .await
             .expect("execute pipeline run");
 
@@ -2025,7 +2487,7 @@ mod tests {
         .await
         .expect("create pipeline definition");
 
-        let run_id = execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+        let run_id = execute_pipeline_run(&pool, pipeline.id, Some(group.id), serde_json::json!({}), Some(1))
             .await
             .expect("execute pipeline run");
 

@@ -4,7 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { PipelineScheduleRuntimeSnapshot, ProjectGroup } from "@/lib/types";
+import type {
+  ManagedProject,
+  PipelineScheduleRuntimeSnapshot,
+  ProjectGroup,
+} from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 
 import { StructuredJsonEditor } from "./StructuredJsonEditor";
@@ -28,6 +32,7 @@ import {
 
 type PipelineDraftFormProps = {
   draft: PipelineDraft;
+  managedProjects?: ManagedProject[];
   projectGroups: ProjectGroup[];
   scheduleRuntimeSnapshots?: PipelineScheduleRuntimeSnapshot[];
   loadingScheduleRuntime?: boolean;
@@ -80,7 +85,9 @@ function PipelineBasicsSection({
     <section className="grid gap-3">
       <div className="space-y-1">
         <h3 className="text-base font-semibold">基础信息</h3>
-        <p className="text-sm text-muted-foreground">定义流水线名称、描述和默认并发策略。</p>
+        <p className="text-sm text-muted-foreground">
+          定义流水线名称、描述和默认并发策略。
+        </p>
       </div>
       <div className="grid gap-1">
         <Label htmlFor="pipeline-name-input">流水线名称</Label>
@@ -88,7 +95,7 @@ function PipelineBasicsSection({
           id="pipeline-name-input"
           value={draft.name}
           onChange={(event) => onChange({ ...draft, name: event.target.value })}
-          placeholder="流水线名称"
+          placeholder="发布主干回归"
         />
       </div>
       <div className="grid gap-1">
@@ -108,11 +115,16 @@ function PipelineBasicsSection({
             type="number"
             min={1}
             value={draft.maxConcurrencyDefault}
-            onChange={(event) => onChange({ ...draft, maxConcurrencyDefault: event.target.value })}
+            onChange={(event) =>
+              onChange({ ...draft, maxConcurrencyDefault: event.target.value })
+            }
           />
         </div>
         <label className="mt-6 flex items-center gap-2 text-sm">
-          <Checkbox checked={draft.enabled} onCheckedChange={(value) => onChange({ ...draft, enabled: Boolean(value) })} />
+          <Checkbox
+            checked={draft.enabled}
+            onCheckedChange={(value) => onChange({ ...draft, enabled: Boolean(value) })}
+          />
           启用
         </label>
       </div>
@@ -136,7 +148,9 @@ function PipelineVariablesSection({
       <div className="flex items-center justify-between">
         <div className="space-y-1">
           <h3 className="text-base font-semibold">变量</h3>
-          <p className="text-sm text-muted-foreground">变量会自动从节点模板中推导，也可以手动补充。</p>
+          <p className="text-sm text-muted-foreground">
+            变量会自动从节点模板中推导，也可以手动补充。
+          </p>
         </div>
         <Button type="button" size="sm" variant="secondary" onClick={onAdd}>
           添加变量
@@ -152,25 +166,36 @@ function PipelineVariablesSection({
             <Input
               aria-label={`变量 ${index + 1} 键`}
               value={row.key}
-              onChange={(event) => onUpdate(index, (current) => ({ ...current, key: event.target.value }))}
-              placeholder="变量键"
+              onChange={(event) =>
+                onUpdate(index, (current) => ({ ...current, key: event.target.value }))
+              }
+              placeholder="source_branch"
             />
             <Input
               aria-label={`变量 ${index + 1} 标签`}
               value={row.label}
-              onChange={(event) => onUpdate(index, (current) => ({ ...current, label: event.target.value }))}
-              placeholder="变量标签"
+              onChange={(event) =>
+                onUpdate(index, (current) => ({ ...current, label: event.target.value }))
+              }
+              placeholder="Source Branch"
             />
             <Input
               aria-label={`变量 ${row.key || index + 1} 默认值`}
               value={row.defaultValue}
-              onChange={(event) => onUpdate(index, (current) => ({ ...current, defaultValue: event.target.value }))}
+              onChange={(event) =>
+                onUpdate(index, (current) => ({
+                  ...current,
+                  defaultValue: event.target.value,
+                }))
+              }
               placeholder="默认值"
             />
             <label className="flex items-center gap-2 text-sm">
               <Checkbox
                 checked={row.required}
-                onCheckedChange={(value) => onUpdate(index, (current) => ({ ...current, required: Boolean(value) }))}
+                onCheckedChange={(value) =>
+                  onUpdate(index, (current) => ({ ...current, required: Boolean(value) }))
+                }
               />
               必填
             </label>
@@ -194,6 +219,7 @@ function PipelineVariablesSection({
 function PipelineNodeCard({
   node,
   index,
+  managedProjects = [],
   onUpdate,
   onMove,
   onRemove,
@@ -201,21 +227,53 @@ function PipelineNodeCard({
 }: {
   node: NodeDraft;
   index: number;
+  managedProjects?: ManagedProject[];
   onUpdate: (index: number, updater: (node: NodeDraft) => NodeDraft) => void;
   onMove: (index: number, direction: -1 | 1) => void;
   onRemove: (index: number) => void;
   disableRemove: boolean;
 }) {
   const builtin = BUILTIN_NODE_MAP.get(node.nodeType);
-  const { builtinParameters, extraParameters } = splitBuiltinParameters(node.nodeType, node.parameters);
+  const { builtinParameters, extraParameters } = splitBuiltinParameters(
+    node.nodeType,
+    node.parameters
+  );
   const selectValue = builtin ? node.nodeType : "__custom__";
+
+  function updateBuiltinField(fieldKey: string, nextValue: string) {
+    onUpdate(index, (current) => {
+      const nextBuiltinParameters = { ...builtinParameters, [fieldKey]: nextValue };
+      return {
+        ...current,
+        parameters: mergeBuiltinParameters(
+          current.nodeType,
+          nextBuiltinParameters,
+          extraParameters
+        ),
+      };
+    });
+  }
+
+  const selectedManagedProject =
+    builtin?.value === "switch_project"
+      ? managedProjects.find(
+          (project) =>
+            String(project.id) === String(builtinParameters.managedProjectId ?? "")
+        ) ?? null
+      : null;
 
   return (
     <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
       <div className="flex items-center justify-between">
         <h4 className="text-sm font-semibold">节点 {index + 1}</h4>
         <div className="flex items-center gap-1">
-          <Button type="button" variant="ghost" size="sm" onClick={() => onMove(index, -1)} disabled={index === 0}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => onMove(index, -1)}
+            disabled={index === 0}
+          >
             上移
           </Button>
           <Button type="button" variant="ghost" size="sm" onClick={() => onMove(index, 1)}>
@@ -250,8 +308,7 @@ function PipelineNodeCard({
                 };
               }
 
-              const nextNodeType = event.target.value;
-              return remapNodeDraftForType(current, nextNodeType);
+              return remapNodeDraftForType(current, event.target.value);
             })
           }
           aria-label={`节点 ${index + 1} 类型`}
@@ -271,7 +328,9 @@ function PipelineNodeCard({
           <Input
             aria-label={`节点 ${index + 1} 自定义类型`}
             value={node.nodeType}
-            onChange={(event) => onUpdate(index, (current) => ({ ...current, nodeType: event.target.value }))}
+            onChange={(event) =>
+              onUpdate(index, (current) => ({ ...current, nodeType: event.target.value }))
+            }
             placeholder="custom_release_gate"
           />
         </div>
@@ -280,25 +339,57 @@ function PipelineNodeCard({
       {builtin ? (
         <div className="grid gap-3">
           <div className="grid gap-2">
-            {builtin.fields.map((field) => (
-              <div key={field.key} className="grid gap-1">
-                <Label>{field.label}</Label>
-                <Input
-                  value={typeof builtinParameters[field.key] === "string" ? String(builtinParameters[field.key]) : ""}
-                  onChange={(event) =>
-                    onUpdate(index, (current) => {
-                      const nextBuiltinParameters = { ...builtinParameters, [field.key]: event.target.value };
-                      return {
-                        ...current,
-                        parameters: mergeBuiltinParameters(current.nodeType, nextBuiltinParameters, extraParameters),
-                      };
-                    })
-                  }
-                  placeholder={field.placeholder}
-                  aria-label={`节点 ${index + 1} ${field.label}`}
-                />
-              </div>
-            ))}
+            {builtin.fields.map((field) => {
+              const fieldValue =
+                typeof builtinParameters[field.key] === "string"
+                  ? String(builtinParameters[field.key])
+                  : "";
+
+              if (builtin.value === "switch_project" && field.key === "managedProjectId") {
+                return (
+                  <div key={field.key} className="grid gap-1">
+                    <Label>{field.label}</Label>
+                    <select
+                      className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                      value={fieldValue}
+                      onChange={(event) =>
+                        updateBuiltinField(field.key, event.target.value)
+                      }
+                      aria-label={`节点 ${index + 1} ${field.label}`}
+                    >
+                      <option value="">{field.placeholder}</option>
+                      {managedProjects.map((project) => (
+                        <option key={project.id} value={String(project.id)}>
+                          {project.name}
+                        </option>
+                      ))}
+                    </select>
+                    {selectedManagedProject ? (
+                      <p className="text-xs text-muted-foreground">
+                        {selectedManagedProject.pathWithNamespace} ·{" "}
+                        {selectedManagedProject.repoPath}
+                      </p>
+                    ) : managedProjects.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        暂无可选托管项目，请先在“托管项目”里配置。
+                      </p>
+                    ) : null}
+                  </div>
+                );
+              }
+
+              return (
+                <div key={field.key} className="grid gap-1">
+                  <Label>{field.label}</Label>
+                  <Input
+                    value={fieldValue}
+                    onChange={(event) => updateBuiltinField(field.key, event.target.value)}
+                    placeholder={field.placeholder}
+                    aria-label={`节点 ${index + 1} ${field.label}`}
+                  />
+                </div>
+              );
+            })}
           </div>
 
           <div className="grid gap-1">
@@ -313,7 +404,11 @@ function PipelineNodeCard({
                       : {};
                   return {
                     ...current,
-                    parameters: mergeBuiltinParameters(current.nodeType, builtinParameters, nextExtraParameters),
+                    parameters: mergeBuiltinParameters(
+                      current.nodeType,
+                      builtinParameters,
+                      nextExtraParameters
+                    ),
                   };
                 })
               }
@@ -326,15 +421,15 @@ function PipelineNodeCard({
           <Label>参数</Label>
           <StructuredJsonEditor
             value={node.parameters}
-              onChange={(nextValue) =>
-                onUpdate(index, (current) => ({
-                  ...current,
-                  parameters:
-                    nextValue && typeof nextValue === "object" && !Array.isArray(nextValue)
-                      ? (nextValue as Record<string, unknown>)
-                      : {},
-                }))
-              }
+            onChange={(nextValue) =>
+              onUpdate(index, (current) => ({
+                ...current,
+                parameters:
+                  nextValue && typeof nextValue === "object" && !Array.isArray(nextValue)
+                    ? (nextValue as Record<string, unknown>)
+                    : {},
+              }))
+            }
             testId={`pipeline-node-structured-editor-${index}`}
           />
         </div>
@@ -345,12 +440,14 @@ function PipelineNodeCard({
 
 function PipelineNodesSection({
   nodes,
+  managedProjects,
   onAdd,
   onUpdate,
   onMove,
   onRemove,
 }: {
   nodes: NodeDraft[];
+  managedProjects?: ManagedProject[];
   onAdd: () => void;
   onUpdate: (index: number, updater: (node: NodeDraft) => NodeDraft) => void;
   onMove: (index: number, direction: -1 | 1) => void;
@@ -361,7 +458,9 @@ function PipelineNodesSection({
       <div className="flex items-center justify-between">
         <div className="space-y-1">
           <h3 className="text-base font-semibold">节点</h3>
-          <p className="text-sm text-muted-foreground">按顺序定义本地 Git 节点和远端 GitLab 节点。</p>
+          <p className="text-sm text-muted-foreground">
+            按顺序定义项目切换、本地 Git 和远端 GitLab 节点。
+          </p>
         </div>
         <Button type="button" size="sm" variant="secondary" onClick={onAdd}>
           添加节点
@@ -372,6 +471,7 @@ function PipelineNodesSection({
           key={node.id}
           node={node}
           index={index}
+          managedProjects={managedProjects}
           onUpdate={onUpdate}
           onMove={onMove}
           onRemove={onRemove}
@@ -384,23 +484,25 @@ function PipelineNodesSection({
 
 function PipelineSchedulesSection({
   schedules,
-  projectGroups,
   scheduleRuntimeSnapshots,
   onAdd,
   onUpdate,
   onRemove,
 }: {
   schedules: ScheduleDraft[];
-  projectGroups: ProjectGroup[];
   scheduleRuntimeSnapshots?: PipelineScheduleRuntimeSnapshot[];
   onAdd: () => void;
   onUpdate: (index: number, updater: (schedule: ScheduleDraft) => ScheduleDraft) => void;
   onRemove: (index: number) => void;
 }) {
-  const scheduleRuntimeById = new Map((scheduleRuntimeSnapshots ?? []).map((snapshot) => [snapshot.scheduleId, snapshot]));
+  const scheduleRuntimeById = new Map(
+    (scheduleRuntimeSnapshots ?? []).map((snapshot) => [snapshot.scheduleId, snapshot])
+  );
 
   function getScheduleRuntimeSnapshot(schedule: ScheduleDraft) {
-    return schedule.scheduleId !== null ? (scheduleRuntimeById.get(schedule.scheduleId) ?? null) : null;
+    return schedule.scheduleId !== null
+      ? (scheduleRuntimeById.get(schedule.scheduleId) ?? null)
+      : null;
   }
 
   return (
@@ -408,7 +510,9 @@ function PipelineSchedulesSection({
       <div className="flex items-center justify-between">
         <div className="space-y-1">
           <h3 className="text-base font-semibold">调度</h3>
-          <p className="text-sm text-muted-foreground">为流水线绑定目标项目组和调度策略。</p>
+          <p className="text-sm text-muted-foreground">
+            配置 Cron、策略和调度变量；执行目标由节点里的项目切换决定。
+          </p>
         </div>
         <Button type="button" size="sm" variant="secondary" onClick={onAdd}>
           添加调度
@@ -436,26 +540,15 @@ function PipelineSchedulesSection({
             </div>
             <div className="grid gap-3 md:grid-cols-2">
               <div className="grid gap-1">
-                <Label>目标项目组</Label>
-                <select
-                  className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-                  value={schedule.projectGroupId}
-                  onChange={(event) => onUpdate(index, (current) => ({ ...current, projectGroupId: event.target.value }))}
-                  aria-label={`调度 ${index + 1} 目标项目组`}
-                >
-                  <option value="">请选择项目组</option>
-                  {projectGroups.map((group) => (
-                    <option key={group.id} value={group.id}>
-                      {group.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid gap-1">
                 <Label>Cron</Label>
                 <Input
                   value={schedule.cronExpr}
-                  onChange={(event) => onUpdate(index, (current) => ({ ...current, cronExpr: event.target.value }))}
+                  onChange={(event) =>
+                    onUpdate(index, (current) => ({
+                      ...current,
+                      cronExpr: event.target.value,
+                    }))
+                  }
                   placeholder="0 9 * * 1-5"
                   aria-label={`调度 ${index + 1} Cron`}
                 />
@@ -464,9 +557,28 @@ function PipelineSchedulesSection({
                 <Label>时区</Label>
                 <Input
                   value={schedule.timezone}
-                  onChange={(event) => onUpdate(index, (current) => ({ ...current, timezone: event.target.value }))}
+                  onChange={(event) =>
+                    onUpdate(index, (current) => ({
+                      ...current,
+                      timezone: event.target.value,
+                    }))
+                  }
                   placeholder="Asia/Shanghai"
                   aria-label={`调度 ${index + 1} 时区`}
+                />
+              </div>
+              <div className="grid gap-1">
+                <Label>引用分支</Label>
+                <Input
+                  value={schedule.branch}
+                  onChange={(event) =>
+                    onUpdate(index, (current) => ({
+                      ...current,
+                      branch: event.target.value,
+                    }))
+                  }
+                  placeholder="留空表示按节点配置执行"
+                  aria-label={`调度 ${index + 1} 引用分支`}
                 />
               </div>
               <div className="grid gap-1">
@@ -474,7 +586,12 @@ function PipelineSchedulesSection({
                 <select
                   className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                   value={schedule.policy}
-                  onChange={(event) => onUpdate(index, (current) => ({ ...current, policy: event.target.value }))}
+                  onChange={(event) =>
+                    onUpdate(index, (current) => ({
+                      ...current,
+                      policy: event.target.value,
+                    }))
+                  }
                   aria-label={`调度 ${index + 1} 策略`}
                 >
                   {SCHEDULE_POLICY_OPTIONS.map((option) => (
@@ -486,48 +603,77 @@ function PipelineSchedulesSection({
               </div>
             </div>
 
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={schedule.enabled}
+                onCheckedChange={(value) =>
+                  onUpdate(index, (current) => ({
+                    ...current,
+                    enabled: Boolean(value),
+                  }))
+                }
+              />
+              启用此调度
+            </label>
+
             <div className="grid gap-1">
               <Label>调度变量</Label>
               <StructuredJsonEditor
                 value={schedule.variables}
-              onChange={(nextValue) =>
-                onUpdate(index, (current) => ({
-                  ...current,
-                  variables:
-                    nextValue && typeof nextValue === "object" && !Array.isArray(nextValue)
-                      ? (nextValue as Record<string, unknown>)
-                      : {},
-                }))
-              }
-              testId={`pipeline-schedule-variables-editor-${index}`}
-            />
-          </div>
+                onChange={(nextValue) =>
+                  onUpdate(index, (current) => ({
+                    ...current,
+                    variables:
+                      nextValue && typeof nextValue === "object" && !Array.isArray(nextValue)
+                        ? (nextValue as Record<string, unknown>)
+                        : {},
+                  }))
+                }
+                testId={`pipeline-schedule-variables-editor-${index}`}
+              />
+            </div>
 
             {schedule.scheduleId !== null ? (
-              <div data-testid="pipeline-schedule-runtime-feedback" className="grid gap-2 rounded-md border border-border bg-background p-3 text-xs">
+              <div
+                data-testid="pipeline-schedule-runtime-feedback"
+                className="grid gap-2 rounded-md border border-border bg-background p-3 text-xs"
+              >
                 <div className="grid gap-2 md:grid-cols-3">
                   <div className="grid gap-1">
                     <span className="text-muted-foreground">下一次触发</span>
                     <span className="font-mono">
-                      {getScheduleRuntimeSnapshot(schedule)?.nextTriggerAt ?? (schedule.enabled ? "-" : "已禁用")}
+                      {getScheduleRuntimeSnapshot(schedule)?.nextTriggerAt ??
+                        (schedule.enabled ? "-" : "已禁用")}
                     </span>
                   </div>
                   <div className="grid gap-1">
                     <span className="text-muted-foreground">当前状态</span>
-                    <span>{scheduleRuntimeStateLabel(getScheduleRuntimeSnapshot(schedule), schedule.enabled)}</span>
+                    <span>
+                      {scheduleRuntimeStateLabel(
+                        getScheduleRuntimeSnapshot(schedule),
+                        schedule.enabled
+                      )}
+                    </span>
                   </div>
                   <div className="grid gap-1">
                     <span className="text-muted-foreground">最近更新</span>
                     <span className="font-mono">
                       {getScheduleRuntimeSnapshot(schedule)?.lastDecisionAt
-                        ? formatDateTime(getScheduleRuntimeSnapshot(schedule)?.lastDecisionAt ?? null)
+                        ? formatDateTime(
+                            getScheduleRuntimeSnapshot(schedule)?.lastDecisionAt ?? null
+                          )
                         : "-"}
                     </span>
                   </div>
                 </div>
                 <div className="grid gap-1">
                   <span className="text-muted-foreground">说明</span>
-                  <span>{scheduleRuntimeMessage(getScheduleRuntimeSnapshot(schedule), schedule.enabled)}</span>
+                  <span>
+                    {scheduleRuntimeMessage(
+                      getScheduleRuntimeSnapshot(schedule),
+                      schedule.enabled
+                    )}
+                  </span>
                 </div>
               </div>
             ) : null}
@@ -538,13 +684,19 @@ function PipelineSchedulesSection({
   );
 }
 
-export function PipelineDraftForm({
-  draft,
-  projectGroups,
-  scheduleRuntimeSnapshots,
-  onChange,
-}: PipelineDraftFormProps) {
-  function updateDraft(next: PipelineDraft, { syncVariables = true }: { syncVariables?: boolean } = {}) {
+export function PipelineDraftForm(props: PipelineDraftFormProps) {
+  const {
+    draft,
+    managedProjects = [],
+    projectGroups: _projectGroups,
+    scheduleRuntimeSnapshots,
+    onChange,
+  } = props;
+
+  function updateDraft(
+    next: PipelineDraft,
+    { syncVariables = true }: { syncVariables?: boolean } = {}
+  ) {
     if (!syncVariables) {
       onChange(next);
       return;
@@ -559,7 +711,9 @@ export function PipelineDraftForm({
   function updateNode(index: number, updater: (node: NodeDraft) => NodeDraft) {
     updateDraft({
       ...draft,
-      nodes: draft.nodes.map((node, nodeIndex) => (nodeIndex === index ? updater(node) : node)),
+      nodes: draft.nodes.map((node, nodeIndex) =>
+        nodeIndex === index ? updater(node) : node
+      ),
     });
   }
 
@@ -596,7 +750,10 @@ export function PipelineDraftForm({
     );
   }
 
-  function updateVariableRow(index: number, updater: (row: VariableDraft) => VariableDraft) {
+  function updateVariableRow(
+    index: number,
+    updater: (row: VariableDraft) => VariableDraft
+  ) {
     updateDraft(
       {
         ...draft,
@@ -622,13 +779,16 @@ export function PipelineDraftForm({
     updateDraft(
       {
         ...draft,
-        schedules: [...draft.schedules, createScheduleDraft(projectGroups[0]?.id ?? null)],
+        schedules: [...draft.schedules, createScheduleDraft()],
       },
       { syncVariables: false }
     );
   }
 
-  function updateSchedule(index: number, updater: (schedule: ScheduleDraft) => ScheduleDraft) {
+  function updateSchedule(
+    index: number,
+    updater: (schedule: ScheduleDraft) => ScheduleDraft
+  ) {
     updateDraft(
       {
         ...draft,
@@ -659,10 +819,16 @@ export function PipelineDraftForm({
         onUpdate={updateVariableRow}
         onRemove={removeVariableRow}
       />
-      <PipelineNodesSection nodes={draft.nodes} onAdd={addNode} onUpdate={updateNode} onMove={moveNode} onRemove={removeNode} />
+      <PipelineNodesSection
+        nodes={draft.nodes}
+        managedProjects={managedProjects}
+        onAdd={addNode}
+        onUpdate={updateNode}
+        onMove={moveNode}
+        onRemove={removeNode}
+      />
       <PipelineSchedulesSection
         schedules={draft.schedules}
-        projectGroups={projectGroups}
         scheduleRuntimeSnapshots={scheduleRuntimeSnapshots}
         onAdd={addSchedule}
         onUpdate={updateSchedule}

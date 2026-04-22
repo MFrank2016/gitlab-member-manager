@@ -179,8 +179,10 @@ fn normalize_pipeline_schedule_inputs(
     let mut normalized = Vec::with_capacity(schedules.len());
 
     for schedule in schedules {
-        if schedule.project_group_id < 1 {
-            return Err(anyhow!("pipeline schedule project_group_id must be >= 1"));
+        if let Some(project_group_id) = schedule.project_group_id {
+            if project_group_id < 1 {
+                return Err(anyhow!("pipeline schedule project_group_id must be >= 1"));
+            }
         }
 
         let cron_expr = schedule.cron_expr.trim().to_string();
@@ -224,7 +226,7 @@ async fn ensure_pipeline_schedule_project_groups_exist(
 ) -> Result<()> {
     let project_group_ids = schedules
         .iter()
-        .map(|schedule| schedule.project_group_id)
+        .filter_map(|schedule| schedule.project_group_id)
         .collect::<BTreeSet<_>>();
 
     for project_group_id in project_group_ids {
@@ -345,8 +347,8 @@ struct PipelineRunSummaryRow {
     id: i64,
     pipeline_definition_id: i64,
     pipeline_definition_name: String,
-    project_group_id: i64,
-    project_group_name: String,
+    project_group_id: Option<i64>,
+    project_group_name: Option<String>,
     legacy_workflow_run_id: Option<i64>,
     source_pipeline_run_id: Option<i64>,
     trigger_kind: String,
@@ -2048,7 +2050,7 @@ pub async fn list_pipeline_runs(
          r.updated_at
        FROM pipeline_runs r
        INNER JOIN pipeline_definitions d ON d.id = r.pipeline_definition_id
-       INNER JOIN project_groups g ON g.id = r.project_group_id
+       LEFT JOIN project_groups g ON g.id = r.project_group_id
        LEFT JOIN pipeline_run_projects p ON p.pipeline_run_id = r.id
        WHERE (?1 IS NULL OR r.status = ?1)
          AND (?2 IS NULL OR r.pipeline_definition_id = ?2)
@@ -2167,7 +2169,7 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
          r.updated_at
        FROM pipeline_runs r
        INNER JOIN pipeline_definitions d ON d.id = r.pipeline_definition_id
-       INNER JOIN project_groups g ON g.id = r.project_group_id
+       LEFT JOIN project_groups g ON g.id = r.project_group_id
        LEFT JOIN pipeline_run_projects p ON p.pipeline_run_id = r.id
        WHERE r.id = ?1
        GROUP BY r.id"#,
@@ -3889,7 +3891,7 @@ mod tests {
         assert!(!listed.has_next_page);
         assert_eq!(listed.items.len(), 1);
         assert_eq!(listed.items[0].pipeline_definition_id, pipeline_a.id);
-        assert_eq!(listed.items[0].project_group_id, group_b.id);
+        assert_eq!(listed.items[0].project_group_id, Some(group_b.id));
         assert_eq!(listed.items[0].status, "running");
     }
 
@@ -4168,7 +4170,7 @@ mod tests {
             ],
             vec![
                 PipelineScheduleInput {
-                    project_group_id: release_group.id,
+                    project_group_id: Some(release_group.id),
                     cron_expr: "0 9 * * 1-5".to_string(),
                     timezone: "Asia/Shanghai".to_string(),
                     branch: Some("main".to_string()),
@@ -4179,7 +4181,7 @@ mod tests {
                     }),
                 },
                 PipelineScheduleInput {
-                    project_group_id: staging_group.id,
+                    project_group_id: Some(staging_group.id),
                     cron_expr: "30 18 * * 5".to_string(),
                     timezone: "UTC".to_string(),
                     branch: Some("release".to_string()),
@@ -4294,7 +4296,7 @@ mod tests {
                 parameters: serde_json::json!({ "ref": "${target_branch}" }),
             }],
             vec![PipelineScheduleInput {
-                project_group_id: schedule_group.id,
+                project_group_id: Some(schedule_group.id),
                 cron_expr: "0 9 * * 1-5".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 branch: Some("main".to_string()),
@@ -4604,7 +4606,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
-                project_group_id: schedule_group.id,
+                project_group_id: Some(schedule_group.id),
                 cron_expr: "0 9 * * *".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 branch: Some("main".to_string()),
@@ -4667,7 +4669,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
-                project_group_id: schedule_group.id,
+                project_group_id: Some(schedule_group.id),
                 cron_expr: "   ".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 branch: Some("main".to_string()),
@@ -4704,7 +4706,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
-                project_group_id: schedule_group.id,
+                project_group_id: Some(schedule_group.id),
                 cron_expr: "0 9 * * *".to_string(),
                 timezone: "   ".to_string(),
                 branch: Some("main".to_string()),
@@ -4741,7 +4743,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
-                project_group_id: schedule_group.id,
+                project_group_id: Some(schedule_group.id),
                 cron_expr: "0 9 * * *".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 branch: Some("main".to_string()),
@@ -4775,7 +4777,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
-                project_group_id: 999_999,
+                project_group_id: Some(999_999),
                 cron_expr: "0 9 * * *".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 branch: Some("main".to_string()),
@@ -4809,7 +4811,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
-                project_group_id: 0,
+                project_group_id: Some(0),
                 cron_expr: "0 9 * * *".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 branch: Some("main".to_string()),
@@ -4830,7 +4832,6 @@ mod tests {
     #[test]
     fn pipeline_definition_schedule_input_defaults_enabled_to_true() {
         let schedule: PipelineScheduleInput = serde_json::from_value(serde_json::json!({
-            "projectGroupId": 1,
             "cronExpr": "0 9 * * *",
             "timezone": "Asia/Shanghai",
             "policy": "skip_if_running",
@@ -4839,20 +4840,20 @@ mod tests {
         .expect("deserialize pipeline schedule input");
 
         assert!(schedule.enabled);
+        assert_eq!(schedule.project_group_id, None);
     }
 
     #[test]
-    fn pipeline_definition_schedule_input_requires_project_group_id() {
-        let result: serde_json::Result<PipelineScheduleInput> =
-            serde_json::from_value(serde_json::json!({
-                "cronExpr": "0 9 * * *",
-                "timezone": "Asia/Shanghai",
-                "policy": "skip_if_running",
-                "variables": {}
-            }));
+    fn pipeline_definition_schedule_input_allows_missing_project_group_id() {
+        let schedule: PipelineScheduleInput = serde_json::from_value(serde_json::json!({
+            "cronExpr": "0 9 * * *",
+            "timezone": "Asia/Shanghai",
+            "policy": "skip_if_running",
+            "variables": {}
+        }))
+        .expect("deserialize pipeline schedule input without project group");
 
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("projectGroupId"));
+        assert_eq!(schedule.project_group_id, None);
     }
 
     #[tokio::test]

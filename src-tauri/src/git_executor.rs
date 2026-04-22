@@ -76,6 +76,10 @@ impl LocalExecutionContext {
         }
     }
 
+    pub(crate) fn from_working_dir(working_dir: PathBuf) -> Self {
+        Self { working_dir }
+    }
+
     pub(crate) fn working_dir(&self) -> &Path {
         &self.working_dir
     }
@@ -108,12 +112,17 @@ fn read_optional_string_param(parameters: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn resolve_target_working_path(parameters: &Value, working_dir: &Path) -> Result<PathBuf> {
+fn resolve_target_working_path(parameters: &Value, working_dir: Option<&Path>) -> Result<PathBuf> {
     let rendered_path = read_required_string_param(parameters, "path")?;
     let candidate = PathBuf::from(rendered_path);
     if candidate.is_absolute() {
         return Ok(candidate);
     }
+    let Some(working_dir) = working_dir else {
+        return Err(anyhow!(
+            "current working path is not available for relative resolution"
+        ));
+    };
     if !working_dir.is_dir() {
         return Err(anyhow!(
             "current working path is not available for relative resolution: {}",
@@ -126,8 +135,8 @@ fn resolve_target_working_path(parameters: &Value, working_dir: &Path) -> Result
 pub(crate) fn build_execution_step_operation(
     step_type: &str,
     rendered_parameters: &Value,
-    project: &ManagedProject,
-    working_dir: &Path,
+    project: Option<&ManagedProject>,
+    working_dir: Option<&Path>,
 ) -> Result<StepOperation> {
     match step_type {
         "set_working_path" => Ok(StepOperation::SetWorkingPath {
@@ -136,20 +145,28 @@ pub(crate) fn build_execution_step_operation(
         "checkout_branch" => Ok(StepOperation::CheckoutBranch {
             branch: read_required_string_param(rendered_parameters, "branch")?,
         }),
-        "git_pull" => Ok(StepOperation::GitPull {
+        "git_pull" => {
+            let project = project
+                .ok_or_else(|| anyhow!("active managed project is required for step type: git_pull"))?;
+            Ok(StepOperation::GitPull {
             remote: read_optional_string_param(rendered_parameters, "remote")
                 .unwrap_or_else(|| project.default_remote.clone()),
             branch: read_optional_string_param(rendered_parameters, "branch")
                 .unwrap_or_else(|| project.default_branch.clone()),
-        }),
+        })
+        }
         "git_merge" => Ok(StepOperation::GitMerge {
             from: read_required_string_param(rendered_parameters, "from")?,
         }),
-        "git_push" => Ok(StepOperation::GitPush {
+        "git_push" => {
+            let project = project
+                .ok_or_else(|| anyhow!("active managed project is required for step type: git_push"))?;
+            Ok(StepOperation::GitPush {
             remote: read_optional_string_param(rendered_parameters, "remote")
                 .unwrap_or_else(|| project.default_remote.clone()),
             branch: read_optional_string_param(rendered_parameters, "branch"),
-        }),
+        })
+        }
         other => Err(anyhow!("unsupported step type: {other}")),
     }
 }

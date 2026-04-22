@@ -322,6 +322,185 @@ describe("pipeline definition upgrade smoke", () => {
     expect(screen.getByText("调度")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /添加调度/i })).toBeInTheDocument();
   });
+
+  it("jumps to the pipeline run monitor after starting a run from the definition list", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "get_gitlab_config") return null;
+      if (cmd === "list_workflow_definitions") return [];
+      if (cmd === "list_pipeline_definitions") {
+        return [
+          {
+            id: 201,
+            name: "switch-project-pipeline",
+            description: "manual run jump coverage",
+            enabled: true,
+            maxConcurrencyDefault: 2,
+            legacyWorkflowDefinitionId: null,
+            createdAt: "2026-04-22T00:00:00Z",
+            updatedAt: "2026-04-22T00:00:00Z",
+            variablesCount: 1,
+            nodesCount: 1,
+            schedulesCount: 0,
+          },
+        ];
+      }
+      if (cmd === "list_project_groups") return [];
+      if (cmd === "list_managed_projects") {
+        return [
+          {
+            id: 11,
+            gitlabProjectId: 1011,
+            name: "web-service",
+            pathWithNamespace: "team/web-service",
+            repoPath: "D:/repos/web-service",
+            defaultBranch: "main",
+            defaultRemote: "origin",
+            enabled: true,
+            createdAt: "2026-04-22T00:00:00Z",
+            updatedAt: "2026-04-22T00:00:00Z",
+          },
+        ];
+      }
+      if (cmd === "get_pipeline_definition_detail") {
+        expect(args).toEqual({ id: 201 });
+        return {
+          id: 201,
+          name: "switch-project-pipeline",
+          description: "manual run jump coverage",
+          enabled: true,
+          maxConcurrencyDefault: 2,
+          legacyWorkflowDefinitionId: null,
+          createdAt: "2026-04-22T00:00:00Z",
+          updatedAt: "2026-04-22T00:00:00Z",
+          variables: [
+            {
+              variableOrder: 0,
+              key: "source_branch",
+              label: "Source Branch",
+              defaultValue: "release/1.2",
+              valueType: "string",
+              required: true,
+              options: [],
+            },
+          ],
+          nodes: [
+            {
+              nodeOrder: 0,
+              nodeType: "switch_project",
+              parameters: { managedProjectId: "11" },
+            },
+          ],
+          schedules: [],
+        };
+      }
+      if (cmd === "execute_pipeline_run") {
+        expect(args).toEqual({
+          request: {
+            pipelineDefinitionId: 201,
+            runParameters: {
+              source_branch: "release/1.3",
+            },
+            maxConcurrencyOverride: null,
+          },
+        });
+        return { pipelineRunId: 451 };
+      }
+      if (cmd === "list_pipeline_runs") {
+        return {
+          items: [
+            {
+              id: 451,
+              pipelineDefinitionId: 201,
+              pipelineDefinitionName: "switch-project-pipeline",
+              projectGroupId: null,
+              projectGroupName: null,
+              legacyWorkflowRunId: null,
+              sourcePipelineRunId: null,
+              triggerKind: "manual",
+              status: "pending",
+              runParameters: { source_branch: "release/1.3" },
+              maxConcurrency: 2,
+              projectsTotal: 1,
+              projectsQueued: 1,
+              projectsRunning: 0,
+              projectsSuccess: 0,
+              projectsFailed: 0,
+              projectsCancelled: 0,
+              projectsFailedPrecheck: 0,
+              startedAt: null,
+              finishedAt: null,
+              createdAt: "2026-04-22T00:00:00Z",
+              updatedAt: "2026-04-22T00:00:00Z",
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "get_pipeline_run_detail") {
+        expect(args).toEqual({ id: 451 });
+        return {
+          id: 451,
+          pipelineDefinitionId: 201,
+          pipelineDefinitionName: "switch-project-pipeline",
+          projectGroupId: null,
+          projectGroupName: null,
+          legacyWorkflowRunId: null,
+          sourcePipelineRunId: null,
+          triggerKind: "manual",
+          status: "pending",
+          runParameters: { source_branch: "release/1.3" },
+          maxConcurrency: 2,
+          projectsTotal: 1,
+          projectsQueued: 1,
+          projectsRunning: 0,
+          projectsSuccess: 0,
+          projectsFailed: 0,
+          projectsCancelled: 0,
+          projectsFailedPrecheck: 0,
+          startedAt: null,
+          finishedAt: null,
+          createdAt: "2026-04-22T00:00:00Z",
+          updatedAt: "2026-04-22T00:00:00Z",
+          projects: [
+            {
+              id: 5501,
+              managedProjectId: 11,
+              gitlabProjectId: 1011,
+              projectName: "web-service",
+              projectPathWithNamespace: "team/web-service",
+              repoPath: "D:/repos/web-service",
+              status: "queued",
+              summaryMessage: "queued",
+              startedAt: null,
+              finishedAt: null,
+              nodes: [],
+            },
+          ],
+        };
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByTitle("工作流定义"));
+    expect(await screen.findByRole("heading", { name: "流水线定义" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "立即运行" }));
+    const variableInput = await screen.findByLabelText("运行参数 Source Branch");
+    fireEvent.change(variableInput, {
+      target: { value: "release/1.3" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始运行" }));
+
+    expect(await screen.findByRole("heading", { name: "流水线运行" })).toBeInTheDocument();
+    expect(screen.getByText("项目组 ID（旧运行）")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "运行 #451" })).toBeInTheDocument();
+    expect(await screen.findAllByText("按步骤切换项目")).toHaveLength(2);
+  });
 });
 
 describe("pipeline schedule runtime feedback", () => {
@@ -359,6 +538,7 @@ describe("pipeline schedule runtime feedback", () => {
           },
         ];
       }
+      if (cmd === "list_managed_projects") return [];
       if (cmd === "get_pipeline_definition_detail") {
         expect(args).toEqual({ id: 91 });
         return {
@@ -469,6 +649,7 @@ describe("pipeline definition structured editor guardrails", () => {
         ];
       }
       if (cmd === "list_project_groups") return [projectGroup];
+      if (cmd === "list_managed_projects") return [];
       if (cmd === "get_pipeline_definition_detail") {
         expect(args).toEqual({ id: detail.id });
         return {
@@ -629,7 +810,6 @@ describe("pipeline definition structured editor guardrails", () => {
           id: 152,
           schedules: [
             expect.objectContaining({
-              projectGroupId: 7,
               variables: {
                 release_window: {
                   lane: "stable",
@@ -874,7 +1054,6 @@ describe("pipeline wrapper smoke", () => {
 	    await deletePipelineDefinition(11);
 	    const executeResult = await executePipelineRun({
 	      pipelineDefinitionId: 11,
-	      projectGroupId: 5,
 	      runParameters: {
 	        source_branch: "release",
 	      },
@@ -938,7 +1117,6 @@ describe("pipeline wrapper smoke", () => {
 	    expect(invokeMock).toHaveBeenCalledWith("execute_pipeline_run", {
 	      request: {
 	        pipelineDefinitionId: 11,
-	        projectGroupId: 5,
 	        runParameters: {
 	          source_branch: "release",
 	        },
@@ -1193,6 +1371,93 @@ describe("pipeline run monitor interactions", () => {
 
     expect(await screen.findByText("service-b 远端流水线失败")).toBeInTheDocument();
     expect(screen.getByText("service-b target pipeline ended with failed")).toBeInTheDocument();
+  });
+
+  it("renders a fallback label when a pipeline run has no project group metadata", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_runs") {
+        return {
+          items: [
+            {
+              id: 451,
+              pipelineDefinitionId: 29,
+              pipelineDefinitionName: "switch-project-pipeline",
+              projectGroupId: null,
+              projectGroupName: null,
+              legacyWorkflowRunId: null,
+              sourcePipelineRunId: null,
+              triggerKind: "schedule",
+              status: "completed",
+              runParameters: {},
+              maxConcurrency: 1,
+              projectsTotal: 1,
+              projectsQueued: 0,
+              projectsRunning: 0,
+              projectsSuccess: 1,
+              projectsFailed: 0,
+              projectsCancelled: 0,
+              projectsFailedPrecheck: 0,
+              startedAt: "2026-04-18T00:00:00Z",
+              finishedAt: "2026-04-18T00:00:10Z",
+              createdAt: "2026-04-18T00:00:00Z",
+              updatedAt: "2026-04-18T00:00:10Z",
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "get_pipeline_run_detail") {
+        expect(args).toEqual({ id: 451 });
+        return {
+          id: 451,
+          pipelineDefinitionId: 29,
+          pipelineDefinitionName: "switch-project-pipeline",
+          projectGroupId: null,
+          projectGroupName: null,
+          legacyWorkflowRunId: null,
+          sourcePipelineRunId: null,
+          triggerKind: "schedule",
+          status: "completed",
+          runParameters: {},
+          maxConcurrency: 1,
+          projectsTotal: 1,
+          projectsQueued: 0,
+          projectsRunning: 0,
+          projectsSuccess: 1,
+          projectsFailed: 0,
+          projectsCancelled: 0,
+          projectsFailedPrecheck: 0,
+          startedAt: "2026-04-18T00:00:00Z",
+          finishedAt: "2026-04-18T00:00:10Z",
+          createdAt: "2026-04-18T00:00:00Z",
+          updatedAt: "2026-04-18T00:00:10Z",
+          projects: [
+            {
+              id: 5501,
+              managedProjectId: 6601,
+              gitlabProjectId: 7601,
+              projectName: "service-a",
+              projectPathWithNamespace: "team/service-a",
+              repoPath: "D:/repos/service-a",
+              status: "success",
+              summaryMessage: "all nodes completed",
+              startedAt: "2026-04-18T00:00:00Z",
+              finishedAt: "2026-04-18T00:00:10Z",
+              nodes: [],
+            },
+          ],
+        };
+      }
+      return undefined;
+    });
+
+    render(<WorkflowRunsPage />);
+
+    expect(await screen.findAllByText("按步骤切换项目")).toHaveLength(2);
+    expect(await screen.findAllByText("switch-project-pipeline")).toHaveLength(2);
   });
 
   it("operator messaging: renders Chinese remote status labels in the run monitor", async () => {

@@ -25,6 +25,12 @@ type BuiltinNodeTypeDefinition = {
 
 export const BUILTIN_NODE_TYPES: BuiltinNodeTypeDefinition[] = [
   {
+    value: "switch_project",
+    label: "切换项目",
+    fields: [{ key: "managedProjectId", label: "项目", placeholder: "请选择项目" }],
+    defaults: { managedProjectId: "" },
+  },
+  {
     value: "checkout_branch",
     label: "切换分支",
     fields: [{ key: "branch", label: "分支", placeholder: "${source_branch}" }],
@@ -51,13 +57,7 @@ export const BUILTIN_NODE_TYPES: BuiltinNodeTypeDefinition[] = [
   {
     value: "set_working_path",
     label: "设置执行路径",
-    fields: [
-      {
-        key: "path",
-        label: "目标路径",
-        placeholder: "${repo_root}/subdir 或 ../another-repo",
-      },
-    ],
+    fields: [{ key: "path", label: "目标路径", placeholder: "${repo_root}/subdir 或 ../another-repo" }],
     defaults: { path: "" },
   },
   {
@@ -117,7 +117,7 @@ export type NodeDraft = {
 export type ScheduleDraft = {
   id: string;
   scheduleId: number | null;
-  projectGroupId: string;
+  projectGroupId?: string;
   cronExpr: string;
   timezone: string;
   branch: string;
@@ -247,12 +247,12 @@ export function createVariableDraft(
   };
 }
 
-export function createScheduleDraft(projectGroupId?: number | null, overrides?: Partial<ScheduleDraft>): ScheduleDraft {
+export function createScheduleDraft(overrides?: Partial<ScheduleDraft>): ScheduleDraft {
   const variables = overrides?.variables ?? {};
   return {
     id: nextScheduleDraftId(),
     scheduleId: overrides?.scheduleId ?? null,
-    projectGroupId: overrides?.projectGroupId ?? (projectGroupId ? String(projectGroupId) : ""),
+    projectGroupId: overrides?.projectGroupId,
     cronExpr: overrides?.cronExpr ?? "0 9 * * 1-5",
     timezone: overrides?.timezone ?? "Asia/Shanghai",
     branch: overrides?.branch ?? "",
@@ -295,11 +295,7 @@ export function ensureVariableRows(nodes: NodeDraft[], variableRows: VariableDra
     }
     return row.source !== "inferred";
   });
-  const existingKeys = new Set(
-    retainedRows
-      .map((row) => row.key.trim())
-      .filter((key) => key.length > 0)
-  );
+  const existingKeys = new Set(retainedRows.map((row) => row.key.trim()).filter((key) => key.length > 0));
 
   const appendedRows = Array.from(referencedKeys)
     .filter((key) => !existingKeys.has(key))
@@ -338,9 +334,9 @@ export function toDraftFromDetail(detail: PipelineDefinitionDetail): PipelineDra
   const schedules = [...detail.schedules]
     .sort((a, b) => a.scheduleOrder - b.scheduleOrder)
     .map((schedule) =>
-      createScheduleDraft(schedule.projectGroupId, {
+      createScheduleDraft({
         scheduleId: schedule.id,
-        projectGroupId: schedule.projectGroupId ? String(schedule.projectGroupId) : "",
+        projectGroupId: schedule.projectGroupId ? String(schedule.projectGroupId) : undefined,
         cronExpr: schedule.cronExpr,
         timezone: schedule.timezone,
         branch: schedule.branch ?? "",
@@ -424,11 +420,6 @@ function buildNodePayloads(nodes: NodeDraft[]): PipelineNodeInput[] {
 
 function buildSchedulePayloads(schedules: ScheduleDraft[]) {
   return schedules.map((schedule, index) => {
-    const projectGroupId = Number(schedule.projectGroupId);
-    if (!Number.isInteger(projectGroupId) || projectGroupId < 1) {
-      throw new Error(`调度 ${index + 1} 的目标项目组不能为空。`);
-    }
-
     const cronExpr = schedule.cronExpr.trim();
     if (!cronExpr) {
       throw new Error(`调度 ${index + 1} 的 Cron 表达式不能为空。`);
@@ -450,7 +441,6 @@ function buildSchedulePayloads(schedules: ScheduleDraft[]) {
 
     const branch = schedule.branch.trim();
     return {
-      projectGroupId,
       cronExpr,
       timezone,
       branch: branch || null,
@@ -538,11 +528,17 @@ export function scheduleRuntimeMessage(
   snapshot: PipelineScheduleRuntimeSnapshot | null | undefined,
   enabled: boolean
 ) {
-  if (snapshot?.lastDecisionMessageZh) {
-    return snapshot.lastDecisionMessageZh;
+  if (!enabled) return "当前调度已禁用。";
+  if (!snapshot) return "暂无调度运行反馈。";
+
+  switch (snapshot.lastDecision) {
+    case "started":
+      return snapshot.lastDecisionMessageZh ?? "最近一次调度已经成功触发。";
+    case "queued":
+      return snapshot.lastDecisionMessageZh ?? "最近一次调度已进入排队。";
+    case "skipped":
+      return snapshot.lastDecisionMessageZh ?? "最近一次调度被跳过。";
+    default:
+      return snapshot.lastDecisionMessageZh ?? "调度处于空闲状态。";
   }
-  if (!enabled) {
-    return "调度已禁用，不会自动触发。";
-  }
-  return "暂无运行时反馈，可点击“刷新调度状态”查看最新结果。";
 }

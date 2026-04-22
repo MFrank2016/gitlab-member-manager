@@ -21,7 +21,7 @@ const SCHEDULER_TICK_INTERVAL: Duration = Duration::from_secs(30);
 struct QueuedScheduleRequest {
     schedule_id: i64,
     pipeline_definition_id: i64,
-    project_group_id: i64,
+    project_group_id: Option<i64>,
     run_parameters: Value,
 }
 
@@ -36,7 +36,7 @@ struct SchedulerState {
 struct LoadedPipelineSchedule {
     schedule_id: i64,
     pipeline_definition_id: i64,
-    project_group_id: i64,
+    project_group_id: Option<i64>,
     cron_expr: String,
     timezone: String,
     policy: String,
@@ -80,7 +80,7 @@ pub(crate) struct PipelineSchedulerRuntime {
 }
 
 async fn load_enabled_pipeline_schedules(pool: &SqlitePool) -> Result<Vec<LoadedPipelineSchedule>> {
-    let rows = sqlx::query_as::<_, (i64, i64, i64, String, String, String, String)>(
+    let rows = sqlx::query_as::<_, (i64, i64, Option<i64>, String, String, String, String)>(
         r#"SELECT
              s.id,
              s.pipeline_definition_id,
@@ -93,7 +93,6 @@ async fn load_enabled_pipeline_schedules(pool: &SqlitePool) -> Result<Vec<Loaded
            INNER JOIN pipeline_definitions d ON d.id = s.pipeline_definition_id
            WHERE d.enabled = 1
              AND s.enabled = 1
-             AND s.project_group_id IS NOT NULL
            ORDER BY s.id ASC"#,
     )
     .fetch_all(pool)
@@ -451,6 +450,7 @@ pub(crate) fn spawn_pipeline_scheduler(pool: SqlitePool, runtime: PipelineSchedu
 mod tests {
     use super::*;
     use crate::db;
+    use crate::git_executor::test_support::make_temp_test_dir;
     use crate::models::{PipelineNodeInput, PipelineScheduleInput};
     use chrono::TimeZone;
 
@@ -474,7 +474,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             }],
             vec![PipelineScheduleInput {
-                project_group_id: project_group.id,
+                project_group_id: Some(project_group.id),
                 cron_expr: "0 9 14 4 *".to_string(),
                 timezone: "UTC".to_string(),
                 branch: Some("main".to_string()),
@@ -580,6 +580,78 @@ mod tests {
         assert_eq!(summary.queued_runs, 0);
         assert_eq!(summary.skipped_runs, 0);
         assert_eq!(count_schedule_runs(&pool, pipeline_definition_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn pipeline_schedule_runtime_without_project_group_starts_switch_project_pipeline() {
+        let pool = db::setup_test_pool().await;
+        let repo_root = make_temp_test_dir("scheduler_switch_project_repo");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+
+        let managed = db::create_managed_project(
+            &pool,
+            99001,
+            "scheduler-switch-project".to_string(),
+            "team/scheduler-switch-project".to_string(),
+            repo_root.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create managed project");
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "scheduler-switch-project-pipeline".to_string(),
+            "scheduler switch project".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "switch_project".to_string(),
+                parameters: serde_json::json!({
+                    "managedProjectId": managed.id.to_string()
+                }),
+            }],
+            vec![PipelineScheduleInput {
+                project_group_id: None,
+                cron_expr: "0 9 14 4 *".to_string(),
+                timezone: "UTC".to_string(),
+                branch: None,
+                enabled: true,
+                policy: "skip_if_running".to_string(),
+                variables: serde_json::json!({}),
+            }],
+        )
+        .await
+        .expect("create switch_project schedule pipeline");
+
+        let mut state = SchedulerState::default();
+        let summary = run_scheduler_tick(
+            &pool,
+            &mut state,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 30)
+                .single()
+                .expect("construct scheduler tick time"),
+        )
+        .await
+        .expect("run scheduler tick");
+
+        assert_eq!(summary.started_runs, 1);
+        assert_eq!(summary.queued_runs, 0);
+        assert_eq!(summary.skipped_runs, 0);
+        assert_eq!(count_schedule_runs(&pool, pipeline.id).await, 1);
+
+        let run = db::list_pipeline_runs(&pool, crate::models::PipelineRunListQuery::default())
+            .await
+            .expect("list pipeline runs");
+        let scheduled_run = run
+            .items
+            .into_iter()
+            .find(|item| item.pipeline_definition_id == pipeline.id)
+            .expect("find scheduled switch_project run");
+        assert_eq!(scheduled_run.project_group_id, None);
     }
 
     #[tokio::test]

@@ -120,12 +120,12 @@ export type PipelineNode = {
 };
 
 export type PipelineScheduleInput = {
-  projectGroupId: number;
   cronExpr: string;
   timezone: string;
   branch?: string | null;
   enabled?: boolean;
   policy: string;
+  projectGroupId?: number | null;
   variables?: unknown;
 };
 
@@ -251,8 +251,8 @@ export type PipelineRunListItem = {
   id: number;
   pipelineDefinitionId: number;
   pipelineDefinitionName: string;
-  projectGroupId: number;
-  projectGroupName: string;
+  projectGroupId?: number | null;
+  projectGroupName?: string | null;
   legacyWorkflowRunId?: number | null;
   sourcePipelineRunId?: number | null;
   triggerKind: string;
@@ -335,7 +335,7 @@ export type WorkflowRunRetryFailedRequest = {
 
 export type PipelineRunExecuteRequest = {
   pipelineDefinitionId: number;
-  projectGroupId: number;
+  projectGroupId?: number | null;
   runParameters?: Record<string, unknown>;
   maxConcurrencyOverride?: number | null;
 };

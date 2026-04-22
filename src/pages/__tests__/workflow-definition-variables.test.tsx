@@ -28,6 +28,49 @@ const projectGroups = [
   },
 ];
 
+const managedProjects = [
+  {
+    id: 11,
+    gitlabProjectId: 1011,
+    name: "web-service",
+    pathWithNamespace: "team/web-service",
+    repoPath: "D:/repos/web-service",
+    defaultBranch: "main",
+    defaultRemote: "origin",
+    enabled: true,
+    createdAt: "2026-04-14T00:00:00Z",
+    updatedAt: "2026-04-14T00:00:00Z",
+  },
+  {
+    id: 12,
+    gitlabProjectId: 1012,
+    name: "worker-service",
+    pathWithNamespace: "team/worker-service",
+    repoPath: "D:/repos/worker-service",
+    defaultBranch: "main",
+    defaultRemote: "origin",
+    enabled: true,
+    createdAt: "2026-04-14T00:00:00Z",
+    updatedAt: "2026-04-14T00:00:00Z",
+  },
+];
+
+function getCreateTrigger() {
+  return screen.getByRole("button", { name: "新建流水线" });
+}
+
+function getCreateSubmit() {
+  return screen.getByRole("button", { name: /^创建$/ });
+}
+
+function getPipelineNameInput() {
+  const input = document.getElementById("pipeline-name-input");
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error("pipeline-name-input not found");
+  }
+  return input;
+}
+
 describe("pipeline definition editor", () => {
   beforeEach(() => {
     invokeMock.mockReset();
@@ -54,6 +97,38 @@ describe("pipeline definition editor", () => {
         ];
       }
       if (cmd === "list_project_groups") return projectGroups;
+      if (cmd === "list_managed_projects") return managedProjects;
+      if (cmd === "get_pipeline_definition_detail") {
+        return {
+          id: 201,
+          name: "legacy-release-pipeline",
+          description: "migrated legacy workflow",
+          enabled: true,
+          maxConcurrencyDefault: 2,
+          legacyWorkflowDefinitionId: 91,
+          createdAt: "2026-04-14T00:00:00Z",
+          updatedAt: "2026-04-14T00:00:00Z",
+          variables: [
+            {
+              variableOrder: 0,
+              key: "source_branch",
+              label: "Source Branch",
+              defaultValue: "release/1.2",
+              valueType: "string",
+              required: true,
+              options: [],
+            },
+          ],
+          nodes: [
+            {
+              nodeOrder: 0,
+              nodeType: "switch_project",
+              parameters: { managedProjectId: "11" },
+            },
+          ],
+          schedules: [],
+        };
+      }
       if (cmd === "create_pipeline_definition") {
         return {
           id: 101,
@@ -69,6 +144,11 @@ describe("pipeline definition editor", () => {
           schedules: args?.schedules ?? [],
         };
       }
+      if (cmd === "execute_pipeline_run") {
+        return {
+          pipelineRunId: 301,
+        };
+      }
       return undefined;
     });
   });
@@ -79,7 +159,7 @@ describe("pipeline definition editor", () => {
     expect(await screen.findByText("legacy-release-pipeline")).toBeInTheDocument();
     expect(screen.getByText("迁移自工作流 #91")).toBeInTheDocument();
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建流水线" }));
+    fireEvent.click(await getCreateTrigger());
 
     expect(screen.getByText("基础信息")).toBeInTheDocument();
     expect(screen.getByText("变量")).toBeInTheDocument();
@@ -100,13 +180,10 @@ describe("pipeline definition editor", () => {
     const scheduleRows = await screen.findAllByTestId("pipeline-schedule-row");
     expect(scheduleRows).toHaveLength(1);
 
-    fireEvent.change(screen.getByLabelText("调度 1 目标项目组"), {
-      target: { value: "7" },
-    });
-    fireEvent.change(screen.getByLabelText("流水线名称"), {
+    fireEvent.change(getPipelineNameInput(), {
       target: { value: "release-pipeline" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /^创建$/ }));
+    fireEvent.click(getCreateSubmit());
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith(
@@ -144,7 +221,6 @@ describe("pipeline definition editor", () => {
           ],
           schedules: [
             {
-              projectGroupId: 7,
               cronExpr: "0 9 * * 1-5",
               timezone: "Asia/Shanghai",
               branch: null,
@@ -161,13 +237,13 @@ describe("pipeline definition editor", () => {
   it("keeps create disabled until the draft is valid and shows a readiness summary", async () => {
     render(<WorkflowsPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建流水线" }));
+    fireEvent.click(await getCreateTrigger());
 
-    const createButton = screen.getByRole("button", { name: /^创建$/ });
+    const createButton = getCreateSubmit();
     expect(createButton).toBeDisabled();
     expect(screen.getByText("请先填写流水线名称。")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("流水线名称"), {
+    fireEvent.change(getPipelineNameInput(), {
       target: { value: "release-pipeline" },
     });
 
@@ -178,18 +254,64 @@ describe("pipeline definition editor", () => {
     expect(screen.getByText("已就绪：1 个变量，1 个节点，0 个调度。")).toBeInTheDocument();
   });
 
+  it("shows managed project names for switch_project nodes and persists the selection", async () => {
+    render(<WorkflowsPage />);
+
+    fireEvent.click(await getCreateTrigger());
+    fireEvent.click(screen.getByRole("button", { name: /添加节点/i }));
+
+    fireEvent.change(screen.getByLabelText("节点 2 类型"), {
+      target: { value: "switch_project" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: "web-service" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("option", { name: "worker-service" })
+      ).toBeInTheDocument();
+    });
+
+    const projectSelect = screen.getByLabelText("节点 2 项目");
+    fireEvent.change(projectSelect, { target: { value: "11" } });
+    expect(screen.getByText("team/web-service · D:/repos/web-service")).toBeInTheDocument();
+
+    fireEvent.change(getPipelineNameInput(), {
+      target: { value: "cross-project-release" },
+    });
+    fireEvent.click(getCreateSubmit());
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "create_pipeline_definition",
+        expect.objectContaining({
+          name: "cross-project-release",
+          nodes: [
+            {
+              nodeType: "checkout_branch",
+              parameters: { branch: "${source_branch}" },
+            },
+            {
+              nodeType: "switch_project",
+              parameters: { managedProjectId: "11" },
+            },
+          ],
+        })
+      );
+    });
+  });
+
   it("rejects save when a referenced variable has been deleted from the form", async () => {
     render(<WorkflowsPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建流水线" }));
-    fireEvent.change(screen.getByLabelText("流水线名称"), {
+    fireEvent.click(await getCreateTrigger());
+    fireEvent.change(getPipelineNameInput(), {
       target: { value: "release-pipeline" },
     });
 
     const firstRow = await screen.findByTestId("pipeline-variable-row");
-    fireEvent.click(within(firstRow).getByRole("button", { name: /删除变量 source_branch/i }));
+    fireEvent.click(within(firstRow).getByRole("button", { name: /source_branch/i }));
 
-    const createButton = screen.getByRole("button", { name: /^创建$/ });
+    const createButton = getCreateSubmit();
     await waitFor(() => {
       expect(createButton).toBeDisabled();
     });
@@ -198,5 +320,32 @@ describe("pipeline definition editor", () => {
       "create_pipeline_definition",
       expect.anything()
     );
+  });
+
+  it("launches a pipeline run without asking for a project group", async () => {
+    render(<WorkflowsPage />);
+
+    expect(await screen.findByText("legacy-release-pipeline")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "立即运行" }));
+
+    const variableInput = await screen.findByLabelText("运行参数 Source Branch");
+    expect(variableInput).toHaveValue("release/1.2");
+
+    fireEvent.change(variableInput, {
+      target: { value: "release/1.3" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始运行" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("execute_pipeline_run", {
+        request: {
+          pipelineDefinitionId: 201,
+          runParameters: {
+            source_branch: "release/1.3",
+          },
+          maxConcurrencyOverride: null,
+        },
+      });
+    });
   });
 });

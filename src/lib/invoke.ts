@@ -338,7 +338,7 @@ function toPipelineVariablePayload(variable: PipelineVariableInput) {
 
 function toPipelineSchedulePayload(schedule: PipelineScheduleInput) {
   return {
-    projectGroupId: schedule.projectGroupId,
+    ...(typeof schedule.projectGroupId === "number" ? { projectGroupId: schedule.projectGroupId } : {}),
     cronExpr: schedule.cronExpr.trim(),
     timezone: schedule.timezone.trim(),
     branch: schedule.branch?.trim() ? schedule.branch.trim() : null,
@@ -486,7 +486,7 @@ export async function executePipelineRun(request: PipelineRunExecuteRequest) {
   return loggedInvoke<PipelineRunExecuteResult>("execute_pipeline_run", {
     request: {
       pipelineDefinitionId: request.pipelineDefinitionId,
-      projectGroupId: request.projectGroupId,
+      ...(typeof request.projectGroupId === "number" ? { projectGroupId: request.projectGroupId } : {}),
       runParameters: normalizeJsonObject(request.runParameters, "runParameters"),
       maxConcurrencyOverride: request.maxConcurrencyOverride ?? null,
     },

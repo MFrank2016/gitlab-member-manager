@@ -13,6 +13,11 @@ import { ProjectGroupsPage } from "@/pages/ProjectGroupsPage";
 import { WorkflowsPage } from "@/pages/WorkflowsPage";
 import { WorkflowRunsPage } from "@/pages/WorkflowRunsPage";
 
+type WorkflowRunFocusTarget = {
+  runId: number;
+  nonce: number;
+};
+
 const pageTitles: Record<string, string> = {
   settings: "配置",
   projects: "项目搜索",
@@ -28,6 +33,20 @@ const pageTitles: Record<string, string> = {
 export default function App() {
   const [activeTab, setActiveTab] = React.useState("settings");
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
+  const [workflowRunFocusTarget, setWorkflowRunFocusTarget] =
+    React.useState<WorkflowRunFocusTarget | null>(null);
+
+  const handlePipelineRunStarted = React.useCallback((runId: number) => {
+    setWorkflowRunFocusTarget((current) => ({
+      runId,
+      nonce: (current?.nonce ?? 0) + 1,
+    }));
+    setActiveTab("workflowRuns");
+  }, []);
+
+  const handleWorkflowRunFocusHandled = React.useCallback(() => {
+    setWorkflowRunFocusTarget(null);
+  }, []);
 
   return (
     <div className="flex h-screen overflow-hidden bg-[radial-gradient(circle_at_top,_hsl(0_0%_100%)_0%,_hsl(0_0%_96%)_45%,_hsl(0_0%_94%)_100%)] text-foreground dark:bg-[radial-gradient(circle_at_top,_hsl(0_0%_12%)_0%,_hsl(0_0%_8%)_55%,_hsl(0_0%_6%)_100%)]">
@@ -59,8 +78,15 @@ export default function App() {
             {activeTab === "members" && <MembersPage />}
             {activeTab === "managedProjects" && <ManagedProjectsPage />}
             {activeTab === "projectGroups" && <ProjectGroupsPage />}
-            {activeTab === "workflows" && <WorkflowsPage />}
-            {activeTab === "workflowRuns" && <WorkflowRunsPage />}
+            {activeTab === "workflows" && (
+              <WorkflowsPage onRunStarted={handlePipelineRunStarted} />
+            )}
+            {activeTab === "workflowRuns" && (
+              <WorkflowRunsPage
+                focusTarget={workflowRunFocusTarget}
+                onFocusHandled={handleWorkflowRunFocusHandled}
+              />
+            )}
             {activeTab === "local" && <LocalMembersPage />}
             {activeTab === "groups" && <GroupsPage />}
           </div>

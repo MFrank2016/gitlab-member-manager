@@ -171,8 +171,8 @@ pub struct PipelineNode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineScheduleInput {
-    #[serde(alias = "project_group_id")]
-    pub project_group_id: i64,
+    #[serde(default, alias = "project_group_id")]
+    pub project_group_id: Option<i64>,
     #[serde(alias = "cron_expr")]
     pub cron_expr: String,
     pub timezone: String,
@@ -248,8 +248,8 @@ pub struct PipelineRunListItem {
     pub id: i64,
     pub pipeline_definition_id: i64,
     pub pipeline_definition_name: String,
-    pub project_group_id: i64,
-    pub project_group_name: String,
+    pub project_group_id: Option<i64>,
+    pub project_group_name: Option<String>,
     pub legacy_workflow_run_id: Option<i64>,
     pub source_pipeline_run_id: Option<i64>,
     pub trigger_kind: String,
@@ -348,8 +348,8 @@ pub struct PipelineRunDetail {
     pub id: i64,
     pub pipeline_definition_id: i64,
     pub pipeline_definition_name: String,
-    pub project_group_id: i64,
-    pub project_group_name: String,
+    pub project_group_id: Option<i64>,
+    pub project_group_name: Option<String>,
     pub legacy_workflow_run_id: Option<i64>,
     pub source_pipeline_run_id: Option<i64>,
     pub trigger_kind: String,
@@ -534,7 +534,8 @@ pub struct WorkflowRunRetryFailedRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PipelineRunExecuteRequest {
     pub pipeline_definition_id: i64,
-    pub project_group_id: i64,
+    #[serde(default)]
+    pub project_group_id: Option<i64>,
     #[serde(default)]
     pub run_parameters: Value,
     #[serde(default)]

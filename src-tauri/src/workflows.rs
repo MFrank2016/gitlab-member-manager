@@ -46,7 +46,7 @@ pub async fn retry_failed_workflow_run(
 pub async fn execute_pipeline_run(
     pool: &SqlitePool,
     pipeline_definition_id: i64,
-    project_group_id: i64,
+    project_group_id: Option<i64>,
     run_parameters: Value,
     max_concurrency_override: Option<i64>,
 ) -> Result<i64> {
@@ -63,7 +63,7 @@ pub async fn execute_pipeline_run(
 pub async fn execute_scheduled_pipeline_run(
     pool: &SqlitePool,
     pipeline_definition_id: i64,
-    project_group_id: i64,
+    project_group_id: Option<i64>,
     run_parameters: Value,
 ) -> Result<i64> {
     pipeline_runtime::execute_scheduled_pipeline_run(
@@ -1339,7 +1339,7 @@ mod tests {
         let run_id = execute_pipeline_run(
             &pool,
             pipeline.id,
-            group.id,
+            Some(group.id),
             serde_json::json!({
                 "source_branch": "release",
                 "target_branch": "main"
@@ -1415,7 +1415,7 @@ mod tests {
         .expect("create pipeline definition");
 
         let run_id =
-            execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+            execute_pipeline_run(&pool, pipeline.id, Some(group.id), serde_json::json!({}), Some(1))
                 .await
                 .expect("execute pipeline run");
 
@@ -1511,7 +1511,7 @@ mod tests {
         .expect("create pipeline definition");
 
         let source_run_id =
-            execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+            execute_pipeline_run(&pool, pipeline.id, Some(group.id), serde_json::json!({}), Some(1))
                 .await
                 .expect("execute source pipeline run");
 
@@ -1533,6 +1533,102 @@ mod tests {
             retry_seeded.projects[0].managed_project_id,
             Some(dirty_project.id)
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pipeline_runtime_retry_failed_run_supports_project_switching_runs() {
+        let pool = setup_test_pool().await;
+        let clean_repo = setup_git_repo();
+        let dirty_repo = setup_git_repo();
+        std::fs::write(dirty_repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+        let clean_project = db::create_managed_project(
+            &pool,
+            76005,
+            "pipeline-switch-clean".to_string(),
+            "team/pipeline-switch-clean".to_string(),
+            clean_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create clean switch project");
+        let dirty_project = db::create_managed_project(
+            &pool,
+            76006,
+            "pipeline-switch-dirty".to_string(),
+            "team/pipeline-switch-dirty".to_string(),
+            dirty_repo.to_string_lossy().to_string(),
+            Some("main".to_string()),
+            Some("origin".to_string()),
+            true,
+        )
+        .await
+        .expect("create dirty switch project");
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "switch-project-retry-pipeline".to_string(),
+            "test retry for switch_project pipeline runs".to_string(),
+            true,
+            2,
+            vec![],
+            vec![
+                PipelineNodeInput {
+                    node_type: "switch_project".to_string(),
+                    parameters: serde_json::json!({
+                        "managedProjectId": clean_project.id.to_string()
+                    }),
+                },
+                PipelineNodeInput {
+                    node_type: "checkout_branch".to_string(),
+                    parameters: serde_json::json!({ "branch": "main" }),
+                },
+                PipelineNodeInput {
+                    node_type: "switch_project".to_string(),
+                    parameters: serde_json::json!({
+                        "managedProjectId": dirty_project.id.to_string()
+                    }),
+                },
+                PipelineNodeInput {
+                    node_type: "checkout_branch".to_string(),
+                    parameters: serde_json::json!({ "branch": "main" }),
+                },
+            ],
+            vec![],
+        )
+        .await
+        .expect("create switch project retry pipeline");
+
+        let source_run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(2))
+            .await
+            .expect("execute switch project source run");
+
+        let source_detail = wait_for_terminal_pipeline_run_status(&pool, source_run_id, 15_000).await;
+        assert_eq!(source_detail.status, "partial_failed");
+        assert_eq!(source_detail.project_group_id, None);
+        assert_eq!(source_detail.projects.len(), 2);
+
+        let retry_run_id =
+            retry_pipeline_run(&pool, source_run_id, Some(vec![dirty_project.id]), Some(2))
+                .await
+                .expect("retry switch project pipeline run");
+
+        let retry_seeded = db::get_pipeline_run_detail(&pool, retry_run_id)
+            .await
+            .expect("load switch project retry seeded pipeline run");
+        assert_eq!(retry_seeded.source_pipeline_run_id, Some(source_run_id));
+        assert_eq!(retry_seeded.project_group_id, None);
+        assert_eq!(retry_seeded.projects.len(), 1);
+        assert_eq!(
+            retry_seeded.projects[0].managed_project_id,
+            Some(dirty_project.id)
+        );
+        assert_eq!(retry_seeded.projects[0].nodes.len(), 2);
+        assert_eq!(retry_seeded.projects[0].nodes[0].node_type, "switch_project");
+        assert_eq!(retry_seeded.projects[0].nodes[1].node_type, "checkout_branch");
     }
 
     #[tokio::test]
@@ -1690,7 +1786,7 @@ mod tests {
         .expect("create pipeline definition");
 
         let run_id =
-            execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+            execute_pipeline_run(&pool, pipeline.id, Some(group.id), serde_json::json!({}), Some(1))
                 .await
                 .expect("execute pipeline run");
 
@@ -1785,7 +1881,7 @@ mod tests {
         .expect("create pipeline definition");
 
         let run_id =
-            execute_pipeline_run(&pool, pipeline.id, group.id, serde_json::json!({}), Some(1))
+            execute_pipeline_run(&pool, pipeline.id, Some(group.id), serde_json::json!({}), Some(1))
                 .await
                 .expect("execute pipeline run");
 
@@ -1903,8 +1999,8 @@ mod tests {
         let operation = build_execution_step_operation(
             &step.step_type,
             &step.rendered_parameters,
-            &project,
-            std::path::Path::new(&project.repo_path),
+            Some(&project),
+            Some(std::path::Path::new(&project.repo_path)),
         )
         .expect("build execution step operation");
 

@@ -118,6 +118,11 @@ type FilterState = {
   projectGroupId: string;
 };
 
+type WorkflowRunsPageFocusTarget = {
+  runId: number;
+  nonce: number;
+};
+
 type NodeDiagnosticsMap = Record<number, PipelineRunNodeDiagnostics | null | undefined>;
 type ExpandedNodeMap = Record<number, boolean | undefined>;
 type LoadingNodeMap = Record<number, boolean | undefined>;
@@ -152,6 +157,10 @@ function nodeTypeLabel(nodeType: string) {
 
 function triggerKindLabel(triggerKind: string) {
   return TRIGGER_KIND_TEXT[triggerKind] ?? triggerKind;
+}
+
+function projectGroupLabel(projectGroupName: string | null | undefined) {
+  return projectGroupName?.trim() ? projectGroupName : "按步骤切换项目";
 }
 
 function remoteStatusLabel(status: string | null | undefined) {
@@ -310,7 +319,15 @@ function PipelineNodeCard({
   );
 }
 
-export function WorkflowRunsPagePipeline() {
+type WorkflowRunsPagePipelineProps = {
+  focusTarget?: WorkflowRunsPageFocusTarget | null;
+  onFocusHandled?: () => void;
+};
+
+export function WorkflowRunsPagePipeline({
+  focusTarget = null,
+  onFocusHandled,
+}: WorkflowRunsPagePipelineProps = {}) {
   const [runPage, setRunPage] = React.useState<PipelineRunListPage>(emptyRunPage);
   const [filters, setFilters] = React.useState<FilterState>({
     status: "",
@@ -418,6 +435,22 @@ export function WorkflowRunsPagePipeline() {
   React.useEffect(() => {
     void refreshRuns(undefined, 1, filters);
   }, []);
+
+  React.useEffect(() => {
+    if (!focusTarget) {
+      return;
+    }
+
+    const nextFilters = {
+      status: "",
+      pipelineDefinitionId: "",
+      projectGroupId: "",
+    };
+    setFilters(nextFilters);
+    userSelectionVersionRef.current += 1;
+    void refreshRuns(focusTarget.runId, 1, nextFilters);
+    onFocusHandled?.();
+  }, [focusTarget, onFocusHandled]);
 
   React.useEffect(() => {
     const requestToken = detailRequestTokenRef.current + 1;
@@ -607,14 +640,14 @@ export function WorkflowRunsPagePipeline() {
               />
             </label>
             <label className="grid gap-1 text-xs">
-              <span className="text-muted-foreground">项目组 ID</span>
+              <span className="text-muted-foreground">项目组 ID（旧运行）</span>
               <input
                 className="rounded-md border border-border bg-background px-3 py-2 text-sm"
                 value={filters.projectGroupId}
                 onChange={(event) =>
                   setFilters((current) => ({ ...current, projectGroupId: event.target.value }))
                 }
-                placeholder="例如 5"
+                placeholder="仅旧运行适用"
               />
             </label>
             <div className="flex items-end gap-2">
@@ -643,7 +676,7 @@ export function WorkflowRunsPagePipeline() {
                   <TableCell className="font-mono">#{run.id}</TableCell>
                   <TableCell>{statusPill(run.status, RUN_STATUS_CLASS)}</TableCell>
                   <TableCell>{run.pipelineDefinitionName}</TableCell>
-                  <TableCell>{run.projectGroupName}</TableCell>
+                  <TableCell>{projectGroupLabel(run.projectGroupName)}</TableCell>
                   <TableCell className="font-mono text-xs">{formatDateTime(run.updatedAt)}</TableCell>
                 </TableRow>
               ))}
@@ -719,7 +752,7 @@ export function WorkflowRunsPagePipeline() {
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <span className="text-muted-foreground">项目组</span>
-                  <span>{activeRun.projectGroupName}</span>
+                  <span>{projectGroupLabel(activeRun.projectGroupName)}</span>
                   <span className="text-muted-foreground">触发方式</span>
                   <span>{triggerKindLabel(activeRun.triggerKind)}</span>
                   <span className="text-muted-foreground">最大并发</span>
