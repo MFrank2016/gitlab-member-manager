@@ -190,9 +190,9 @@ export async function setGitLabConfig(args: {
   return loggedInvoke<void>("set_gitlab_config", {
     baseUrl: args.baseUrl,
     token: args.token,
-    local_repo_root: args.localRepoRoot ?? null,
-    default_branch: args.defaultBranch ?? null,
-    default_remote: args.defaultRemote ?? null,
+    localRepoRoot: args.localRepoRoot ?? null,
+    defaultBranch: args.defaultBranch ?? null,
+    defaultRemote: args.defaultRemote ?? null,
   });
 }
 
@@ -204,7 +204,7 @@ export async function searchProjects(
   const [items, total] = await loggedInvoke<[ProjectSummary[], number]>("search_projects", {
     keyword,
     page,
-    per_page: perPage,
+    perPage,
   });
   return { items, total };
 }
@@ -217,7 +217,7 @@ export async function listProjectMembers(
   const [members, total] = await loggedInvoke<[ProjectMember[], number]>("list_project_members", {
     project,
     page,
-    per_page: perPage,
+    perPage,
   });
   return { members, total };
 }
@@ -235,12 +235,12 @@ export async function createManagedProject(args: {
   const normalizedDefaultRemote = args.defaultRemote?.trim();
 
   return loggedInvoke<ManagedProject>("create_managed_project", {
-    gitlab_project_id: args.gitlabProjectId,
+    gitlabProjectId: args.gitlabProjectId,
     name: args.name,
-    path_with_namespace: args.pathWithNamespace,
-    repo_path: args.repoPath,
-    default_branch: normalizedDefaultBranch ? normalizedDefaultBranch : null,
-    default_remote: normalizedDefaultRemote ? normalizedDefaultRemote : null,
+    pathWithNamespace: args.pathWithNamespace,
+    repoPath: args.repoPath,
+    defaultBranch: normalizedDefaultBranch ? normalizedDefaultBranch : null,
+    defaultRemote: normalizedDefaultRemote ? normalizedDefaultRemote : null,
     enabled: args.enabled ?? true,
   });
 }
@@ -261,12 +261,12 @@ export async function updateManagedProject(args: {
 }) {
   return loggedInvoke<void>("update_managed_project", {
     id: args.id,
-    gitlab_project_id: args.gitlabProjectId,
+    gitlabProjectId: args.gitlabProjectId,
     name: args.name,
-    path_with_namespace: args.pathWithNamespace,
-    repo_path: args.repoPath,
-    default_branch: args.defaultBranch,
-    default_remote: args.defaultRemote,
+    pathWithNamespace: args.pathWithNamespace,
+    repoPath: args.repoPath,
+    defaultBranch: args.defaultBranch,
+    defaultRemote: args.defaultRemote,
     enabled: args.enabled,
   });
 }
@@ -293,21 +293,21 @@ export async function deleteProjectGroup(id: number) {
 
 export async function addProjectsToGroup(projectGroupId: number, managedProjectIds: number[]) {
   return loggedInvoke<void>("add_projects_to_group", {
-    project_group_id: projectGroupId,
-    managed_project_ids: managedProjectIds,
+    projectGroupId,
+    managedProjectIds,
   });
 }
 
 export async function removeProjectsFromGroup(projectGroupId: number, managedProjectIds: number[]) {
   return loggedInvoke<void>("remove_projects_from_group", {
-    project_group_id: projectGroupId,
-    managed_project_ids: managedProjectIds,
+    projectGroupId,
+    managedProjectIds,
   });
 }
 
 export async function listProjectGroupProjects(projectGroupId: number) {
   return loggedInvoke<ManagedProject[]>("list_project_group_projects", {
-    project_group_id: projectGroupId,
+    projectGroupId,
   });
 }
 
@@ -362,8 +362,8 @@ export async function createWorkflowDefinition(args: {
     name: args.name,
     description: normalizedDescription ?? "",
     enabled: args.enabled ?? true,
-    variables_schema: normalizeJsonObject(args.variablesSchema, "variablesSchema"),
-    max_concurrency_default: args.maxConcurrencyDefault ?? 2,
+    variablesSchema: normalizeJsonObject(args.variablesSchema, "variablesSchema"),
+    maxConcurrencyDefault: args.maxConcurrencyDefault ?? 2,
     steps: args.steps.map(toWorkflowStepPayload),
   });
 }
@@ -383,7 +383,7 @@ export async function createPipelineDefinition(args: {
     name: args.name,
     description: normalizedDescription ?? "",
     enabled: args.enabled ?? true,
-    max_concurrency_default: args.maxConcurrencyDefault ?? 2,
+    maxConcurrencyDefault: args.maxConcurrencyDefault ?? 2,
     variables: (args.variables ?? []).map(toPipelineVariablePayload),
     nodes: args.nodes.map(toPipelineNodePayload),
     schedules: (args.schedules ?? []).map(toPipelineSchedulePayload),
@@ -408,7 +408,7 @@ export async function getPipelineDefinitionDetail(id: number) {
 
 export async function getPipelineScheduleRuntimeSnapshots(pipelineDefinitionId: number) {
   return loggedInvoke<PipelineScheduleRuntimeSnapshot[]>("get_pipeline_schedule_runtime_snapshots", {
-    pipeline_definition_id: pipelineDefinitionId,
+    pipelineDefinitionId,
   });
 }
 
@@ -428,8 +428,8 @@ export async function updateWorkflowDefinition(args: {
     name: args.name,
     description: normalizedDescription ?? "",
     enabled: args.enabled,
-    variables_schema: normalizeJsonObject(args.variablesSchema, "variablesSchema"),
-    max_concurrency_default: args.maxConcurrencyDefault,
+    variablesSchema: normalizeJsonObject(args.variablesSchema, "variablesSchema"),
+    maxConcurrencyDefault: args.maxConcurrencyDefault,
     steps: args.steps.map(toWorkflowStepPayload),
   });
 }
@@ -451,7 +451,7 @@ export async function updatePipelineDefinition(args: {
     name: args.name,
     description: normalizedDescription ?? "",
     enabled: args.enabled,
-    max_concurrency_default: args.maxConcurrencyDefault,
+    maxConcurrencyDefault: args.maxConcurrencyDefault,
     variables: args.variables.map(toPipelineVariablePayload),
     nodes: args.nodes.map(toPipelineNodePayload),
     schedules: args.schedules.map(toPipelineSchedulePayload),
@@ -495,7 +495,7 @@ export async function executePipelineRun(request: PipelineRunExecuteRequest) {
 
 export async function cancelPipelineRun(pipelineRunId: number) {
   return loggedInvoke<void>("cancel_pipeline_run", {
-    pipeline_run_id: pipelineRunId,
+    pipelineRunId,
   });
 }
 
@@ -522,7 +522,7 @@ export async function executeWorkflowRun(request: WorkflowRunExecuteRequest) {
 
 export async function cancelWorkflowRun(workflowRunId: number) {
   return loggedInvoke<void>("cancel_workflow_run", {
-    workflow_run_id: workflowRunId,
+    workflowRunId,
   });
 }
 
@@ -558,11 +558,11 @@ export async function syncProjectGroupMembers(args: {
   const normalizedExpiresAt = args.expiresAt?.trim();
 
   return loggedInvoke<ProjectGroupMemberSyncRow[]>("sync_project_group_members", {
-    project_group_id: args.projectGroupId,
-    source_local_group_id: args.sourceLocalGroupId ?? null,
-    selected_user_ids: args.selectedUserIds ?? [],
-    access_level: args.accessLevel,
-    expires_at: normalizedExpiresAt ? normalizedExpiresAt : null,
+    projectGroupId: args.projectGroupId,
+    sourceLocalGroupId: args.sourceLocalGroupId ?? null,
+    selectedUserIds: args.selectedUserIds ?? [],
+    accessLevel: args.accessLevel,
+    expiresAt: normalizedExpiresAt ? normalizedExpiresAt : null,
   });
 }
 
@@ -585,13 +585,13 @@ export async function listLocalMembers(
   const [items, total] = await loggedInvoke<[LocalMember[], number]>("list_local_members", {
     query: query && query.trim() ? query.trim() : null,
     page,
-    per_page: perPage,
+    perPage,
   });
   return { items, total };
 }
 
 export async function deleteLocalMembers(userIds: number[]) {
-  return loggedInvoke<void>("delete_local_members", { user_ids: userIds });
+  return loggedInvoke<void>("delete_local_members", { userIds });
 }
 
 export async function createLocalGroup(name: string) {
@@ -612,20 +612,20 @@ export async function deleteLocalGroup(id: number) {
 
 export async function addMembersToGroup(groupId: number, userIds: number[]) {
   return loggedInvoke<void>("add_members_to_group", {
-    group_id: groupId,
-    user_ids: userIds,
+    groupId,
+    userIds,
   });
 }
 
 export async function removeMembersFromGroup(groupId: number, userIds: number[]) {
   return loggedInvoke<void>("remove_members_from_group", {
-    group_id: groupId,
-    user_ids: userIds,
+    groupId,
+    userIds,
   });
 }
 
 export async function listGroupMembers(groupId: number) {
-  return loggedInvoke<LocalMember[]>("list_group_members", { group_id: groupId });
+  return loggedInvoke<LocalMember[]>("list_group_members", { groupId });
 }
 
 export async function batchAddMembersToProject(args: {
@@ -638,9 +638,9 @@ export async function batchAddMembersToProject(args: {
 
   return loggedInvoke<BatchResult>("batch_add_members_to_project", {
     project: args.project,
-    user_ids: args.userIds,
-    access_level: args.accessLevel,
-    expires_at: normalizedExpiresAt ? normalizedExpiresAt : null,
+    userIds: args.userIds,
+    accessLevel: args.accessLevel,
+    expiresAt: normalizedExpiresAt ? normalizedExpiresAt : null,
   });
 }
 
@@ -654,9 +654,9 @@ export async function addMemberToProject(args: {
   const normalizedExpiresAt = args.expiresAt?.trim();
   return loggedInvoke<void>("add_member_to_project", {
     project: args.project,
-    user_id: args.userId,
-    access_level: args.accessLevel,
-    expires_at: normalizedExpiresAt ? normalizedExpiresAt : null,
+    userId: args.userId,
+    accessLevel: args.accessLevel,
+    expiresAt: normalizedExpiresAt ? normalizedExpiresAt : null,
   });
 }
 
@@ -666,6 +666,6 @@ export async function batchRemoveMembersFromProject(args: {
 }) {
   return loggedInvoke<BatchResult>("batch_remove_members_from_project", {
     project: args.project,
-    user_ids: args.userIds,
+    userIds: args.userIds,
   });
 }

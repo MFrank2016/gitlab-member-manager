@@ -600,7 +600,9 @@ export function PipelineDraftForm({
     updateDraft(
       {
         ...draft,
-        variableRows: draft.variableRows.map((row, rowIndex) => (rowIndex === index ? updater(row) : row)),
+        variableRows: draft.variableRows.map((row, rowIndex) =>
+          rowIndex === index ? { ...updater(row), source: "manual" } : row
+        ),
       },
       { syncVariables: false }
     );

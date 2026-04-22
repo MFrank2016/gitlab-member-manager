@@ -60,7 +60,7 @@ describe("pipeline definition editor", () => {
           name: String(args?.name ?? ""),
           description: String(args?.description ?? ""),
           enabled: Boolean(args?.enabled),
-          maxConcurrencyDefault: Number(args?.max_concurrency_default ?? 1),
+          maxConcurrencyDefault: Number(args?.maxConcurrencyDefault ?? 1),
           legacyWorkflowDefinitionId: null,
           createdAt: "2026-04-14T00:00:00Z",
           updatedAt: "2026-04-14T00:00:00Z",
@@ -113,7 +113,7 @@ describe("pipeline definition editor", () => {
         "create_pipeline_definition",
         expect.objectContaining({
           name: "release-pipeline",
-          max_concurrency_default: 2,
+          maxConcurrencyDefault: 2,
           variables: [
             {
               key: "source_branch",

@@ -131,12 +131,12 @@ describe("project group interactions", () => {
       }
       if (cmd === "list_managed_projects") return managedProjects;
       if (cmd === "list_project_group_projects") {
-        const groupId = Number(args?.project_group_id ?? 0);
+        const groupId = Number(args?.projectGroupId ?? 0);
         return groupProjectMap.get(groupId) ?? [];
       }
       if (cmd === "add_projects_to_group") {
-        const groupId = Number(args?.project_group_id ?? 0);
-        const ids = (args?.managed_project_ids as number[]) ?? [];
+        const groupId = Number(args?.projectGroupId ?? 0);
+        const ids = (args?.managedProjectIds as number[]) ?? [];
         const current = groupProjectMap.get(groupId) ?? [];
         const next = [...current];
         for (const id of ids) {
@@ -166,8 +166,8 @@ describe("project group interactions", () => {
       expect(invokeMock).toHaveBeenCalledWith(
         "add_projects_to_group",
         expect.objectContaining({
-          project_group_id: 1,
-          managed_project_ids: [10],
+          projectGroupId: 1,
+          managedProjectIds: [10],
         })
       );
     });
@@ -192,8 +192,8 @@ describe.skip("workflow interactions", () => {
           name: String(args?.name ?? ""),
           description: String(args?.description ?? ""),
           enabled: Boolean(args?.enabled),
-          variablesSchema: args?.variables_schema ?? {},
-          maxConcurrencyDefault: Number(args?.max_concurrency_default ?? 1),
+          variablesSchema: args?.variablesSchema ?? {},
+          maxConcurrencyDefault: Number(args?.maxConcurrencyDefault ?? 1),
           createdAt: "2026-03-18T00:00:00Z",
           updatedAt: "2026-03-18T00:00:00Z",
           steps: steps.map((step, index) => ({
@@ -232,7 +232,7 @@ describe.skip("workflow interactions", () => {
         "create_workflow_definition",
         expect.objectContaining({
           name: "release-flow",
-          variables_schema: {
+          variablesSchema: {
             source_branch: "",
             target_branch: "",
           },
@@ -295,7 +295,7 @@ describe("pipeline definition upgrade smoke", () => {
           name: String(args?.name ?? ""),
           description: String(args?.description ?? ""),
           enabled: Boolean(args?.enabled),
-          maxConcurrencyDefault: Number(args?.max_concurrency_default ?? 1),
+          maxConcurrencyDefault: Number(args?.maxConcurrencyDefault ?? 1),
           legacyWorkflowDefinitionId: null,
           createdAt: "2026-03-18T00:00:00Z",
           updatedAt: "2026-03-18T00:00:00Z",
@@ -394,7 +394,7 @@ describe("pipeline schedule runtime feedback", () => {
         };
       }
       if (cmd === "get_pipeline_schedule_runtime_snapshots") {
-        expect(args).toEqual({ pipeline_definition_id: 91 });
+        expect(args).toEqual({ pipelineDefinitionId: 91 });
         return [
           {
             scheduleId: 701,
@@ -416,7 +416,7 @@ describe("pipeline schedule runtime feedback", () => {
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("get_pipeline_schedule_runtime_snapshots", {
-        pipeline_definition_id: 91,
+        pipelineDefinitionId: 91,
       });
     });
 
@@ -946,7 +946,7 @@ describe("pipeline wrapper smoke", () => {
 	      },
 	    });
 	    expect(invokeMock).toHaveBeenCalledWith("cancel_pipeline_run", {
-	      pipeline_run_id: 302,
+	      pipelineRunId: 302,
 	    });
 	    expect(invokeMock).toHaveBeenCalledWith("retry_pipeline_run", {
 	      request: {
@@ -1356,7 +1356,7 @@ describe("pipeline run monitor interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: /取消运行/i }));
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("cancel_pipeline_run", {
-        pipeline_run_id: 301,
+        pipelineRunId: 301,
       });
     });
 
@@ -1788,7 +1788,7 @@ describe.skip("workflow run monitoring interactions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /取消运行/i }));
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("cancel_workflow_run", { workflow_run_id: 301 });
+      expect(invokeMock).toHaveBeenCalledWith("cancel_workflow_run", { workflowRunId: 301 });
     });
 
     fireEvent.click(screen.getByRole("button", { name: /重试失败项/i }));
@@ -1919,7 +1919,7 @@ describe.skip("workflow run monitoring interactions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /取消运行/i }));
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("cancel_workflow_run", { workflow_run_id: 302 });
+      expect(invokeMock).toHaveBeenCalledWith("cancel_workflow_run", { workflowRunId: 302 });
     });
 
     resolveRun302?.(runDetail302);

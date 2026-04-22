@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   BUILTIN_NODE_MAP,
   buildPipelineCreatePayload,
+  ensureVariableRows,
   normalizeBuiltinParameters,
   remapNodeDraftForType,
   type PipelineDraft,
@@ -85,5 +86,25 @@ describe("pipeline draft model working path node", () => {
         ref: "${source_branch}",
       },
     });
+  });
+
+  it("keeps inferred variables aligned to the latest placeholder instead of accumulating typing intermediates", () => {
+    const node = (branch: string) => ({
+      id: "node-1",
+      nodeType: "checkout_branch",
+      parameters: normalizeBuiltinParameters("checkout_branch", { branch }),
+    });
+
+    const initialRows = ensureVariableRows([node("${source_branch}")], []);
+    expect(initialRows.map((row) => row.key)).toEqual(["source_branch"]);
+
+    const afterFirstEdit = ensureVariableRows([node("${r}")], initialRows);
+    expect(afterFirstEdit.map((row) => row.key)).toEqual(["r"]);
+
+    const afterSecondEdit = ensureVariableRows([node("${re}")], afterFirstEdit);
+    expect(afterSecondEdit.map((row) => row.key)).toEqual(["re"]);
+
+    const afterFinalEdit = ensureVariableRows([node("${release_branch}")], afterSecondEdit);
+    expect(afterFinalEdit.map((row) => row.key)).toEqual(["release_branch"]);
   });
 });

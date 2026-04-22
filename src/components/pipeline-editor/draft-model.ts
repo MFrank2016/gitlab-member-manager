@@ -105,6 +105,7 @@ export type VariableDraft = {
   label: string;
   defaultValue: string;
   required: boolean;
+  source: "manual" | "inferred";
 };
 
 export type NodeDraft = {
@@ -233,7 +234,8 @@ export function createVariableDraft(
   key: string,
   label = toDefaultVariableLabel(key),
   defaultValue = "",
-  required = true
+  required = true,
+  source: VariableDraft["source"] = "manual"
 ): VariableDraft {
   return {
     id: nextVariableDraftId(),
@@ -241,6 +243,7 @@ export function createVariableDraft(
     label,
     defaultValue,
     required,
+    source,
   };
 }
 
@@ -279,18 +282,30 @@ function variableRowsToDefaults(rows: VariableDraft[]) {
 }
 
 export function ensureVariableRows(nodes: NodeDraft[], variableRows: VariableDraft[]) {
-  const merged = mergeDeclaredWorkflowVariables(variableRowsToDefaults(variableRows), pipelineNodesForVariableSync(nodes));
+  const pipelineNodes = pipelineNodesForVariableSync(nodes);
+  const merged = mergeDeclaredWorkflowVariables(variableRowsToDefaults(variableRows), pipelineNodes);
+  const referencedKeys = new Set(Object.keys(mergeDeclaredWorkflowVariables({}, pipelineNodes)));
+  const retainedRows = variableRows.filter((row) => {
+    const key = row.key.trim();
+    if (!key) {
+      return row.source !== "inferred";
+    }
+    if (referencedKeys.has(key)) {
+      return true;
+    }
+    return row.source !== "inferred";
+  });
   const existingKeys = new Set(
-    variableRows
+    retainedRows
       .map((row) => row.key.trim())
       .filter((key) => key.length > 0)
   );
 
-  const appendedRows = Object.keys(merged)
+  const appendedRows = Array.from(referencedKeys)
     .filter((key) => !existingKeys.has(key))
-    .map((key) => createVariableDraft(key, toDefaultVariableLabel(key), merged[key] ?? ""));
+    .map((key) => createVariableDraft(key, toDefaultVariableLabel(key), merged[key] ?? "", true, "inferred"));
 
-  return appendedRows.length > 0 ? [...variableRows, ...appendedRows] : variableRows;
+  return appendedRows.length > 0 ? [...retainedRows, ...appendedRows] : retainedRows;
 }
 
 export function createEmptyPipelineDraft(): PipelineDraft {

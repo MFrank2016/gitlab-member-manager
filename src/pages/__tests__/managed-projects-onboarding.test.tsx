@@ -49,12 +49,12 @@ describe("managed project onboarding", () => {
       if (cmd === "create_managed_project") {
         return {
           id: 99,
-          gitlabProjectId: Number(args?.gitlab_project_id ?? 0),
+          gitlabProjectId: Number(args?.gitlabProjectId ?? 0),
           name: String(args?.name ?? ""),
-          pathWithNamespace: String(args?.path_with_namespace ?? ""),
-          repoPath: String(args?.repo_path ?? ""),
-          defaultBranch: String(args?.default_branch ?? ""),
-          defaultRemote: String(args?.default_remote ?? ""),
+          pathWithNamespace: String(args?.pathWithNamespace ?? ""),
+          repoPath: String(args?.repoPath ?? ""),
+          defaultBranch: String(args?.defaultBranch ?? ""),
+          defaultRemote: String(args?.defaultRemote ?? ""),
           enabled: Boolean(args?.enabled),
           createdAt: "2026-03-18T00:00:00Z",
           updatedAt: "2026-03-18T00:00:00Z",
@@ -105,12 +105,12 @@ describe("managed project onboarding", () => {
       expect(invokeMock).toHaveBeenCalledWith(
         "create_managed_project",
         expect.objectContaining({
-          gitlab_project_id: 42,
+          gitlabProjectId: 42,
           name: "api-service",
-          path_with_namespace: "team/api-service",
-          repo_path: "D:/repos/custom-api-service",
-          default_branch: "master",
-          default_remote: "origin",
+          pathWithNamespace: "team/api-service",
+          repoPath: "D:/repos/custom-api-service",
+          defaultBranch: "master",
+          defaultRemote: "origin",
           enabled: true,
         })
       );
