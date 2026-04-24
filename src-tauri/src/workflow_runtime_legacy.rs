@@ -628,8 +628,8 @@ pub(crate) async fn execute_project_plan(
         match &operation {
             StepOperation::SetWorkingPath { target_path } => {
                 if let Err(error) = run_execution_step_prechecks(
-                    execution_context.working_dir(),
-                    &plan.project,
+                    Some(execution_context.working_dir()),
+                    Some(&plan.project),
                     &operation,
                 )
                 .await
@@ -697,8 +697,8 @@ pub(crate) async fn execute_project_plan(
                 let _repo_guard = repo_lease.lock().await;
 
                 if let Err(error) = run_execution_step_prechecks(
-                    execution_context.working_dir(),
-                    &plan.project,
+                    Some(execution_context.working_dir()),
+                    Some(&plan.project),
                     &operation,
                 )
                 .await

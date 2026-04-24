@@ -135,16 +135,13 @@ fn render_pipeline_nodes_for_run(
     Ok(rendered_nodes)
 }
 
-fn node_requires_active_project(node_type: &str) -> bool {
+fn node_requires_working_dir(node_type: &str) -> bool {
     matches!(
         node_type,
         "checkout_branch"
             | "git_pull"
             | "git_merge"
             | "git_push"
-            | "check_pipeline"
-            | "trigger_pipeline"
-            | "wait_pipeline"
     )
 }
 
@@ -242,6 +239,17 @@ fn classify_precheck_failure(error: &str) -> FailureEnvelope {
             error.to_string(),
         );
     }
+    if error.contains("working directory is required for this step")
+        || error.contains("execution context is missing working directory")
+    {
+        return build_failure_envelope(
+            "git.working_directory_missing",
+            "未设置执行路径",
+            "当前节点依赖本地执行路径，但运行上下文中还没有可用的执行目录。".to_string(),
+            "请先添加“设置执行路径”节点，或先切换到带仓库路径的项目后再重试。",
+            error.to_string(),
+        );
+    }
     if error.contains("repository worktree is not clean") {
         return build_failure_envelope(
             "git.worktree_dirty",
@@ -304,16 +312,6 @@ fn classify_invalid_execution_parameters(error: &str) -> FailureEnvelope {
         format!("节点参数无效：{error}"),
         "请检查节点配置和变量模板后重试。",
         error.to_string(),
-    )
-}
-
-fn classify_missing_active_project(node_type: &str) -> FailureEnvelope {
-    build_failure_envelope(
-        "pipeline.active_project_missing",
-        "未选择项目",
-        format!("节点 {node_type} 执行前未选择项目，请先添加或前移“切换项目”节点。"),
-        "请先在当前节点之前添加“切换项目”节点，并指定一个已配置的托管项目后重试。",
-        node_type.to_string(),
     )
 }
 
@@ -913,36 +911,6 @@ async fn execute_pipeline_project_plan(
             continue;
         }
 
-        if plan.project.is_none() && node_requires_active_project(node.node_type.as_str()) {
-            let envelope = classify_missing_active_project(&node.node_type);
-            mark_pipeline_node_finished(
-                pool,
-                node.run_node_id,
-                "failed",
-                "",
-                "",
-                None,
-                &envelope.title_zh,
-                Some(&envelope),
-            )
-            .await?;
-            mark_remaining_pipeline_nodes_skipped(
-                pool,
-                &plan.nodes,
-                node_index + 1,
-                "skipped after previous node failure",
-            )
-            .await?;
-            mark_pipeline_project_finished(
-                pool,
-                plan.run_project_id,
-                "failed_precheck",
-                &envelope.title_zh,
-            )
-            .await?;
-            return Ok(ProjectOutcome::FailedPrecheck);
-        }
-
         if matches!(
             node.node_type.as_str(),
             "check_pipeline" | "wait_pipeline" | "trigger_pipeline"
@@ -982,9 +950,7 @@ async fn execute_pipeline_project_plan(
 
             let project_path = match gitlab_executor::read_pipeline_project_param(
                 &node.rendered_parameters,
-                plan.project
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("active managed project is required for GitLab nodes"))?,
+                plan.project.as_ref(),
             ) {
                 Ok(value) => value,
                 Err(error) => {
@@ -1017,12 +983,41 @@ async fn execute_pipeline_project_plan(
                     return Ok(ProjectOutcome::FailedPrecheck);
                 }
             };
-            let reference = gitlab_executor::read_pipeline_reference_param(
+            let reference = match gitlab_executor::read_pipeline_reference_param(
                 &node.rendered_parameters,
-                plan.project
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("active managed project is required for GitLab nodes"))?,
-            );
+                plan.project.as_ref(),
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    let envelope = classify_invalid_execution_parameters(&error.to_string());
+                    mark_pipeline_node_finished(
+                        pool,
+                        node.run_node_id,
+                        "failed",
+                        "",
+                        "",
+                        None,
+                        &envelope.title_zh,
+                        Some(&envelope),
+                    )
+                    .await?;
+                    mark_remaining_pipeline_nodes_skipped(
+                        pool,
+                        &plan.nodes,
+                        node_index + 1,
+                        "skipped after previous node failure",
+                    )
+                    .await?;
+                    mark_pipeline_project_finished(
+                        pool,
+                        plan.run_project_id,
+                        "failed_precheck",
+                        &envelope.title_zh,
+                    )
+                    .await?;
+                    return Ok(ProjectOutcome::FailedPrecheck);
+                }
+            };
             let sha =
                 match gitlab_executor::read_optional_string_param(&node.rendered_parameters, "sha")
                 {
@@ -1396,13 +1391,8 @@ async fn execute_pipeline_project_plan(
         match &operation {
             StepOperation::SetWorkingPath { target_path } => {
                 if let Err(error) = run_execution_step_prechecks(
-                    execution_context
-                        .as_ref()
-                        .map(|context| context.working_dir())
-                        .ok_or_else(|| anyhow!("execution context is missing working directory"))?,
-                    plan.project
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("active managed project is required"))?,
+                    execution_context.as_ref().map(|context| context.working_dir()),
+                    plan.project.as_ref(),
                     &operation,
                 )
                 .await
@@ -1494,22 +1484,45 @@ async fn execute_pipeline_project_plan(
                 }
             }
             _ => {
-                let working_dir_display = execution_context
-                    .as_ref()
-                    .map(|context| context.working_dir_display())
-                    .ok_or_else(|| anyhow!("execution context is missing working directory"))?;
-                let working_dir = execution_context
-                    .as_ref()
-                    .map(|context| context.working_dir())
-                    .ok_or_else(|| anyhow!("execution context is missing working directory"))?;
+                debug_assert!(node_requires_working_dir(node.node_type.as_str()));
+                let Some(context) = execution_context.as_ref() else {
+                    let envelope =
+                        classify_precheck_failure("working directory is required for this step");
+                    mark_pipeline_node_finished(
+                        pool,
+                        node.run_node_id,
+                        "failed",
+                        "",
+                        "",
+                        None,
+                        &envelope.title_zh,
+                        Some(&envelope),
+                    )
+                    .await?;
+                    mark_remaining_pipeline_nodes_skipped(
+                        pool,
+                        &plan.nodes,
+                        node_index + 1,
+                        "skipped after previous node failure",
+                    )
+                    .await?;
+                    mark_pipeline_project_finished(
+                        pool,
+                        plan.run_project_id,
+                        "failed_precheck",
+                        &envelope.title_zh,
+                    )
+                    .await?;
+                    return Ok(ProjectOutcome::FailedPrecheck);
+                };
+                let working_dir_display = context.working_dir_display();
+                let working_dir = context.working_dir();
                 let repo_lease = get_repo_lease(&working_dir_display).await;
                 let _repo_guard = repo_lease.lock().await;
 
                 if let Err(error) = run_execution_step_prechecks(
-                    working_dir,
-                    plan.project
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("active managed project is required"))?,
+                    Some(working_dir),
+                    plan.project.as_ref(),
                     &operation,
                 )
                 .await
@@ -2360,18 +2373,97 @@ mod tests {
         assert_eq!(detail.projects[0].status, "failed_precheck");
         assert_eq!(detail.projects[0].nodes.len(), 1);
         assert_eq!(detail.projects[0].nodes[0].status, "failed");
-        assert!(
-            detail.projects[0].nodes[0]
-                .summary_message
-                .contains("未选择项目")
-        );
+        assert_eq!(detail.projects[0].nodes[0].summary_message, "未设置执行路径");
         assert!(
             detail.projects[0].nodes[0]
                 .detail_zh
                 .as_deref()
                 .unwrap_or_default()
-                .contains("切换项目")
+                .contains("执行路径")
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn set_working_path_pipeline_runtime_runs_without_active_project_when_path_is_absolute() {
+        let pool = setup_test_pool().await;
+        let root = make_temp_test_dir("pipeline_set_working_path_no_project_root");
+        let (_, target_repo) = create_repo_fixture(&root);
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "pipeline-set-working-path-no-project".to_string(),
+            "set working path without active project".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "set_working_path".to_string(),
+                parameters: serde_json::json!({ "path": target_repo.to_string_lossy() }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(1))
+            .await
+            .expect("execute pipeline run without active project");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.status, "completed");
+        assert_eq!(detail.project_group_id, None);
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].managed_project_id, None);
+        assert_eq!(detail.projects[0].project_name, "未选择项目");
+        assert_eq!(detail.projects[0].status, "success");
+        assert_eq!(detail.projects[0].nodes.len(), 1);
+        assert_eq!(detail.projects[0].nodes[0].node_type, "set_working_path");
+        assert_eq!(detail.projects[0].nodes[0].status, "success");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn working_path_pipeline_runtime_allows_checkout_without_active_project_after_setting_path() {
+        let pool = setup_test_pool().await;
+        let root = make_temp_test_dir("pipeline_working_path_checkout_without_project_root");
+        let (_, target_repo) = create_repo_fixture(&root);
+
+        let pipeline = db::create_pipeline_definition(
+            &pool,
+            "pipeline-working-path-checkout-no-project".to_string(),
+            "working path checkout without active project".to_string(),
+            true,
+            1,
+            vec![],
+            vec![
+                PipelineNodeInput {
+                    node_type: "set_working_path".to_string(),
+                    parameters: serde_json::json!({ "path": target_repo.to_string_lossy() }),
+                },
+                PipelineNodeInput {
+                    node_type: "checkout_branch".to_string(),
+                    parameters: serde_json::json!({ "branch": "target-only" }),
+                },
+            ],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(1))
+            .await
+            .expect("execute pipeline run without active project");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        assert_eq!(detail.status, "completed");
+        assert_eq!(detail.projects.len(), 1);
+        assert_eq!(detail.projects[0].status, "success");
+        assert_eq!(detail.projects[0].nodes.len(), 2);
+        assert_eq!(detail.projects[0].nodes[0].node_type, "set_working_path");
+        assert_eq!(detail.projects[0].nodes[0].status, "success");
+        assert_eq!(detail.projects[0].nodes[1].node_type, "checkout_branch");
+        assert_eq!(detail.projects[0].nodes[1].status, "success");
     }
 
     #[tokio::test]

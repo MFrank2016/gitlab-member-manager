@@ -145,28 +145,35 @@ pub(crate) fn build_execution_step_operation(
         "checkout_branch" => Ok(StepOperation::CheckoutBranch {
             branch: read_required_string_param(rendered_parameters, "branch")?,
         }),
-        "git_pull" => {
-            let project = project
-                .ok_or_else(|| anyhow!("active managed project is required for step type: git_pull"))?;
-            Ok(StepOperation::GitPull {
+        "git_pull" => Ok(StepOperation::GitPull {
             remote: read_optional_string_param(rendered_parameters, "remote")
-                .unwrap_or_else(|| project.default_remote.clone()),
+                .or_else(|| project.map(|value| value.default_remote.clone()))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "step parameter 'remote' is required when no active managed project is selected for step type: git_pull"
+                    )
+                })?,
             branch: read_optional_string_param(rendered_parameters, "branch")
-                .unwrap_or_else(|| project.default_branch.clone()),
-        })
-        }
+                .or_else(|| project.map(|value| value.default_branch.clone()))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "step parameter 'branch' is required when no active managed project is selected for step type: git_pull"
+                    )
+                })?,
+        }),
         "git_merge" => Ok(StepOperation::GitMerge {
             from: read_required_string_param(rendered_parameters, "from")?,
         }),
-        "git_push" => {
-            let project = project
-                .ok_or_else(|| anyhow!("active managed project is required for step type: git_push"))?;
-            Ok(StepOperation::GitPush {
+        "git_push" => Ok(StepOperation::GitPush {
             remote: read_optional_string_param(rendered_parameters, "remote")
-                .unwrap_or_else(|| project.default_remote.clone()),
+                .or_else(|| project.map(|value| value.default_remote.clone()))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "step parameter 'remote' is required when no active managed project is selected for step type: git_push"
+                    )
+                })?,
             branch: read_optional_string_param(rendered_parameters, "branch"),
-        })
-        }
+        }),
         other => Err(anyhow!("unsupported step type: {other}")),
     }
 }
@@ -295,7 +302,7 @@ async fn ensure_remote_exists(repo_path: &Path, remote: &str) -> Result<()> {
     }
 }
 
-async fn ensure_branch_exists(repo_path: &Path, branch: &str, remote: &str) -> Result<()> {
+async fn ensure_branch_exists(repo_path: &Path, branch: &str, remote: Option<&str>) -> Result<()> {
     let local = execute_git_command(
         repo_path.display().to_string(),
         vec![
@@ -309,6 +316,9 @@ async fn ensure_branch_exists(repo_path: &Path, branch: &str, remote: &str) -> R
         return Ok(());
     }
 
+    let Some(remote) = remote.filter(|value| !value.trim().is_empty()) else {
+        return Err(anyhow!("branch '{}' not found locally", branch));
+    };
     let remote_ref = format!("{remote}/{branch}");
     let remote_result = execute_git_command(
         repo_path.display().to_string(),
@@ -346,26 +356,40 @@ pub(crate) async fn run_repository_precheck(repo_path: &Path) -> Result<()> {
 }
 
 pub(crate) async fn run_execution_step_prechecks(
-    working_dir: &Path,
-    project: &ManagedProject,
+    working_dir: Option<&Path>,
+    project: Option<&ManagedProject>,
     operation: &StepOperation,
 ) -> Result<()> {
+    let require_working_dir = || {
+        working_dir.ok_or_else(|| anyhow!("working directory is required for this step"))
+    };
+
     match operation {
         StepOperation::SetWorkingPath { target_path } => ensure_working_path_exists(target_path),
         StepOperation::CheckoutBranch { branch } => {
+            let working_dir = require_working_dir()?;
             run_repository_precheck(working_dir).await?;
-            ensure_branch_exists(working_dir, branch, &project.default_remote).await
-        }
-        StepOperation::GitPull { remote, branch } => {
-            run_repository_precheck(working_dir).await?;
-            ensure_remote_exists(working_dir, remote).await?;
+            let remote = project
+                .map(|value| value.default_remote.as_str())
+                .or(Some("origin"));
             ensure_branch_exists(working_dir, branch, remote).await
         }
-        StepOperation::GitMerge { from } => {
+        StepOperation::GitPull { remote, branch } => {
+            let working_dir = require_working_dir()?;
             run_repository_precheck(working_dir).await?;
-            ensure_branch_exists(working_dir, from, &project.default_remote).await
+            ensure_remote_exists(working_dir, remote).await?;
+            ensure_branch_exists(working_dir, branch, Some(remote.as_str())).await
+        }
+        StepOperation::GitMerge { from } => {
+            let working_dir = require_working_dir()?;
+            run_repository_precheck(working_dir).await?;
+            let remote = project
+                .map(|value| value.default_remote.as_str())
+                .or(Some("origin"));
+            ensure_branch_exists(working_dir, from, remote).await
         }
         StepOperation::GitPush { remote, .. } => {
+            let working_dir = require_working_dir()?;
             run_repository_precheck(working_dir).await?;
             ensure_remote_exists(working_dir, remote).await
         }

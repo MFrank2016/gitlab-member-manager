@@ -11,9 +11,9 @@ The system SHALL execute built-in pipeline nodes serially within a pipeline run,
 - **WHEN** a pipeline node enters a waiting state for an external condition
 - **THEN** the system persists the waiting target, latest observed status, next poll time, and elapsed wait duration for UI monitoring
 
-#### Scenario: Block project-dependent execution before a project is selected
-- **WHEN** a local Git node or GitLab-aware node executes before any active managed project has been selected
-- **THEN** the system marks the node as a Chinese precheck failure and instructs the operator to add or move a `switch_project` node earlier in the pipeline
+#### Scenario: Block project-derived execution defaults before context is available
+- **WHEN** a local Git node executes before any working directory has been established, or a GitLab-aware node executes without an active managed project and without explicit `project` and `ref` parameters
+- **THEN** the system marks the node as a Chinese precheck failure and instructs the operator to add or move a `switch_project` or `set_working_path` node earlier in the pipeline, or fill the explicit GitLab target fields
 
 ## ADDED Requirements
 
@@ -31,3 +31,7 @@ The system SHALL provide a built-in `switch_project` node that selects an enable
 #### Scenario: Use the active managed project as the default GitLab target
 - **WHEN** a GitLab-aware node executes after `switch_project` and its `project` field is blank
 - **THEN** the system uses the active managed project's `path_with_namespace` as the GitLab project target
+
+#### Scenario: Use explicit GitLab target fields without selecting a project first
+- **WHEN** a GitLab-aware node executes before `switch_project` but its `project` and `ref` fields are explicitly configured
+- **THEN** the system executes the node with those explicit values instead of requiring an active managed project

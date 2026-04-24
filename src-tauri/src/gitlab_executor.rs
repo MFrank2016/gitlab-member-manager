@@ -101,17 +101,36 @@ pub(crate) fn classify_gitlab_pipeline_status_failure(
 
 pub(crate) fn read_pipeline_project_param(
     parameters: &Value,
-    project: &ManagedProject,
+    project: Option<&ManagedProject>,
 ) -> Result<String> {
-    Ok(read_optional_string_param(parameters, "project")
-        .unwrap_or_else(|| project.path_with_namespace.clone()))
+    if let Some(value) = read_optional_string_param(parameters, "project") {
+        return Ok(value);
+    }
+
+    project
+        .map(|value| value.path_with_namespace.clone())
+        .ok_or_else(|| {
+            anyhow!(
+                "step parameter 'project' is required when no active managed project is selected"
+            )
+        })
 }
 
 pub(crate) fn read_pipeline_reference_param(
     parameters: &Value,
-    project: &ManagedProject,
-) -> String {
-    read_optional_string_param(parameters, "ref").unwrap_or_else(|| project.default_branch.clone())
+    project: Option<&ManagedProject>,
+) -> Result<String> {
+    if let Some(value) = read_optional_string_param(parameters, "ref") {
+        return Ok(value);
+    }
+
+    project
+        .map(|value| value.default_branch.clone())
+        .ok_or_else(|| {
+            anyhow!(
+                "step parameter 'ref' is required when no active managed project is selected"
+            )
+        })
 }
 
 pub(crate) fn read_pipeline_variables_param(parameters: &Value) -> Result<Vec<(String, String)>> {

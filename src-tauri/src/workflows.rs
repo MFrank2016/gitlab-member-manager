@@ -2061,7 +2061,11 @@ mod tests {
             branch: "missing-branch".to_string(),
         };
 
-        let error = run_execution_step_prechecks(std::path::Path::new(&project.repo_path), &project, &operation)
+        let error = run_execution_step_prechecks(
+            Some(std::path::Path::new(&project.repo_path)),
+            Some(&project),
+            &operation,
+        )
             .await
             .expect_err("missing branch should fail step prechecks");
 
