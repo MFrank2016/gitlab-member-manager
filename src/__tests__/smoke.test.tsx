@@ -1140,6 +1140,8 @@ describe("pipeline wrapper smoke", () => {
 	        status: "running",
 	        pipelineDefinitionId: 11,
 	        projectGroupId: 5,
+	        sortBy: null,
+	        sortDirection: null,
 	      },
 	    });
 	    expect(invokeMock).toHaveBeenCalledWith("get_pipeline_run_detail", { id: 301 });
@@ -1458,6 +1460,199 @@ describe("pipeline run monitor interactions", () => {
 
     expect(await screen.findAllByText("按步骤切换项目")).toHaveLength(2);
     expect(await screen.findAllByText("switch-project-pipeline")).toHaveLength(2);
+  });
+
+  it("renders neutral execution segment labels instead of 未选择项目", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_runs") {
+        return {
+          items: [
+            {
+              id: 452,
+              pipelineDefinitionId: 30,
+              pipelineDefinitionName: "path-only-pipeline",
+              projectGroupId: null,
+              projectGroupName: null,
+              legacyWorkflowRunId: null,
+              sourcePipelineRunId: null,
+              triggerKind: "manual",
+              status: "completed",
+              runParameters: {},
+              maxConcurrency: 1,
+              projectsTotal: 1,
+              projectsQueued: 0,
+              projectsRunning: 0,
+              projectsSuccess: 1,
+              projectsFailed: 0,
+              projectsCancelled: 0,
+              projectsFailedPrecheck: 0,
+              startedAt: "2026-04-23T00:00:00Z",
+              finishedAt: "2026-04-23T00:00:10Z",
+              createdAt: "2026-04-23T00:00:00Z",
+              updatedAt: "2026-04-23T00:00:10Z",
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "get_pipeline_run_detail") {
+        expect(args).toEqual({ id: 452 });
+        return {
+          id: 452,
+          pipelineDefinitionId: 30,
+          pipelineDefinitionName: "path-only-pipeline",
+          projectGroupId: null,
+          projectGroupName: null,
+          legacyWorkflowRunId: null,
+          sourcePipelineRunId: null,
+          triggerKind: "manual",
+          status: "completed",
+          runParameters: {},
+          maxConcurrency: 1,
+          projectsTotal: 1,
+          projectsQueued: 0,
+          projectsRunning: 0,
+          projectsSuccess: 1,
+          projectsFailed: 0,
+          projectsCancelled: 0,
+          projectsFailedPrecheck: 0,
+          startedAt: "2026-04-23T00:00:00Z",
+          finishedAt: "2026-04-23T00:00:10Z",
+          createdAt: "2026-04-23T00:00:00Z",
+          updatedAt: "2026-04-23T00:00:10Z",
+          projects: [
+            {
+              id: 5601,
+              managedProjectId: null,
+              gitlabProjectId: 0,
+              projectName: "未选择项目",
+              projectPathWithNamespace: "__unselected_project__",
+              repoPath: "__unselected_project__",
+              status: "success",
+              summaryMessage: "all nodes completed",
+              startedAt: "2026-04-23T00:00:00Z",
+              finishedAt: "2026-04-23T00:00:10Z",
+              nodes: [],
+            },
+          ],
+        };
+      }
+      return undefined;
+    });
+
+    render(<WorkflowRunsPage />);
+
+    expect(await screen.findByText("执行段 1")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("未选择项目")).not.toBeInTheDocument();
+    });
+  });
+
+  it("supports sorting and deleting pipeline runs from the list", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_runs") {
+        return {
+          items: [
+            {
+              id: 601,
+              pipelineDefinitionId: 41,
+              pipelineDefinitionName: "sortable-pipeline",
+              projectGroupId: null,
+              projectGroupName: null,
+              legacyWorkflowRunId: null,
+              sourcePipelineRunId: null,
+              triggerKind: "manual",
+              status: "completed",
+              runParameters: { source_branch: "main" },
+              maxConcurrency: 1,
+              projectsTotal: 1,
+              projectsQueued: 0,
+              projectsRunning: 0,
+              projectsSuccess: 1,
+              projectsFailed: 0,
+              projectsCancelled: 0,
+              projectsFailedPrecheck: 0,
+              startedAt: "2026-04-23T01:00:00Z",
+              finishedAt: "2026-04-23T01:05:00Z",
+              createdAt: "2026-04-23T01:00:00Z",
+              updatedAt: "2026-04-23T01:05:00Z",
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "get_pipeline_run_detail") {
+        return {
+          id: 601,
+          pipelineDefinitionId: 41,
+          pipelineDefinitionName: "sortable-pipeline",
+          projectGroupId: null,
+          projectGroupName: null,
+          legacyWorkflowRunId: null,
+          sourcePipelineRunId: null,
+          triggerKind: "manual",
+          status: "completed",
+          runParameters: { source_branch: "main" },
+          maxConcurrency: 1,
+          projectsTotal: 1,
+          projectsQueued: 0,
+          projectsRunning: 0,
+          projectsSuccess: 1,
+          projectsFailed: 0,
+          projectsCancelled: 0,
+          projectsFailedPrecheck: 0,
+          startedAt: "2026-04-23T01:00:00Z",
+          finishedAt: "2026-04-23T01:05:00Z",
+          createdAt: "2026-04-23T01:00:00Z",
+          updatedAt: "2026-04-23T01:05:00Z",
+          projects: [],
+        };
+      }
+      if (cmd === "delete_pipeline_run") {
+        expect(args).toEqual({ id: 601 });
+        return undefined;
+      }
+      return undefined;
+    });
+
+    render(<WorkflowRunsPage />);
+
+    expect((await screen.findAllByText("sortable-pipeline")).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "按运行排序" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("list_pipeline_runs", {
+        query: expect.objectContaining({
+          sortBy: "id",
+          sortDirection: "desc",
+        }),
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "按运行排序" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("list_pipeline_runs", {
+        query: expect.objectContaining({
+          sortBy: "id",
+          sortDirection: "asc",
+        }),
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /删除运行 #601/i }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("delete_pipeline_run", { id: 601 });
+    });
+
+    confirmSpy.mockRestore();
   });
 
   it("operator messaging: renders Chinese remote status labels in the run monitor", async () => {

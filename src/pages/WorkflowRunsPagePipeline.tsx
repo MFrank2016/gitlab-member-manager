@@ -7,6 +7,7 @@ import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   cancelPipelineRun,
+  deletePipelineRun,
   getPipelineRunDetail,
   getPipelineRunNodeDiagnostics,
   listPipelineRuns,
@@ -20,6 +21,8 @@ import type {
   PipelineRunNode,
   PipelineRunNodeDiagnostics,
   PipelineRunProject,
+  PipelineRunSortBy,
+  PipelineRunSortDirection,
 } from "@/lib/types";
 import { cn, formatDateTime } from "@/lib/utils";
 
@@ -100,6 +103,8 @@ NODE_TYPE_TEXT.set_working_path = "设置执行路径";
 
 const DEFAULT_RUN_PAGE_SIZE = 20;
 const AUTO_REFRESH_INTERVAL_MS = 10_000;
+const UNSELECTED_PROJECT_NAME = "未选择项目";
+const UNSELECTED_PROJECT_SENTINEL = "__unselected_project__";
 
 const RUN_STATUS_FILTER_OPTIONS = [
   { value: "", label: "全部状态" },
@@ -121,6 +126,11 @@ type FilterState = {
 type WorkflowRunsPageFocusTarget = {
   runId: number;
   nonce: number;
+};
+
+type SortState = {
+  sortBy: PipelineRunSortBy;
+  sortDirection: PipelineRunSortDirection;
 };
 
 type NodeDiagnosticsMap = Record<number, PipelineRunNodeDiagnostics | null | undefined>;
@@ -186,6 +196,58 @@ function sortedNodes(project: PipelineRunProject) {
   return [...project.nodes].sort((a, b) => a.nodeOrder - b.nodeOrder);
 }
 
+function isProjectlessExecutionSegment(project: PipelineRunProject) {
+  return (
+    project.managedProjectId == null &&
+    (project.projectName.trim() === UNSELECTED_PROJECT_NAME ||
+      project.projectPathWithNamespace.trim() === UNSELECTED_PROJECT_SENTINEL ||
+      project.repoPath.trim() === UNSELECTED_PROJECT_SENTINEL)
+  );
+}
+
+function executionSegmentLabel(project: PipelineRunProject, index: number) {
+  if (!isProjectlessExecutionSegment(project) && project.projectName.trim()) {
+    return project.projectName;
+  }
+  return `执行段 ${index + 1}`;
+}
+
+function executionSegmentMeta(project: PipelineRunProject) {
+  if (
+    project.projectPathWithNamespace.trim() &&
+    project.projectPathWithNamespace.trim() !== UNSELECTED_PROJECT_SENTINEL
+  ) {
+    return project.projectPathWithNamespace;
+  }
+  if (project.repoPath.trim() && project.repoPath.trim() !== UNSELECTED_PROJECT_SENTINEL) {
+    return project.repoPath;
+  }
+  return null;
+}
+
+function defaultSortDirection(sortBy: PipelineRunSortBy): PipelineRunSortDirection {
+  return sortBy === "id" || sortBy === "updatedAt" ? "desc" : "asc";
+}
+
+function nextSortState(current: SortState, sortBy: PipelineRunSortBy): SortState {
+  if (current.sortBy === sortBy) {
+    return {
+      sortBy,
+      sortDirection: current.sortDirection === "desc" ? "asc" : "desc",
+    };
+  }
+
+  return {
+    sortBy,
+    sortDirection: defaultSortDirection(sortBy),
+  };
+}
+
+function sortIndicator(current: SortState, sortBy: PipelineRunSortBy) {
+  if (current.sortBy !== sortBy) return "↕";
+  return current.sortDirection === "asc" ? "↑" : "↓";
+}
+
 function parseOptionalNumber(value: string): number | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -193,13 +255,15 @@ function parseOptionalNumber(value: string): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-function buildRunQuery(filters: FilterState, page: number): PipelineRunListQuery {
+function buildRunQuery(filters: FilterState, page: number, sortState: SortState): PipelineRunListQuery {
   return {
     page,
     pageSize: DEFAULT_RUN_PAGE_SIZE,
     status: filters.status || null,
     pipelineDefinitionId: parseOptionalNumber(filters.pipelineDefinitionId),
     projectGroupId: parseOptionalNumber(filters.projectGroupId),
+    sortBy: sortState.sortBy,
+    sortDirection: sortState.sortDirection,
   };
 }
 
@@ -341,8 +405,13 @@ export function WorkflowRunsPagePipeline({
   const [loadingRuns, setLoadingRuns] = React.useState(false);
   const [loadingDetail, setLoadingDetail] = React.useState(false);
   const [cancelling, setCancelling] = React.useState(false);
+  const [deletingRunId, setDeletingRunId] = React.useState<number | null>(null);
   const [retrying, setRetrying] = React.useState(false);
   const [projectViewMode, setProjectViewMode] = React.useState<ProjectViewMode>("list");
+  const [sortState, setSortState] = React.useState<SortState>({
+    sortBy: "updatedAt",
+    sortDirection: "desc",
+  });
   const [expandedNodes, setExpandedNodes] = React.useState<ExpandedNodeMap>({});
   const [nodeDiagnosticsById, setNodeDiagnosticsById] = React.useState<NodeDiagnosticsMap>({});
   const [loadingNodeDiagnosticsById, setLoadingNodeDiagnosticsById] = React.useState<LoadingNodeMap>({});
@@ -379,18 +448,20 @@ export function WorkflowRunsPagePipeline({
   async function refreshRuns(
     preferredRunId?: number | null,
     pageOverride?: number,
-    filtersOverride?: FilterState
+    filtersOverride?: FilterState,
+    sortOverride?: SortState
   ) {
     const refreshRequestToken = refreshRequestTokenRef.current + 1;
     refreshRequestTokenRef.current = refreshRequestToken;
     const selectedRunAtRequestStart = selectedRunIdRef.current;
     const userSelectionVersionAtRequestStart = userSelectionVersionRef.current;
     const nextFilters = filtersOverride ?? filters;
+    const nextSortState = sortOverride ?? sortState;
     const nextPageNumber = pageOverride ?? runPage.page ?? 1;
 
     setLoadingRuns(true);
     try {
-      const nextRunPage = await listPipelineRuns(buildRunQuery(nextFilters, nextPageNumber));
+      const nextRunPage = await listPipelineRuns(buildRunQuery(nextFilters, nextPageNumber, nextSortState));
       if (refreshRequestToken !== refreshRequestTokenRef.current) return;
 
       const userChangedSelectionDuringRequest =
@@ -448,9 +519,9 @@ export function WorkflowRunsPagePipeline({
     };
     setFilters(nextFilters);
     userSelectionVersionRef.current += 1;
-    void refreshRuns(focusTarget.runId, 1, nextFilters);
+    void refreshRuns(focusTarget.runId, 1, nextFilters, sortState);
     onFocusHandled?.();
-  }, [focusTarget, onFocusHandled]);
+  }, [focusTarget, onFocusHandled, sortState]);
 
   React.useEffect(() => {
     const requestToken = detailRequestTokenRef.current + 1;
@@ -494,6 +565,12 @@ export function WorkflowRunsPagePipeline({
   const activeRun = selectedRunDetail ?? selectedRun;
   const selectedProject =
     selectedRunDetail?.projects.find((project) => project.id === selectedProjectId) ?? null;
+  const selectedProjectIndex =
+    selectedRunDetail?.projects.findIndex((project) => project.id === selectedProjectId) ?? -1;
+  const selectedProjectLabel =
+    selectedProject && selectedProjectIndex >= 0
+      ? executionSegmentLabel(selectedProject, selectedProjectIndex)
+      : selectedProject?.projectName ?? null;
   const canCancel = selectedRun?.status === "pending" || selectedRun?.status === "running";
   const canRetryFailed = selectedRunDetail?.projects.some((project) => hasFailedProject(project)) ?? false;
 
@@ -503,7 +580,7 @@ export function WorkflowRunsPagePipeline({
     }
 
     const intervalHandle = window.setInterval(() => {
-      void refreshRuns(selectedRunId, runPage.page, filters);
+      void refreshRuns(selectedRunId, runPage.page, filters, sortState);
     }, AUTO_REFRESH_INTERVAL_MS);
 
     return () => {
@@ -516,6 +593,8 @@ export function WorkflowRunsPagePipeline({
     filters.status,
     filters.pipelineDefinitionId,
     filters.projectGroupId,
+    sortState.sortBy,
+    sortState.sortDirection,
   ]);
 
   async function onCancelRun() {
@@ -526,7 +605,7 @@ export function WorkflowRunsPagePipeline({
     try {
       await cancelPipelineRun(targetRunId);
       toast.success(`已提交取消请求：运行 #${targetRunId}`);
-      await refreshRuns(targetRunId, runPage.page, filters);
+      await refreshRuns(targetRunId, runPage.page, filters, sortState);
     } catch (error) {
       toast.error(readCommandErrorMessage(error, "取消流水线运行失败。"));
     } finally {
@@ -550,11 +629,36 @@ export function WorkflowRunsPagePipeline({
         maxConcurrencyOverride: null,
       });
       toast.success(`已创建重试运行：#${result.pipelineRunId}`);
-      await refreshRuns(result.pipelineRunId, runPage.page, filters);
+      await refreshRuns(result.pipelineRunId, runPage.page, filters, sortState);
     } catch (error) {
       toast.error(readCommandErrorMessage(error, "重试失败项目失败。"));
     } finally {
       setRetrying(false);
+    }
+  }
+
+  async function onDeleteRun(runId: number) {
+    const targetRun = runs.find((run) => run.id === runId);
+    if (!targetRun || isActiveRunStatus(targetRun.status)) {
+      return;
+    }
+    const confirmed = window.confirm(`确认删除运行记录 #${runId} 吗？此操作不可恢复。`);
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingRunId(runId);
+    try {
+      await deletePipelineRun(runId);
+      toast.success(`已删除运行记录 #${runId}`);
+      const nextPageNumber =
+        runPage.items.length === 1 && runPage.page > 1 ? runPage.page - 1 : runPage.page;
+      const preferredRunId = selectedRunId === runId ? null : selectedRunId;
+      await refreshRuns(preferredRunId, nextPageNumber, filters, sortState);
+    } catch (error) {
+      toast.error(readCommandErrorMessage(error, "删除运行记录失败。"));
+    } finally {
+      setDeletingRunId(null);
     }
   }
 
@@ -584,7 +688,7 @@ export function WorkflowRunsPagePipeline({
 
   function onApplyFilters() {
     userSelectionVersionRef.current += 1;
-    void refreshRuns(null, 1, filters);
+    void refreshRuns(null, 1, filters, sortState);
   }
 
   function onClearFilters() {
@@ -595,7 +699,14 @@ export function WorkflowRunsPagePipeline({
     };
     setFilters(nextFilters);
     userSelectionVersionRef.current += 1;
-    void refreshRuns(null, 1, nextFilters);
+    void refreshRuns(null, 1, nextFilters, sortState);
+  }
+
+  function onToggleRunSort(sortBy: PipelineRunSortBy) {
+    const next = nextSortState(sortState, sortBy);
+    setSortState(next);
+    userSelectionVersionRef.current += 1;
+    void refreshRuns(selectedRunId, 1, filters, next);
   }
 
   return (
@@ -608,7 +719,7 @@ export function WorkflowRunsPagePipeline({
               查看各项目的流水线执行状态、等待信息和失败细节。
             </p>
           </div>
-          <Button variant="secondary" onClick={() => void refreshRuns(selectedRunId, runPage.page, filters)} disabled={loadingRuns}>
+          <Button variant="secondary" onClick={() => void refreshRuns(selectedRunId, runPage.page, filters, sortState)} disabled={loadingRuns}>
             刷新
           </Button>
         </PanelHeader>
@@ -663,11 +774,62 @@ export function WorkflowRunsPagePipeline({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>运行</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>流水线</TableHead>
-                <TableHead>项目组</TableHead>
-                <TableHead>更新时间</TableHead>
+                <TableHead>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 font-semibold text-muted-foreground hover:text-foreground"
+                    aria-label="按运行排序"
+                    onClick={() => onToggleRunSort("id")}
+                  >
+                    <span>运行</span>
+                    <span aria-hidden="true">{sortIndicator(sortState, "id")}</span>
+                  </button>
+                </TableHead>
+                <TableHead>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 font-semibold text-muted-foreground hover:text-foreground"
+                    aria-label="按状态排序"
+                    onClick={() => onToggleRunSort("status")}
+                  >
+                    <span>状态</span>
+                    <span aria-hidden="true">{sortIndicator(sortState, "status")}</span>
+                  </button>
+                </TableHead>
+                <TableHead>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 font-semibold text-muted-foreground hover:text-foreground"
+                    aria-label="按流水线排序"
+                    onClick={() => onToggleRunSort("pipelineDefinitionName")}
+                  >
+                    <span>流水线</span>
+                    <span aria-hidden="true">{sortIndicator(sortState, "pipelineDefinitionName")}</span>
+                  </button>
+                </TableHead>
+                <TableHead>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 font-semibold text-muted-foreground hover:text-foreground"
+                    aria-label="按项目组排序"
+                    onClick={() => onToggleRunSort("projectGroupName")}
+                  >
+                    <span>项目组</span>
+                    <span aria-hidden="true">{sortIndicator(sortState, "projectGroupName")}</span>
+                  </button>
+                </TableHead>
+                <TableHead>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 font-semibold text-muted-foreground hover:text-foreground"
+                    aria-label="按更新时间排序"
+                    onClick={() => onToggleRunSort("updatedAt")}
+                  >
+                    <span>更新时间</span>
+                    <span aria-hidden="true">{sortIndicator(sortState, "updatedAt")}</span>
+                  </button>
+                </TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -678,11 +840,25 @@ export function WorkflowRunsPagePipeline({
                   <TableCell>{run.pipelineDefinitionName}</TableCell>
                   <TableCell>{projectGroupLabel(run.projectGroupName)}</TableCell>
                   <TableCell className="font-mono text-xs">{formatDateTime(run.updatedAt)}</TableCell>
+                  <TableCell>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`删除运行 #${run.id}`}
+                      disabled={isActiveRunStatus(run.status) || deletingRunId === run.id}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void onDeleteRun(run.id);
+                      }}
+                    >
+                      {deletingRunId === run.id ? "删除中..." : "删除"}
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))}
               {runs.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-center text-muted-foreground">
+                  <TableCell colSpan={6} className="text-center text-muted-foreground">
                     {loadingRuns ? "流水线运行加载中..." : "暂无流水线运行记录。"}
                   </TableCell>
                 </TableRow>
@@ -699,7 +875,7 @@ export function WorkflowRunsPagePipeline({
                 variant="outline"
                 size="sm"
                 disabled={loadingRuns || runPage.page <= 1}
-                onClick={() => void refreshRuns(selectedRunId, runPage.page - 1, filters)}
+                onClick={() => void refreshRuns(selectedRunId, runPage.page - 1, filters, sortState)}
               >
                 上一页
               </Button>
@@ -707,7 +883,7 @@ export function WorkflowRunsPagePipeline({
                 variant="outline"
                 size="sm"
                 disabled={loadingRuns || !runPage.hasNextPage}
-                onClick={() => void refreshRuns(selectedRunId, runPage.page + 1, filters)}
+                onClick={() => void refreshRuns(selectedRunId, runPage.page + 1, filters, sortState)}
               >
                 下一页
               </Button>
@@ -826,19 +1002,26 @@ export function WorkflowRunsPagePipeline({
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {selectedRunDetail.projects.map((project) => (
+                      {selectedRunDetail.projects.map((project, index) => {
+                        const label = executionSegmentLabel(project, index);
+                        const meta = executionSegmentMeta(project);
+
+                        return (
                         <TableRow key={project.id} className={selectedProjectId === project.id ? "bg-muted/50" : ""}>
                           <TableCell>
                             <button type="button" className="text-left text-sm font-medium hover:underline" onClick={() => setSelectedProjectId(project.id)}>
-                              {project.projectName}
+                              {label}
                             </button>
-                            <div className="font-mono text-xs text-muted-foreground">{project.projectPathWithNamespace}</div>
+                            {meta ? (
+                              <div className="font-mono text-xs text-muted-foreground">{meta}</div>
+                            ) : null}
                           </TableCell>
                           <TableCell>{statusPill(project.status, PROJECT_STATUS_CLASS)}</TableCell>
                           <TableCell className="text-xs">{project.summaryMessage || "-"}</TableCell>
                           <TableCell className="font-mono text-xs">{formatDateTime(project.finishedAt)}</TableCell>
                         </TableRow>
-                      ))}
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 )
@@ -850,7 +1033,7 @@ export function WorkflowRunsPagePipeline({
 
           <Panel>
             <PanelHeader>
-              <h3 className="font-semibold">{selectedProject ? `节点时间线 / 详情 - ${selectedProject.projectName}` : "节点时间线 / 详情"}</h3>
+              <h3 className="font-semibold">{selectedProjectLabel ? `节点时间线 / 详情 - ${selectedProjectLabel}` : "节点时间线 / 详情"}</h3>
             </PanelHeader>
             <PanelBody>
               {!selectedProject ? (

@@ -272,12 +272,23 @@ export type PipelineRunListItem = {
   updatedAt: string;
 };
 
+export type PipelineRunSortBy =
+  | "id"
+  | "status"
+  | "pipelineDefinitionName"
+  | "projectGroupName"
+  | "updatedAt";
+
+export type PipelineRunSortDirection = "asc" | "desc";
+
 export type PipelineRunListQuery = {
   page?: number;
   pageSize?: number;
   status?: PipelineRunStatus | null;
   pipelineDefinitionId?: number | null;
   projectGroupId?: number | null;
+  sortBy?: PipelineRunSortBy | null;
+  sortDirection?: PipelineRunSortDirection | null;
 };
 
 export type PipelineRunListPage = {

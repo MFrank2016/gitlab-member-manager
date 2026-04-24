@@ -908,6 +908,23 @@ async fn cancel_pipeline_run(
 }
 
 #[tauri::command]
+async fn delete_pipeline_run(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), CommandError> {
+    let result = db::delete_pipeline_run(&state.db, id)
+        .await
+        .map_err(pipeline_command_error);
+
+    match &result {
+        Ok(_) => tracing::info!(id = id, "delete_pipeline_run success"),
+        Err(e) => tracing::error!(id = id, error = ?e, "delete_pipeline_run failed"),
+    }
+
+    result
+}
+
+#[tauri::command]
 async fn retry_pipeline_run(
     state: State<'_, AppState>,
     request: PipelineRunRetryRequest,
@@ -1515,6 +1532,7 @@ fn main() {
 	      delete_pipeline_definition,
 	      execute_pipeline_run,
 	      cancel_pipeline_run,
+	      delete_pipeline_run,
 	      retry_pipeline_run,
 	      execute_workflow_run,
 	      cancel_workflow_run,

@@ -478,6 +478,8 @@ export async function listPipelineRuns(query: PipelineRunListQuery = {}) {
       status: query.status ?? null,
       pipelineDefinitionId: query.pipelineDefinitionId ?? null,
       projectGroupId: query.projectGroupId ?? null,
+      sortBy: query.sortBy ?? null,
+      sortDirection: query.sortDirection ?? null,
     },
   });
 }
@@ -497,6 +499,10 @@ export async function cancelPipelineRun(pipelineRunId: number) {
   return loggedInvoke<void>("cancel_pipeline_run", {
     pipelineRunId,
   });
+}
+
+export async function deletePipelineRun(id: number) {
+  return loggedInvoke<void>("delete_pipeline_run", { id });
 }
 
 export async function retryPipelineRun(request: PipelineRunRetryRequest) {

@@ -273,6 +273,31 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     })
 }
 
+fn normalize_pipeline_run_sort_direction(value: Option<&str>) -> &'static str {
+    match value {
+        Some(raw) if raw.eq_ignore_ascii_case("asc") => "ASC",
+        _ => "DESC",
+    }
+}
+
+fn build_pipeline_run_order_by_clause(query: &PipelineRunListQuery) -> String {
+    let sort_direction = normalize_pipeline_run_sort_direction(query.sort_direction.as_deref());
+    let sort_by = query.sort_by.as_deref().unwrap_or("updatedAt");
+
+    match sort_by {
+        "id" => format!("r.id {sort_direction}"),
+        "status" => format!("r.status {sort_direction}, r.updated_at DESC, r.id DESC"),
+        "pipelineDefinitionName" => {
+            format!("LOWER(d.name) {sort_direction}, r.updated_at DESC, r.id DESC")
+        }
+        "projectGroupName" => format!(
+            "CASE WHEN g.name IS NULL THEN 1 ELSE 0 END ASC, LOWER(g.name) {sort_direction}, r.updated_at DESC, r.id DESC"
+        ),
+        "updatedAt" => format!("r.updated_at {sort_direction}, r.id {sort_direction}"),
+        _ => "r.updated_at DESC, r.id DESC".to_string(),
+    }
+}
+
 fn legacy_variable_to_pipeline_input(key: &str, value: &Value) -> Result<PipelineVariableInput> {
     let config = value
         .as_object()
@@ -1814,38 +1839,44 @@ pub async fn migrate_workflows_to_pipelines(pool: &SqlitePool) -> Result<Pipelin
             .await?;
 
             for workflow_run_project in workflow_run_projects {
-                let insert_result = sqlx::query(
-                    r#"INSERT OR IGNORE INTO pipeline_run_projects (
-                     pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
-                     repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
-                   ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
-                )
-                .bind(pipeline_run_id)
-                .bind(workflow_run_project.1)
-                .bind(workflow_run_project.2)
-                .bind(&workflow_run_project.3)
-                .bind(&workflow_run_project.4)
-                .bind(&workflow_run_project.5)
-                .bind(&workflow_run_project.6)
-                .bind(&workflow_run_project.7)
-                .bind(&workflow_run_project.8)
-                .bind(&workflow_run_project.9)
-                .bind(&workflow_run_project.10)
-                .bind(&workflow_run_project.11)
-                .execute(&mut *tx)
-                .await?;
-                summary.run_projects_migrated += i64::try_from(insert_result.rows_affected())
-                    .map_err(|_| anyhow!("pipeline run project count out of range"))?;
-
-                let pipeline_run_project_id = sqlx::query_scalar::<_, i64>(
+                let existing_pipeline_run_project_id = sqlx::query_scalar::<_, i64>(
                     r#"SELECT id
                    FROM pipeline_run_projects
                    WHERE pipeline_run_id = ?1 AND gitlab_project_id = ?2"#,
                 )
                 .bind(pipeline_run_id)
                 .bind(workflow_run_project.2)
-                .fetch_one(&mut *tx)
+                .fetch_optional(&mut *tx)
                 .await?;
+
+                let pipeline_run_project_id = match existing_pipeline_run_project_id {
+                    Some(id) => id,
+                    None => {
+                        let insert_result = sqlx::query(
+                            r#"INSERT INTO pipeline_run_projects (
+                             pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+                             repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+                           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+                        )
+                        .bind(pipeline_run_id)
+                        .bind(workflow_run_project.1)
+                        .bind(workflow_run_project.2)
+                        .bind(&workflow_run_project.3)
+                        .bind(&workflow_run_project.4)
+                        .bind(&workflow_run_project.5)
+                        .bind(&workflow_run_project.6)
+                        .bind(&workflow_run_project.7)
+                        .bind(&workflow_run_project.8)
+                        .bind(&workflow_run_project.9)
+                        .bind(&workflow_run_project.10)
+                        .bind(&workflow_run_project.11)
+                        .execute(&mut *tx)
+                        .await?;
+                        summary.run_projects_migrated += i64::try_from(insert_result.rows_affected())
+                            .map_err(|_| anyhow!("pipeline run project count out of range"))?;
+                        insert_result.last_insert_rowid()
+                    }
+                };
 
                 let workflow_run_steps = sqlx::query_as::<
                     _,
@@ -2007,9 +2038,10 @@ pub async fn list_pipeline_runs(
     let page = query.page.unwrap_or(1).max(1);
     let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
     let offset = (page - 1) * page_size;
-    let status_filter = normalize_optional_text(query.status);
+    let status_filter = normalize_optional_text(query.status.clone());
     let pipeline_definition_id = query.pipeline_definition_id;
     let project_group_id = query.project_group_id;
+    let order_by_clause = build_pipeline_run_order_by_clause(&query);
 
     let total = sqlx::query_scalar::<_, i64>(
         r#"SELECT COUNT(*)
@@ -2024,7 +2056,7 @@ pub async fn list_pipeline_runs(
     .fetch_one(pool)
     .await?;
 
-    let rows = sqlx::query_as::<_, PipelineRunSummaryRow>(
+    let list_query = format!(
         r#"SELECT
          r.id,
          r.pipeline_definition_id,
@@ -2056,9 +2088,10 @@ pub async fn list_pipeline_runs(
          AND (?2 IS NULL OR r.pipeline_definition_id = ?2)
          AND (?3 IS NULL OR r.project_group_id = ?3)
        GROUP BY r.id
-       ORDER BY r.updated_at DESC, r.id DESC
+       ORDER BY {order_by_clause}
        LIMIT ?4 OFFSET ?5"#,
-    )
+    );
+    let rows = sqlx::query_as::<_, PipelineRunSummaryRow>(&list_query)
     .bind(status_filter.as_deref())
     .bind(pipeline_definition_id)
     .bind(project_group_id)
@@ -2105,6 +2138,41 @@ pub async fn list_pipeline_runs(
         page_size,
         total,
     })
+}
+
+pub async fn delete_pipeline_run(pool: &SqlitePool, id: i64) -> Result<()> {
+    let status = sqlx::query_scalar::<_, String>(
+        r#"SELECT status
+           FROM pipeline_runs
+           WHERE id = ?1"#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow!("pipeline run not found: {id}"))?;
+
+    if matches!(
+        status.as_str(),
+        "pending" | "running" | "waiting" | "cancelling"
+    ) {
+        return Err(anyhow!(
+            "pipeline run must be in terminal status before deletion: {id}"
+        ));
+    }
+
+    let result = sqlx::query(
+        r#"DELETE FROM pipeline_runs
+           WHERE id = ?1"#,
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(anyhow!("pipeline run not found: {id}"));
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn load_active_pipeline_run_counts(
@@ -3882,6 +3950,7 @@ mod tests {
                 status: Some("running".to_string()),
                 pipeline_definition_id: Some(pipeline_a.id),
                 project_group_id: Some(group_b.id),
+                ..PipelineRunListQuery::default()
             },
         )
         .await
@@ -3893,6 +3962,260 @@ mod tests {
         assert_eq!(listed.items[0].pipeline_definition_id, pipeline_a.id);
         assert_eq!(listed.items[0].project_group_id, Some(group_b.id));
         assert_eq!(listed.items[0].status, "running");
+    }
+
+    #[tokio::test]
+    async fn pipeline_run_monitoring_list_supports_custom_sorting() {
+        let pool = setup_test_pool().await;
+        let pipeline_a = create_pipeline_definition(
+            &pool,
+            "alpha-pipeline".to_string(),
+            "alpha coverage".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create alpha pipeline");
+        let pipeline_b = create_pipeline_definition(
+            &pool,
+            "beta-pipeline".to_string(),
+            "beta coverage".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create beta pipeline");
+
+        for (pipeline_id, run_status, project_status, timestamp, ordinal) in [
+            (pipeline_b.id, "running", "running", "2026-04-15T09:00:00Z", 1_i64),
+            (pipeline_a.id, "completed", "success", "2026-04-15T08:00:00Z", 2_i64),
+        ] {
+            let run_id = sqlx::query(
+                r#"INSERT INTO pipeline_runs (
+                 pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+                 trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+               ) VALUES (?1, NULL, NULL, NULL, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)"#,
+            )
+            .bind(pipeline_id)
+            .bind("manual")
+            .bind(run_status)
+            .bind(format!(r#"{{"ordinal":{ordinal}}}"#))
+            .bind(1_i64)
+            .bind(timestamp)
+            .bind(timestamp)
+            .bind(timestamp)
+            .execute(&pool)
+            .await
+            .expect("insert sortable pipeline run")
+            .last_insert_rowid();
+
+            sqlx::query(
+                r#"INSERT INTO pipeline_run_projects (
+                 pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+                 repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+               ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, '', ?7, NULL, ?8, ?9)"#,
+            )
+            .bind(run_id)
+            .bind(99700_i64 + ordinal)
+            .bind(format!("sortable-project-{ordinal}"))
+            .bind(format!("team/sortable-project-{ordinal}"))
+            .bind(format!("D:/repos/sortable-project-{ordinal}"))
+            .bind(project_status)
+            .bind(timestamp)
+            .bind(timestamp)
+            .bind(timestamp)
+            .execute(&pool)
+            .await
+            .expect("insert sortable pipeline run project");
+        }
+
+        let sorted_by_name = list_pipeline_runs(
+            &pool,
+            PipelineRunListQuery {
+                page: Some(1),
+                page_size: Some(20),
+                status: None,
+                pipeline_definition_id: None,
+                project_group_id: None,
+                sort_by: Some("pipelineDefinitionName".to_string()),
+                sort_direction: Some("asc".to_string()),
+            },
+        )
+        .await
+        .expect("list pipeline runs sorted by definition name");
+        assert_eq!(sorted_by_name.items.len(), 2);
+        assert_eq!(sorted_by_name.items[0].pipeline_definition_name, "alpha-pipeline");
+        assert_eq!(sorted_by_name.items[1].pipeline_definition_name, "beta-pipeline");
+
+        let sorted_by_updated_at = list_pipeline_runs(
+            &pool,
+            PipelineRunListQuery {
+                page: Some(1),
+                page_size: Some(20),
+                status: None,
+                pipeline_definition_id: None,
+                project_group_id: None,
+                sort_by: Some("updatedAt".to_string()),
+                sort_direction: Some("asc".to_string()),
+            },
+        )
+        .await
+        .expect("list pipeline runs sorted by updated_at");
+        assert_eq!(sorted_by_updated_at.items.len(), 2);
+        assert_eq!(
+            sorted_by_updated_at.items[0].run_parameters,
+            serde_json::json!({ "ordinal": 2 })
+        );
+        assert_eq!(
+            sorted_by_updated_at.items[1].run_parameters,
+            serde_json::json!({ "ordinal": 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_pipeline_run_removes_child_rows_and_rejects_active_runs() {
+        let pool = setup_test_pool().await;
+        let pipeline = create_pipeline_definition(
+            &pool,
+            "delete-pipeline-run".to_string(),
+            "delete run coverage".to_string(),
+            true,
+            1,
+            vec![],
+            vec![PipelineNodeInput {
+                node_type: "checkout_branch".to_string(),
+                parameters: serde_json::json!({ "branch": "main" }),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create pipeline definition");
+
+        let completed_run_id = sqlx::query(
+            r#"INSERT INTO pipeline_runs (
+             pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+             trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, NULL, NULL, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
+        )
+        .bind(pipeline.id)
+        .bind("manual")
+        .bind("completed")
+        .bind(r#"{"ordinal":1}"#)
+        .bind(1_i64)
+        .bind("2026-04-15T10:00:00Z")
+        .bind("2026-04-15T10:05:00Z")
+        .bind("2026-04-15T10:00:00Z")
+        .bind("2026-04-15T10:05:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert completed pipeline run")
+        .last_insert_rowid();
+
+        let completed_project_id = sqlx::query(
+            r#"INSERT INTO pipeline_run_projects (
+             pipeline_run_id, managed_project_id, gitlab_project_id, project_name, project_path_with_namespace,
+             repo_path, status, summary_message, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9, ?10)"#,
+        )
+        .bind(completed_run_id)
+        .bind(99801_i64)
+        .bind("delete-project")
+        .bind("team/delete-project")
+        .bind("D:/repos/delete-project")
+        .bind("success")
+        .bind("2026-04-15T10:00:00Z")
+        .bind("2026-04-15T10:05:00Z")
+        .bind("2026-04-15T10:00:00Z")
+        .bind("2026-04-15T10:05:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert completed project row")
+        .last_insert_rowid();
+
+        sqlx::query(
+            r#"INSERT INTO pipeline_run_nodes (
+             pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message,
+             error_code, title_zh, detail_zh, suggestion_zh, evidence, created_at, updated_at
+           ) VALUES (?1, NULL, 0, 'checkout_branch', '{}', 'success', ?2, ?3, '', '', 0, '', NULL, NULL, NULL, NULL, NULL, ?4, ?5)"#,
+        )
+        .bind(completed_project_id)
+        .bind("2026-04-15T10:00:10Z")
+        .bind("2026-04-15T10:00:20Z")
+        .bind("2026-04-15T10:00:00Z")
+        .bind("2026-04-15T10:05:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert completed node row");
+
+        let running_run_id = sqlx::query(
+            r#"INSERT INTO pipeline_runs (
+             pipeline_definition_id, project_group_id, legacy_workflow_run_id, source_pipeline_run_id,
+             trigger_kind, status, run_parameters_json, max_concurrency, started_at, finished_at, created_at, updated_at
+           ) VALUES (?1, NULL, NULL, NULL, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)"#,
+        )
+        .bind(pipeline.id)
+        .bind("manual")
+        .bind("running")
+        .bind(r#"{"ordinal":2}"#)
+        .bind(1_i64)
+        .bind("2026-04-15T11:00:00Z")
+        .bind("2026-04-15T11:00:00Z")
+        .bind("2026-04-15T11:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert running pipeline run")
+        .last_insert_rowid();
+
+        delete_pipeline_run(&pool, completed_run_id)
+            .await
+            .expect("delete completed pipeline run");
+
+        let remaining_completed_runs = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*) FROM pipeline_runs WHERE id = ?1"#,
+        )
+        .bind(completed_run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count remaining completed runs");
+        assert_eq!(remaining_completed_runs, 0);
+
+        let remaining_completed_projects = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*) FROM pipeline_run_projects WHERE pipeline_run_id = ?1"#,
+        )
+        .bind(completed_run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count remaining completed projects");
+        assert_eq!(remaining_completed_projects, 0);
+
+        let remaining_completed_nodes = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*)
+               FROM pipeline_run_nodes
+               WHERE pipeline_run_project_id = ?1"#,
+        )
+        .bind(completed_project_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count remaining completed nodes");
+        assert_eq!(remaining_completed_nodes, 0);
+
+        let error = delete_pipeline_run(&pool, running_run_id)
+            .await
+            .expect_err("running pipeline run should not be deletable");
+        assert!(error.to_string().contains("terminal status"));
     }
 
     #[tokio::test]

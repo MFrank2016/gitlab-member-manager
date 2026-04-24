@@ -282,6 +282,10 @@ pub struct PipelineRunListQuery {
     pub pipeline_definition_id: Option<i64>,
     #[serde(default)]
     pub project_group_id: Option<i64>,
+    #[serde(default)]
+    pub sort_by: Option<String>,
+    #[serde(default)]
+    pub sort_direction: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
