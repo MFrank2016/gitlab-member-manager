@@ -21,7 +21,6 @@ const SCHEDULER_TICK_INTERVAL: Duration = Duration::from_secs(30);
 struct QueuedScheduleRequest {
     schedule_id: i64,
     pipeline_definition_id: i64,
-    project_group_id: Option<i64>,
     run_parameters: Value,
 }
 
@@ -36,7 +35,6 @@ struct SchedulerState {
 struct LoadedPipelineSchedule {
     schedule_id: i64,
     pipeline_definition_id: i64,
-    project_group_id: Option<i64>,
     cron_expr: String,
     timezone: String,
     policy: String,
@@ -80,11 +78,10 @@ pub(crate) struct PipelineSchedulerRuntime {
 }
 
 async fn load_enabled_pipeline_schedules(pool: &SqlitePool) -> Result<Vec<LoadedPipelineSchedule>> {
-    let rows = sqlx::query_as::<_, (i64, i64, Option<i64>, String, String, String, String)>(
+    let rows = sqlx::query_as::<_, (i64, i64, String, String, String, String)>(
         r#"SELECT
              s.id,
              s.pipeline_definition_id,
-             s.project_group_id,
              s.cron_expr,
              s.timezone,
              s.policy,
@@ -101,7 +98,7 @@ async fn load_enabled_pipeline_schedules(pool: &SqlitePool) -> Result<Vec<Loaded
     let mut schedules = Vec::with_capacity(rows.len());
     for row in rows {
         let run_parameters: Value =
-            serde_json::from_str(&row.6).map_err(|error| anyhow::anyhow!(error))?;
+            serde_json::from_str(&row.5).map_err(|error| anyhow::anyhow!(error))?;
         let Value::Object(_) = run_parameters else {
             return Err(anyhow::anyhow!(
                 "pipeline schedule variables must be a JSON object"
@@ -111,10 +108,9 @@ async fn load_enabled_pipeline_schedules(pool: &SqlitePool) -> Result<Vec<Loaded
         schedules.push(LoadedPipelineSchedule {
             schedule_id: row.0,
             pipeline_definition_id: row.1,
-            project_group_id: row.2,
-            cron_expr: row.3,
-            timezone: row.4,
-            policy: row.5,
+            cron_expr: row.2,
+            timezone: row.3,
+            policy: row.4,
             run_parameters,
         });
     }
@@ -232,7 +228,7 @@ async fn start_scheduled_run(request: &QueuedScheduleRequest, pool: &SqlitePool)
     workflows::execute_scheduled_pipeline_run(
         pool,
         request.pipeline_definition_id,
-        request.project_group_id,
+        None,
         request.run_parameters.clone(),
     )
     .await
@@ -311,7 +307,6 @@ async fn run_scheduler_tick(
         let request = QueuedScheduleRequest {
             schedule_id: schedule.schedule_id,
             pipeline_definition_id: schedule.pipeline_definition_id,
-            project_group_id: schedule.project_group_id,
             run_parameters: schedule.run_parameters.clone(),
         };
 
@@ -356,7 +351,6 @@ async fn run_scheduler_tick(
                     let already_queued = state.queued_requests.iter().any(|queued| {
                         queued.schedule_id == request.schedule_id
                             && queued.pipeline_definition_id == request.pipeline_definition_id
-                            && queued.project_group_id == request.project_group_id
                             && queued.run_parameters == request.run_parameters
                     });
                     if !already_queued {
@@ -655,6 +649,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_schedule_runtime_ignores_legacy_project_group_metadata_when_starting_new_run() {
+        let pool = db::setup_test_pool().await;
+        let (pipeline_definition_id, _project_group_id) =
+            create_project_group_with_schedule(&pool, "skip_if_running").await;
+        let mut state = SchedulerState::default();
+
+        let summary = run_scheduler_tick(
+            &pool,
+            &mut state,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 30)
+                .single()
+                .expect("construct scheduler tick time"),
+        )
+        .await
+        .expect("run scheduler tick");
+
+        assert_eq!(summary.started_runs, 1);
+        assert_eq!(summary.queued_runs, 0);
+        assert_eq!(summary.skipped_runs, 0);
+
+        let run = db::list_pipeline_runs(&pool, crate::models::PipelineRunListQuery::default())
+            .await
+            .expect("list pipeline runs");
+        let scheduled_run = run
+            .items
+            .into_iter()
+            .find(|item| item.pipeline_definition_id == pipeline_definition_id)
+            .expect("find scheduled run");
+        assert_eq!(scheduled_run.project_group_id, None);
+    }
+
+    #[tokio::test]
     async fn pipeline_schedule_runtime_skip_if_running_skips_active_pipeline() {
         let pool = db::setup_test_pool().await;
         let (pipeline_definition_id, project_group_id) =
@@ -840,6 +866,65 @@ mod tests {
         assert_eq!(second_summary.skipped_runs, 0);
         assert!(state.queued_requests.is_empty());
         assert_eq!(count_schedule_runs(&pool, pipeline_definition_id).await, 2);
+    }
+
+    #[tokio::test]
+    async fn pipeline_schedule_runtime_queue_identity_ignores_legacy_project_group_metadata() {
+        let pool = db::setup_test_pool().await;
+        let (pipeline_definition_id, project_group_id) =
+            create_project_group_with_schedule(&pool, "queue_after_running").await;
+        let mut state = SchedulerState::default();
+        seed_running_pipeline_run(&pool, pipeline_definition_id, project_group_id).await;
+
+        sqlx::query(
+            r#"UPDATE pipeline_schedules
+               SET cron_expr = ?1
+               WHERE pipeline_definition_id = ?2"#,
+        )
+        .bind("* * * * *")
+        .bind(pipeline_definition_id)
+        .execute(&pool)
+        .await
+        .expect("make queue_after_running schedule fire every minute");
+
+        let first_summary = run_scheduler_tick(
+            &pool,
+            &mut state,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 30)
+                .single()
+                .expect("construct first scheduler tick time"),
+        )
+        .await
+        .expect("run first scheduler tick");
+
+        assert_eq!(first_summary.started_runs, 0);
+        assert_eq!(first_summary.queued_runs, 1);
+        assert_eq!(state.queued_requests.len(), 1);
+
+        sqlx::query(
+            r#"UPDATE pipeline_schedules
+               SET project_group_id = NULL
+               WHERE pipeline_definition_id = ?1"#,
+        )
+        .bind(pipeline_definition_id)
+        .execute(&pool)
+        .await
+        .expect("drop legacy project_group_id metadata");
+
+        let second_summary = run_scheduler_tick(
+            &pool,
+            &mut state,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 1, 30)
+                .single()
+                .expect("construct second scheduler tick time"),
+        )
+        .await
+        .expect("run second scheduler tick");
+
+        assert_eq!(second_summary.started_runs, 0);
+        assert_eq!(second_summary.queued_runs, 0);
+        assert_eq!(second_summary.skipped_runs, 0);
+        assert_eq!(state.queued_requests.len(), 1);
     }
 
     #[tokio::test]
