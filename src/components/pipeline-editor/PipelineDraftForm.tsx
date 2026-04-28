@@ -24,7 +24,7 @@ import {
   type VariableDraft,
 } from "./draft-model";
 
-type PipelineDraftFormProps = {
+export type PipelineDraftFormProps = {
   draft: PipelineDraft;
   managedProjects?: ManagedProject[];
   projectGroups: ProjectGroup[];
@@ -34,13 +34,80 @@ type PipelineDraftFormProps = {
   onRefreshScheduleRuntime?: () => void;
 };
 
-function PipelineBasicsSection({
-  draft,
-  onChange,
-}: {
+export type PipelineBasicsSectionProps = {
   draft: PipelineDraft;
   onChange: (next: PipelineDraft) => void;
-}) {
+};
+
+export type PipelineVariablesSectionProps = {
+  draft: PipelineDraft;
+  onChange: (next: PipelineDraft) => void;
+};
+
+export type PipelineSchedulesSectionProps = {
+  draft: PipelineDraft;
+  scheduleRuntimeSnapshots?: PipelineScheduleRuntimeSnapshot[];
+  onChange: (next: PipelineDraft) => void;
+};
+
+function appendVariableRow(draft: PipelineDraft) {
+  return {
+    ...draft,
+    variableRows: [...draft.variableRows, createVariableDraft("")],
+  };
+}
+
+function patchVariableRow(
+  draft: PipelineDraft,
+  index: number,
+  updater: (row: VariableDraft) => VariableDraft
+) {
+  return {
+    ...draft,
+    variableRows: draft.variableRows.map((row, rowIndex) =>
+      rowIndex === index ? { ...updater(row), source: "manual" } : row
+    ),
+  };
+}
+
+function deleteVariableRow(draft: PipelineDraft, index: number) {
+  return {
+    ...draft,
+    variableRows: draft.variableRows.filter((_, rowIndex) => rowIndex !== index),
+  };
+}
+
+function appendSchedule(draft: PipelineDraft) {
+  return {
+    ...draft,
+    schedules: [...draft.schedules, createScheduleDraft()],
+  };
+}
+
+function patchSchedule(
+  draft: PipelineDraft,
+  index: number,
+  updater: (schedule: ScheduleDraft) => ScheduleDraft
+) {
+  return {
+    ...draft,
+    schedules: draft.schedules.map((schedule, scheduleIndex) =>
+      scheduleIndex === index ? updater(schedule) : schedule
+    ),
+  };
+}
+
+function deleteSchedule(draft: PipelineDraft, index: number) {
+  return {
+    ...draft,
+    schedules: draft.schedules.filter((_, scheduleIndex) => scheduleIndex !== index),
+  };
+}
+
+export function PipelineBasicsSection({
+  draft,
+  onChange,
+}: PipelineBasicsSectionProps) {
   return (
     <section className="grid gap-3">
       <div className="space-y-1">
@@ -92,17 +159,25 @@ function PipelineBasicsSection({
   );
 }
 
-function PipelineVariablesSection({
-  variableRows,
-  onAdd,
-  onUpdate,
-  onRemove,
-}: {
-  variableRows: VariableDraft[];
-  onAdd: () => void;
-  onUpdate: (index: number, updater: (row: VariableDraft) => VariableDraft) => void;
-  onRemove: (index: number) => void;
-}) {
+export function PipelineVariablesSection({
+  draft,
+  onChange,
+}: PipelineVariablesSectionProps) {
+  function addVariable() {
+    onChange(appendVariableRow(draft));
+  }
+
+  function updateVariableRow(
+    index: number,
+    updater: (row: VariableDraft) => VariableDraft
+  ) {
+    onChange(patchVariableRow(draft, index, updater));
+  }
+
+  function removeVariableRow(index: number) {
+    onChange(deleteVariableRow(draft, index));
+  }
+
   return (
     <section className="grid gap-3">
       <div className="flex items-center justify-between">
@@ -112,12 +187,12 @@ function PipelineVariablesSection({
             变量会自动从节点模板中推导，也可以手动补充。
           </p>
         </div>
-        <Button type="button" size="sm" variant="secondary" onClick={onAdd}>
+        <Button type="button" size="sm" variant="secondary" onClick={addVariable}>
           添加变量
         </Button>
       </div>
       <div className="grid gap-2">
-        {variableRows.map((row, index) => (
+        {draft.variableRows.map((row, index) => (
           <div
             key={row.id}
             data-testid="pipeline-variable-row"
@@ -127,7 +202,10 @@ function PipelineVariablesSection({
               aria-label={`变量 ${index + 1} 键`}
               value={row.key}
               onChange={(event) =>
-                onUpdate(index, (current) => ({ ...current, key: event.target.value }))
+                updateVariableRow(index, (current) => ({
+                  ...current,
+                  key: event.target.value,
+                }))
               }
               placeholder="source_branch"
             />
@@ -135,7 +213,10 @@ function PipelineVariablesSection({
               aria-label={`变量 ${index + 1} 标签`}
               value={row.label}
               onChange={(event) =>
-                onUpdate(index, (current) => ({ ...current, label: event.target.value }))
+                updateVariableRow(index, (current) => ({
+                  ...current,
+                  label: event.target.value,
+                }))
               }
               placeholder="Source Branch"
             />
@@ -143,7 +224,7 @@ function PipelineVariablesSection({
               aria-label={`变量 ${row.key || index + 1} 默认值`}
               value={row.defaultValue}
               onChange={(event) =>
-                onUpdate(index, (current) => ({
+                updateVariableRow(index, (current) => ({
                   ...current,
                   defaultValue: event.target.value,
                 }))
@@ -154,7 +235,10 @@ function PipelineVariablesSection({
               <Checkbox
                 checked={row.required}
                 onCheckedChange={(value) =>
-                  onUpdate(index, (current) => ({ ...current, required: Boolean(value) }))
+                  updateVariableRow(index, (current) => ({
+                    ...current,
+                    required: Boolean(value),
+                  }))
                 }
               />
               必填
@@ -164,7 +248,7 @@ function PipelineVariablesSection({
               variant="ghost"
               size="sm"
               className="text-destructive"
-              onClick={() => onRemove(index)}
+              onClick={() => removeVariableRow(index)}
               aria-label={`删除变量 ${row.key || index + 1}`}
             >
               删除
@@ -176,22 +260,29 @@ function PipelineVariablesSection({
   );
 }
 
-function PipelineSchedulesSection({
-  schedules,
+export function PipelineSchedulesSection({
+  draft,
   scheduleRuntimeSnapshots,
-  onAdd,
-  onUpdate,
-  onRemove,
-}: {
-  schedules: ScheduleDraft[];
-  scheduleRuntimeSnapshots?: PipelineScheduleRuntimeSnapshot[];
-  onAdd: () => void;
-  onUpdate: (index: number, updater: (schedule: ScheduleDraft) => ScheduleDraft) => void;
-  onRemove: (index: number) => void;
-}) {
+  onChange,
+}: PipelineSchedulesSectionProps) {
   const scheduleRuntimeById = new Map(
     (scheduleRuntimeSnapshots ?? []).map((snapshot) => [snapshot.scheduleId, snapshot])
   );
+
+  function addSchedule() {
+    onChange(appendSchedule(draft));
+  }
+
+  function updateSchedule(
+    index: number,
+    updater: (schedule: ScheduleDraft) => ScheduleDraft
+  ) {
+    onChange(patchSchedule(draft, index, updater));
+  }
+
+  function removeSchedule(index: number) {
+    onChange(deleteSchedule(draft, index));
+  }
 
   function getScheduleRuntimeSnapshot(schedule: ScheduleDraft) {
     return schedule.scheduleId !== null
@@ -208,12 +299,12 @@ function PipelineSchedulesSection({
             配置 Cron、策略和调度变量；执行目标由流程图中的节点决定。
           </p>
         </div>
-        <Button type="button" size="sm" variant="secondary" onClick={onAdd}>
+        <Button type="button" size="sm" variant="secondary" onClick={addSchedule}>
           添加调度
         </Button>
       </div>
       <div className="grid gap-2">
-        {schedules.map((schedule, index) => (
+        {draft.schedules.map((schedule, index) => (
           <div
             key={schedule.id}
             data-testid="pipeline-schedule-row"
@@ -226,7 +317,7 @@ function PipelineSchedulesSection({
                 variant="ghost"
                 size="sm"
                 className="text-destructive"
-                onClick={() => onRemove(index)}
+                onClick={() => removeSchedule(index)}
                 aria-label={`删除调度 ${index + 1}`}
               >
                 删除
@@ -238,7 +329,7 @@ function PipelineSchedulesSection({
                 <Input
                   value={schedule.cronExpr}
                   onChange={(event) =>
-                    onUpdate(index, (current) => ({
+                    updateSchedule(index, (current) => ({
                       ...current,
                       cronExpr: event.target.value,
                     }))
@@ -252,7 +343,7 @@ function PipelineSchedulesSection({
                 <Input
                   value={schedule.timezone}
                   onChange={(event) =>
-                    onUpdate(index, (current) => ({
+                    updateSchedule(index, (current) => ({
                       ...current,
                       timezone: event.target.value,
                     }))
@@ -266,7 +357,7 @@ function PipelineSchedulesSection({
                 <Input
                   value={schedule.branch}
                   onChange={(event) =>
-                    onUpdate(index, (current) => ({
+                    updateSchedule(index, (current) => ({
                       ...current,
                       branch: event.target.value,
                     }))
@@ -281,7 +372,7 @@ function PipelineSchedulesSection({
                   className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                   value={schedule.policy}
                   onChange={(event) =>
-                    onUpdate(index, (current) => ({
+                    updateSchedule(index, (current) => ({
                       ...current,
                       policy: event.target.value,
                     }))
@@ -301,7 +392,7 @@ function PipelineSchedulesSection({
               <Checkbox
                 checked={schedule.enabled}
                 onCheckedChange={(value) =>
-                  onUpdate(index, (current) => ({
+                  updateSchedule(index, (current) => ({
                     ...current,
                     enabled: Boolean(value),
                   }))
@@ -315,7 +406,7 @@ function PipelineSchedulesSection({
               <StructuredJsonEditor
                 value={schedule.variables}
                 onChange={(nextValue) =>
-                  onUpdate(index, (current) => ({
+                  updateSchedule(index, (current) => ({
                     ...current,
                     variables:
                       nextValue && typeof nextValue === "object" && !Array.isArray(nextValue)
@@ -387,78 +478,19 @@ export function PipelineDraftForm(props: PipelineDraftFormProps) {
     onChange,
   } = props;
 
-  function addVariable() {
-    onChange({
-      ...draft,
-      variableRows: [...draft.variableRows, createVariableDraft("")],
-    });
-  }
-
-  function updateVariableRow(
-    index: number,
-    updater: (row: VariableDraft) => VariableDraft
-  ) {
-    onChange({
-      ...draft,
-      variableRows: draft.variableRows.map((row, rowIndex) =>
-        rowIndex === index ? { ...updater(row), source: "manual" } : row
-      ),
-    });
-  }
-
-  function removeVariableRow(index: number) {
-    onChange({
-      ...draft,
-      variableRows: draft.variableRows.filter((_, rowIndex) => rowIndex !== index),
-    });
-  }
-
-  function addSchedule() {
-    onChange({
-      ...draft,
-      schedules: [...draft.schedules, createScheduleDraft()],
-    });
-  }
-
-  function updateSchedule(
-    index: number,
-    updater: (schedule: ScheduleDraft) => ScheduleDraft
-  ) {
-    onChange({
-      ...draft,
-      schedules: draft.schedules.map((schedule, scheduleIndex) =>
-        scheduleIndex === index ? updater(schedule) : schedule
-      ),
-    });
-  }
-
-  function removeSchedule(index: number) {
-    onChange({
-      ...draft,
-      schedules: draft.schedules.filter((_, scheduleIndex) => scheduleIndex !== index),
-    });
-  }
-
   return (
     <div className="grid gap-6">
       <PipelineBasicsSection draft={draft} onChange={onChange} />
-      <PipelineVariablesSection
-        variableRows={draft.variableRows}
-        onAdd={addVariable}
-        onUpdate={updateVariableRow}
-        onRemove={removeVariableRow}
-      />
+      <PipelineVariablesSection draft={draft} onChange={onChange} />
       <PipelineGraphEditor
         draft={draft}
         managedProjects={managedProjects}
         onChange={onChange}
       />
       <PipelineSchedulesSection
-        schedules={draft.schedules}
+        draft={draft}
         scheduleRuntimeSnapshots={scheduleRuntimeSnapshots}
-        onAdd={addSchedule}
-        onUpdate={updateSchedule}
-        onRemove={removeSchedule}
+        onChange={onChange}
       />
     </div>
   );
