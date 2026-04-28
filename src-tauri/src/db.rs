@@ -1,11 +1,12 @@
 use crate::models::{
     AppSettings, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
-    PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineMigrationSummary, PipelineNode,
-    PipelineNodeInput, PipelineRunDetail, PipelineRunListItem, PipelineRunListPage,
+    PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineEdge, PipelineMigrationSummary,
+    PipelineNode, PipelineNodeInput, PipelineRunDetail, PipelineRunListItem, PipelineRunListPage,
     PipelineRunListQuery, PipelineRunNode, PipelineRunNodeDiagnostics, PipelineRunProject,
-    PipelineSchedule, PipelineScheduleInput, PipelineVariable, PipelineVariableInput, ProjectGroup,
-    WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem,
-    WorkflowRunProject, WorkflowRunStep, WorkflowStep, WorkflowStepInput,
+    PipelineRunStage, PipelineSchedule, PipelineScheduleInput, PipelineStage, PipelineVariable,
+    PipelineVariableInput, ProjectGroup, WorkflowDefinitionDetail, WorkflowDefinitionListItem,
+    WorkflowRunDetail, WorkflowRunListItem, WorkflowRunProject, WorkflowRunStep, WorkflowStep,
+    WorkflowStepInput,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -1338,6 +1339,110 @@ async fn load_pipeline_nodes(
     }
 
     Ok(nodes)
+}
+
+pub(crate) async fn load_pipeline_stages(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+) -> Result<Vec<PipelineStage>> {
+    let rows = sqlx::query_as::<_, (i64, String, String, i64, i64)>(
+        r#"SELECT
+             id, stage_key, name, stage_order, enabled
+           FROM pipeline_stages
+           WHERE pipeline_definition_id = ?1
+           ORDER BY stage_order ASC, id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut stages = Vec::with_capacity(rows.len());
+    for row in rows {
+        stages.push(PipelineStage {
+            id: row.0,
+            stage_key: row.1,
+            name: row.2,
+            stage_order: row.3,
+            enabled: row.4 != 0,
+        });
+    }
+
+    Ok(stages)
+}
+
+pub(crate) async fn load_pipeline_edges(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+) -> Result<Vec<PipelineEdge>> {
+    let rows = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"SELECT
+             id, source_node_id, target_node_id
+           FROM pipeline_edges
+           WHERE pipeline_definition_id = ?1
+           ORDER BY id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut edges = Vec::with_capacity(rows.len());
+    for row in rows {
+        edges.push(PipelineEdge {
+            id: row.0,
+            source_node_id: row.1,
+            target_node_id: row.2,
+        });
+    }
+
+    Ok(edges)
+}
+
+#[allow(dead_code)]
+pub(crate) async fn load_pipeline_run_stages(
+    pool: &SqlitePool,
+    pipeline_run_id: i64,
+) -> Result<Vec<PipelineRunStage>> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            Option<i64>,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        r#"SELECT
+             id, pipeline_stage_id, stage_order, stage_key, stage_name_snapshot, status,
+             summary_message, started_at, finished_at
+           FROM pipeline_run_stages
+           WHERE pipeline_run_id = ?1
+           ORDER BY stage_order ASC, id ASC"#,
+    )
+    .bind(pipeline_run_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut stages = Vec::with_capacity(rows.len());
+    for row in rows {
+        stages.push(PipelineRunStage {
+            id: row.0,
+            pipeline_stage_id: row.1,
+            stage_order: row.2,
+            stage_key: row.3,
+            stage_name_snapshot: row.4,
+            status: row.5,
+            summary_message: row.6,
+            started_at: row.7,
+            finished_at: row.8,
+        });
+    }
+
+    Ok(stages)
 }
 
 pub(crate) async fn list_pipeline_schedules_for_definition(
@@ -3077,6 +3182,7 @@ pub(crate) async fn setup_test_pool() -> SqlitePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_support::now_rfc3339;
 
     async fn count_rows(pool: &SqlitePool, table_name: &str) -> i64 {
         let query = format!("SELECT COUNT(*) FROM {table_name}");
@@ -4576,6 +4682,185 @@ mod tests {
             "expected pipeline_schedules to contain project_group_id, got {:?}",
             column_names
         );
+    }
+
+    #[tokio::test]
+    async fn pipeline_stage_definition_schema_requires_stage_edge_and_run_stage_tables() {
+        let pool = setup_test_pool().await;
+
+        for table_name in ["pipeline_stages", "pipeline_edges", "pipeline_run_stages"] {
+            let exists = sqlx::query_scalar::<_, i64>(
+                r#"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1"#,
+            )
+            .bind(table_name)
+            .fetch_one(&pool)
+            .await
+            .expect("query sqlite_master");
+
+            assert_eq!(exists, 1, "expected table {table_name} to exist");
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_stage_definition_schema_requires_stage_layout_columns_on_pipeline_nodes() {
+        let pool = setup_test_pool().await;
+
+        let columns = sqlx::query_as::<_, (i64, String, String, i64, Option<String>, i64)>(
+            r#"PRAGMA table_info(pipeline_nodes)"#,
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load pipeline_nodes columns");
+
+        let column_names = columns.into_iter().map(|row| row.1).collect::<Vec<_>>();
+        for expected in ["stage_id", "node_key", "position_x", "position_y", "enabled"] {
+            assert!(
+                column_names.iter().any(|name| name == expected),
+                "expected pipeline_nodes to contain {expected}, got {:?}",
+                column_names
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_stage_definition_persists_stage_rows_edge_rows_and_stage_owned_nodes() {
+        let pool = setup_test_pool().await;
+
+        let pipeline = create_pipeline_definition(
+            &pool,
+            "stage-aware-schema-seed".to_string(),
+            "stage-aware schema seed".to_string(),
+            true,
+            2,
+            vec![],
+            vec![
+                PipelineNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({ "project": "team/service-a", "ref": "dev" }),
+                },
+                PipelineNodeInput {
+                    node_type: "wait_pipeline".to_string(),
+                    parameters: serde_json::json!({ "project": "team/service-a", "ref": "dev" }),
+                },
+            ],
+            vec![],
+        )
+        .await
+        .expect("create base pipeline definition");
+
+        let now = now_rfc3339();
+        let stage_a_id = sqlx::query(
+            r#"INSERT INTO pipeline_stages (
+                 pipeline_definition_id, stage_key, name, stage_order, enabled, created_at, updated_at
+               ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+        )
+        .bind(pipeline.id)
+        .bind("merge_gate")
+        .bind("合并门禁")
+        .bind(0_i64)
+        .bind(1_i64)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert stage a")
+        .last_insert_rowid();
+
+        let stage_b_id = sqlx::query(
+            r#"INSERT INTO pipeline_stages (
+                 pipeline_definition_id, stage_key, name, stage_order, enabled, created_at, updated_at
+               ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+        )
+        .bind(pipeline.id)
+        .bind("post_merge")
+        .bind("合并后等待")
+        .bind(1_i64)
+        .bind(1_i64)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert stage b")
+        .last_insert_rowid();
+
+        sqlx::query(
+            r#"UPDATE pipeline_nodes
+               SET stage_id = ?2,
+                   node_key = ?3,
+                   position_x = ?4,
+                   position_y = ?5,
+                   enabled = ?6
+               WHERE pipeline_definition_id = ?1 AND node_order = ?7"#,
+        )
+        .bind(pipeline.id)
+        .bind(stage_a_id)
+        .bind("merge_gate_check")
+        .bind(120.0_f64)
+        .bind(48.0_f64)
+        .bind(1_i64)
+        .bind(0_i64)
+        .execute(&pool)
+        .await
+        .expect("update first node layout");
+
+        sqlx::query(
+            r#"UPDATE pipeline_nodes
+               SET stage_id = ?2,
+                   node_key = ?3,
+                   position_x = ?4,
+                   position_y = ?5,
+                   enabled = ?6
+               WHERE pipeline_definition_id = ?1 AND node_order = ?7"#,
+        )
+        .bind(pipeline.id)
+        .bind(stage_b_id)
+        .bind("post_merge_wait")
+        .bind(420.0_f64)
+        .bind(48.0_f64)
+        .bind(1_i64)
+        .bind(1_i64)
+        .execute(&pool)
+        .await
+        .expect("update second node layout");
+
+        sqlx::query(
+            r#"INSERT INTO pipeline_edges (
+                 pipeline_definition_id, source_node_id, target_node_id, created_at
+               )
+               SELECT ?1, source.id, target.id, ?2
+               FROM pipeline_nodes source
+               JOIN pipeline_nodes target
+                 ON target.pipeline_definition_id = source.pipeline_definition_id
+              WHERE source.pipeline_definition_id = ?1
+                AND source.node_order = 0
+                AND target.node_order = 1"#,
+        )
+        .bind(pipeline.id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert stage edge");
+
+        let stages = load_pipeline_stages(&pool, pipeline.id)
+            .await
+            .expect("load pipeline stages");
+        let edges = load_pipeline_edges(&pool, pipeline.id)
+            .await
+            .expect("load pipeline edges");
+        let staged_node_count = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*) FROM pipeline_nodes
+               WHERE pipeline_definition_id = ?1 AND stage_id IS NOT NULL"#,
+        )
+        .bind(pipeline.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count stage-owned nodes");
+
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].stage_key, "merge_gate");
+        assert_eq!(stages[1].stage_key, "post_merge");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(staged_node_count, 2);
     }
 
     #[tokio::test]
