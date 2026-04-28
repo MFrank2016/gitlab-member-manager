@@ -108,15 +108,50 @@ export type PipelineVariable = {
   options: unknown;
 };
 
+export type PipelineStageInput = {
+  stageKey: string;
+  name: string;
+  enabled?: boolean;
+};
+
+export type PipelineStage = {
+  id: number;
+  stageKey: string;
+  name: string;
+  stageOrder: number;
+  enabled: boolean;
+};
+
 export type PipelineNodeInput = {
   nodeType: string;
   parameters?: unknown;
+  stageKey?: string | null;
+  nodeKey?: string | null;
+  positionX?: number | null;
+  positionY?: number | null;
+  enabled?: boolean;
 };
 
 export type PipelineNode = {
   nodeOrder: number;
   nodeType: string;
   parameters: unknown;
+  stageKey?: string | null;
+  nodeKey?: string | null;
+  positionX: number;
+  positionY: number;
+  enabled: boolean;
+};
+
+export type PipelineEdgeInput = {
+  sourceNodeKey: string;
+  targetNodeKey: string;
+};
+
+export type PipelineEdge = {
+  id: number;
+  sourceNodeKey: string;
+  targetNodeKey: string;
 };
 
 export type PipelineScheduleInput = {
@@ -174,7 +209,9 @@ export type PipelineDefinitionDetail = {
   createdAt: string;
   updatedAt: string;
   variables: PipelineVariable[];
+  stages: PipelineStage[];
   nodes: PipelineNode[];
+  edges: PipelineEdge[];
   schedules: PipelineSchedule[];
 };
 

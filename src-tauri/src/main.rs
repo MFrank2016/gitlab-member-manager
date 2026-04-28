@@ -22,14 +22,15 @@ use crate::errors::{CommandError, CommandErrorCategory};
 use crate::gitlab::GitLabConfig;
 use crate::models::{
     AppSettings, BatchItemError, BatchResult, LocalGroup, LocalMember, LocalMemberUpsert,
-    ManagedProject, PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineNodeInput,
-    PipelineRunDetail, PipelineRunExecuteRequest, PipelineRunExecuteResult, PipelineRunListPage,
-    PipelineRunListQuery, PipelineRunNodeDiagnostics, PipelineRunRetryRequest,
-    PipelineScheduleRuntimeSnapshot,
-    PipelineScheduleInput, PipelineVariableInput, ProjectGroup, ProjectGroupMemberSyncRow,
-    ProjectMember, ProjectSummary, WorkflowDefinitionDetail, WorkflowDefinitionListItem,
-    WorkflowRunDetail, WorkflowRunExecuteRequest, WorkflowRunExecuteResult, WorkflowRunListItem,
-    WorkflowRunRetryFailedRequest, WorkflowStepInput,
+    ManagedProject, PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineEdgeInput,
+    PipelineGraphNodeInput, PipelineRunDetail, PipelineRunExecuteRequest,
+    PipelineRunExecuteResult, PipelineRunListPage, PipelineRunListQuery,
+    PipelineRunNodeDiagnostics, PipelineRunRetryRequest, PipelineScheduleRuntimeSnapshot,
+    PipelineScheduleInput, PipelineStageInput, PipelineVariableInput, ProjectGroup,
+    ProjectGroupMemberSyncRow, ProjectMember, ProjectSummary, WorkflowDefinitionDetail,
+    WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunExecuteRequest,
+    WorkflowRunExecuteResult, WorkflowRunListItem, WorkflowRunRetryFailedRequest,
+    WorkflowStepInput,
 };
 use sqlx::SqlitePool;
 use std::sync::Mutex;
@@ -583,7 +584,9 @@ async fn create_pipeline_definition(
     enabled: bool,
     max_concurrency_default: i64,
     variables: Vec<PipelineVariableInput>,
-    nodes: Vec<PipelineNodeInput>,
+    stages: Vec<PipelineStageInput>,
+    nodes: Vec<PipelineGraphNodeInput>,
+    edges: Vec<PipelineEdgeInput>,
     schedules: Vec<PipelineScheduleInput>,
 ) -> Result<PipelineDefinitionDetail, CommandError> {
     let trimmed_name = name.trim().to_string();
@@ -597,14 +600,16 @@ async fn create_pipeline_definition(
         return Err(validation_error("至少需要一个流水线节点。"));
     }
 
-    let result = db::create_pipeline_definition(
+    let result = db::create_pipeline_definition_graph(
         &state.db,
         trimmed_name,
         description.trim().to_string(),
         enabled,
         max_concurrency_default,
         variables,
+        stages,
         nodes,
+        edges,
         schedules,
     )
     .await
@@ -756,7 +761,9 @@ async fn update_pipeline_definition(
     enabled: bool,
     max_concurrency_default: i64,
     variables: Vec<PipelineVariableInput>,
-    nodes: Vec<PipelineNodeInput>,
+    stages: Vec<PipelineStageInput>,
+    nodes: Vec<PipelineGraphNodeInput>,
+    edges: Vec<PipelineEdgeInput>,
     schedules: Vec<PipelineScheduleInput>,
 ) -> Result<(), CommandError> {
     let trimmed_name = name.trim().to_string();
@@ -770,7 +777,7 @@ async fn update_pipeline_definition(
         return Err(validation_error("至少需要一个流水线节点。"));
     }
 
-    let result = db::update_pipeline_definition(
+    let result = db::update_pipeline_definition_graph(
         &state.db,
         id,
         trimmed_name,
@@ -778,7 +785,9 @@ async fn update_pipeline_definition(
         enabled,
         max_concurrency_default,
         variables,
+        stages,
         nodes,
+        edges,
         schedules,
     )
     .await

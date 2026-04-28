@@ -181,10 +181,34 @@ pub struct PipelineNodeInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PipelineGraphNodeInput {
+    #[serde(alias = "node_type")]
+    pub node_type: String,
+    #[serde(default)]
+    pub parameters: Value,
+    #[serde(default)]
+    pub stage_key: Option<String>,
+    #[serde(default)]
+    pub node_key: Option<String>,
+    #[serde(default)]
+    pub position_x: Option<f64>,
+    #[serde(default)]
+    pub position_y: Option<f64>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PipelineNode {
     pub node_order: i64,
     pub node_type: String,
     pub parameters: Value,
+    pub stage_key: Option<String>,
+    pub node_key: Option<String>,
+    pub position_x: f64,
+    pub position_y: f64,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,8 +222,8 @@ pub struct PipelineEdgeInput {
 #[serde(rename_all = "camelCase")]
 pub struct PipelineEdge {
     pub id: i64,
-    pub source_node_id: i64,
-    pub target_node_id: i64,
+    pub source_node_key: String,
+    pub target_node_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,7 +296,9 @@ pub struct PipelineDefinitionDetail {
     pub created_at: String,
     pub updated_at: String,
     pub variables: Vec<PipelineVariable>,
+    pub stages: Vec<PipelineStage>,
     pub nodes: Vec<PipelineNode>,
+    pub edges: Vec<PipelineEdge>,
     pub schedules: Vec<PipelineSchedule>,
 }
 

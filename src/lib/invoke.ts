@@ -7,6 +7,7 @@ import type {
   ManagedProject,
   PipelineDefinitionDetail,
   PipelineDefinitionListItem,
+  PipelineEdgeInput,
   PipelineNodeInput,
   PipelineRunDetail,
   PipelineRunExecuteRequest,
@@ -17,6 +18,7 @@ import type {
   PipelineRunRetryRequest,
   PipelineScheduleInput,
   PipelineScheduleRuntimeSnapshot,
+  PipelineStageInput,
   PipelineVariableInput,
   ProjectGroup,
   ProjectGroupMemberSyncRow,
@@ -319,9 +321,17 @@ function toWorkflowStepPayload(step: WorkflowStepInput) {
 }
 
 function toPipelineNodePayload(node: PipelineNodeInput) {
+  const stageKey = node.stageKey?.trim();
+  const nodeKey = node.nodeKey?.trim();
+
   return {
     nodeType: node.nodeType.trim(),
     parameters: normalizeJsonObject(node.parameters, "pipeline node parameters"),
+    ...(stageKey ? { stageKey } : {}),
+    ...(nodeKey ? { nodeKey } : {}),
+    ...(typeof node.positionX === "number" ? { positionX: node.positionX } : {}),
+    ...(typeof node.positionY === "number" ? { positionY: node.positionY } : {}),
+    ...(typeof node.enabled === "boolean" ? { enabled: node.enabled } : {}),
   };
 }
 
@@ -333,6 +343,21 @@ function toPipelineVariablePayload(variable: PipelineVariableInput) {
     valueType: variable.valueType.trim(),
     required: variable.required ?? false,
     options: normalizeJsonArray(variable.options, "pipeline variable options"),
+  };
+}
+
+function toPipelineStagePayload(stage: PipelineStageInput) {
+  return {
+    stageKey: stage.stageKey.trim(),
+    name: stage.name.trim(),
+    enabled: stage.enabled ?? true,
+  };
+}
+
+function toPipelineEdgePayload(edge: PipelineEdgeInput) {
+  return {
+    sourceNodeKey: edge.sourceNodeKey.trim(),
+    targetNodeKey: edge.targetNodeKey.trim(),
   };
 }
 
@@ -374,7 +399,9 @@ export async function createPipelineDefinition(args: {
   enabled?: boolean;
   maxConcurrencyDefault?: number;
   variables?: PipelineVariableInput[];
+  stages?: PipelineStageInput[];
   nodes: PipelineNodeInput[];
+  edges?: PipelineEdgeInput[];
   schedules?: PipelineScheduleInput[];
 }) {
   const normalizedDescription = args.description?.trim();
@@ -385,7 +412,9 @@ export async function createPipelineDefinition(args: {
     enabled: args.enabled ?? true,
     maxConcurrencyDefault: args.maxConcurrencyDefault ?? 2,
     variables: (args.variables ?? []).map(toPipelineVariablePayload),
+    stages: (args.stages ?? []).map(toPipelineStagePayload),
     nodes: args.nodes.map(toPipelineNodePayload),
+    edges: (args.edges ?? []).map(toPipelineEdgePayload),
     schedules: (args.schedules ?? []).map(toPipelineSchedulePayload),
   });
 }
@@ -441,7 +470,9 @@ export async function updatePipelineDefinition(args: {
   enabled: boolean;
   maxConcurrencyDefault: number;
   variables: PipelineVariableInput[];
+  stages?: PipelineStageInput[];
   nodes: PipelineNodeInput[];
+  edges?: PipelineEdgeInput[];
   schedules: PipelineScheduleInput[];
 }) {
   const normalizedDescription = args.description?.trim();
@@ -453,7 +484,9 @@ export async function updatePipelineDefinition(args: {
     enabled: args.enabled,
     maxConcurrencyDefault: args.maxConcurrencyDefault,
     variables: args.variables.map(toPipelineVariablePayload),
+    stages: (args.stages ?? []).map(toPipelineStagePayload),
     nodes: args.nodes.map(toPipelineNodePayload),
+    edges: (args.edges ?? []).map(toPipelineEdgePayload),
     schedules: args.schedules.map(toPipelineSchedulePayload),
   });
 }

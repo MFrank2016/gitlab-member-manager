@@ -895,7 +895,9 @@ describe("pipeline wrapper smoke", () => {
           createdAt: "2026-03-18T00:00:00Z",
           updatedAt: "2026-03-18T00:00:00Z",
           variables: [],
+          stages: [],
           nodes: [],
+          edges: [],
           schedules: [],
         };
       }
@@ -975,13 +977,28 @@ describe("pipeline wrapper smoke", () => {
               options: [],
             },
           ],
+          stages: [
+            {
+              id: 21,
+              stageKey: "merge_gate",
+              name: "合并门禁",
+              stageOrder: 0,
+              enabled: true,
+            },
+          ],
           nodes: [
             {
               nodeOrder: 0,
               nodeType: "checkout_branch",
               parameters: { branch: "${source_branch}" },
+              stageKey: "merge_gate",
+              nodeKey: "checkout_source",
+              positionX: 120,
+              positionY: 48,
+              enabled: true,
             },
           ],
+          edges: [],
           schedules: [],
         };
       }
@@ -1018,12 +1035,25 @@ describe("pipeline wrapper smoke", () => {
           options: ["main", "release"],
         },
       ],
+      stages: [
+        {
+          stageKey: "merge_gate",
+          name: "合并门禁",
+          enabled: true,
+        },
+      ],
       nodes: [
         {
           nodeType: "checkout_branch",
           parameters: { branch: "${source_branch}" },
+          stageKey: "merge_gate",
+          nodeKey: "checkout_source",
+          positionX: 120,
+          positionY: 48,
+          enabled: true,
         },
       ],
+      edges: [],
       schedules: [],
     });
     const pipelineDetail = await getPipelineDefinitionDetail(11);
@@ -1043,12 +1073,25 @@ describe("pipeline wrapper smoke", () => {
           options: ["main", "release"],
         },
       ],
+      stages: [
+        {
+          stageKey: "merge_gate",
+          name: "合并门禁",
+          enabled: true,
+        },
+      ],
       nodes: [
         {
           nodeType: "checkout_branch",
           parameters: { branch: "${source_branch}" },
+          stageKey: "merge_gate",
+          nodeKey: "checkout_source",
+          positionX: 120,
+          positionY: 48,
+          enabled: true,
         },
       ],
+      edges: [],
       schedules: [],
     });
 	    await deletePipelineDefinition(11);
@@ -1077,7 +1120,9 @@ describe("pipeline wrapper smoke", () => {
 	    const workflowList = await listWorkflowDefinitions();
 
     expect(pipelineList).toEqual([]);
+    expect(pipelineDetail.stages).toHaveLength(1);
     expect(pipelineDetail.nodes).toHaveLength(1);
+    expect(pipelineDetail.nodes[0].nodeKey).toBe("checkout_source");
 	    expect(pipelineDetail.variables[0].options).toEqual([]);
 	    expect(executeResult.pipelineRunId).toBe(302);
 	    expect(retryResult.pipelineRunId).toBe(303);
@@ -1098,6 +1143,12 @@ describe("pipeline wrapper smoke", () => {
             options: ["main", "release"],
           }),
         ],
+        stages: [
+          expect.objectContaining({
+            stageKey: "merge_gate",
+          }),
+        ],
+        edges: [],
       })
     );
     expect(invokeMock).toHaveBeenCalledWith("get_pipeline_definition_detail", { id: 11 });
@@ -1111,6 +1162,12 @@ describe("pipeline wrapper smoke", () => {
             options: ["main", "release"],
           }),
         ],
+        stages: [
+          expect.objectContaining({
+            stageKey: "merge_gate",
+          }),
+        ],
+        edges: [],
       })
     );
 	    expect(invokeMock).toHaveBeenCalledWith("delete_pipeline_definition", { id: 11 });
