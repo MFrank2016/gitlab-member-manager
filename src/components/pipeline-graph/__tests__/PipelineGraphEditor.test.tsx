@@ -277,4 +277,15 @@ describe("PipelineGraphEditor", () => {
     );
     expect(screen.getByRole("button", { name: "删除选中对象" })).toBeDisabled();
   });
+
+  it("does not allow adding a node when no graph object is selected", () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "模拟多选" }));
+
+    expect(
+      screen.getByRole("button", { name: "在所选阶段添加节点" })
+    ).toBeDisabled();
+    expect(parseDraft().nodes).toHaveLength(1);
+  });
 });

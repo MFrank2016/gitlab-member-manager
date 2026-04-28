@@ -173,7 +173,7 @@ export function PipelineGraphEditor({
   function resolveActiveStageKey() {
     if (selectedActionNode) return selectedActionNode.stageKey;
     if (selectedStage) return selectedStage.stageKey;
-    return draft.stages[0]?.stageKey ?? "";
+    return "";
   }
 
   function addNode() {
