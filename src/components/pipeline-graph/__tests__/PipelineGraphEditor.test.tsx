@@ -9,12 +9,15 @@ import {
   type PipelineDraft,
 } from "@/components/pipeline-editor/draft-model";
 
+const mockFitView = vi.fn();
+
 vi.mock("@xyflow/react", async () => {
   const ReactModule = await import("react");
 
   return {
     Background: () => null,
-    Controls: () => null,
+    Controls: () => <div data-testid="mock-react-flow-controls" />,
+    MiniMap: () => <div data-testid="mock-react-flow-minimap" />,
     Handle: () => null,
     Position: {
       Top: "top",
@@ -28,49 +31,74 @@ vi.mock("@xyflow/react", async () => {
       edges,
       nodeTypes,
       onNodeClick,
+      onSelectionChange,
+      onInit,
+      children,
     }: {
       nodes: Array<Record<string, unknown>>;
       edges: Array<Record<string, unknown>>;
       nodeTypes?: Record<string, React.ComponentType<Record<string, unknown>>>;
       onNodeClick?: (event: unknown, node: Record<string, unknown>) => void;
-    }) => (
-      <div data-testid="mock-react-flow">
-        <div data-testid="mock-react-flow-edge-count">{edges.length}</div>
-        {nodes.map((node) => {
-          const Component = node.type && nodeTypes ? nodeTypes[String(node.type)] : null;
-          const data = (node.data ?? {}) as Record<string, unknown>;
-          const label =
-            typeof data.name === "string"
-              ? data.name
-              : typeof data.label === "string"
-                ? data.label
-                : String(node.id);
+      onSelectionChange?: (params: {
+        nodes: Array<Record<string, unknown>>;
+        edges: Array<Record<string, unknown>>;
+      }) => void;
+      onInit?: (instance: { fitView: () => void }) => void;
+      children?: React.ReactNode;
+    }) => {
+      const [selectedNodeId, setSelectedNodeId] = ReactModule.useState<string | null>(null);
 
-          return (
-            <div key={String(node.id)} data-testid={`graph-node-${String(node.id)}`}>
-              <button type="button" onClick={() => onNodeClick?.({}, node)}>
-                {label}
-              </button>
-              {Component ? (
-                <Component
-                  id={String(node.id)}
-                  data={data}
-                  selected={false}
-                  dragging={false}
-                  type={String(node.type ?? "")}
-                  zIndex={0}
-                  isConnectable
-                  xPos={0}
-                  yPos={0}
-                  targetPosition="top"
-                  sourcePosition="bottom"
-                />
-              ) : null}
-            </div>
-          );
-        })}
-      </div>
-    ),
+      ReactModule.useEffect(() => {
+        onInit?.({ fitView: mockFitView });
+      }, [onInit]);
+
+      return (
+        <div data-testid="mock-react-flow">
+          <div data-testid="mock-react-flow-edge-count">{edges.length}</div>
+          {children}
+          {nodes.map((node) => {
+            const Component = node.type && nodeTypes ? nodeTypes[String(node.type)] : null;
+            const data = (node.data ?? {}) as Record<string, unknown>;
+            const label =
+              typeof data.name === "string"
+                ? data.name
+                : typeof data.label === "string"
+                  ? data.label
+                  : String(node.id);
+
+            return (
+              <div key={String(node.id)} data-testid={`graph-node-${String(node.id)}`}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedNodeId(String(node.id));
+                    onNodeClick?.({}, node);
+                    onSelectionChange?.({ nodes: [node], edges: [] });
+                  }}
+                >
+                  {label}
+                </button>
+                {Component ? (
+                  <Component
+                    id={String(node.id)}
+                    data={data}
+                    selected={selectedNodeId === String(node.id)}
+                    dragging={false}
+                    type={String(node.type ?? "")}
+                    zIndex={0}
+                    isConnectable
+                    xPos={0}
+                    yPos={0}
+                    targetPosition="top"
+                    sourcePosition="bottom"
+                  />
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      );
+    },
   };
 });
 
@@ -98,6 +126,7 @@ function EditorHarness() {
 
 describe("PipelineGraphEditor", () => {
   beforeEach(() => {
+    mockFitView.mockReset();
     resetPipelineDraftCountersForTest();
   });
 
@@ -176,5 +205,45 @@ describe("PipelineGraphEditor", () => {
     const draft = parseDraft();
     expect(draft.stages).toHaveLength(2);
     expect(draft.nodes).toHaveLength(2);
+  });
+
+  it("shows minimap and canvas controls for navigation", () => {
+    render(<EditorHarness />);
+
+    expect(screen.getByTestId("mock-react-flow-controls")).toBeInTheDocument();
+    expect(screen.getByTestId("mock-react-flow-minimap")).toBeInTheDocument();
+  });
+
+  it("exposes a fit-view action", () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "适配全貌" }));
+
+    expect(mockFitView).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes the selected node from the draft", async () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "删除选中对象" }));
+
+    await waitFor(() => {
+      expect(parseDraft().nodes).toHaveLength(0);
+    });
+  });
+
+  it("tracks whether the selected object is a stage or a node", () => {
+    render(<EditorHarness />);
+
+    const summary = screen.getByTestId("pipeline-graph-selection-summary");
+    expect(summary).toHaveTextContent("已选中节点");
+
+    fireEvent.click(within(screen.getByTestId("graph-node-stage-1")).getByRole("button"));
+    expect(summary).toHaveTextContent("已选中阶段");
+
+    fireEvent.click(
+      within(screen.getByTestId("graph-node-checkout_branch_node-1")).getByRole("button")
+    );
+    expect(summary).toHaveTextContent("已选中节点");
   });
 });

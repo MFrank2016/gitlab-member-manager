@@ -46,6 +46,16 @@ export type PipelineGraphState = {
   edges: PipelineGraphEdge[];
 };
 
+function filterEdgesByRemainingNodeKeys(
+  draft: PipelineDraft,
+  remainingNodeKeys: Set<string>
+) {
+  return draft.edges.filter(
+    (edge) =>
+      remainingNodeKeys.has(edge.sourceNodeKey) && remainingNodeKeys.has(edge.targetNodeKey)
+  );
+}
+
 function isStageGraphNode(node: PipelineGraphNode): node is Node<StageGraphNodeData> {
   return (
     node.type === STAGE_GROUP_NODE_TYPE &&
@@ -283,4 +293,37 @@ export function syncDraftFromGraphState(
     edges,
     variableRows: ensureVariableRows(nodes, draft.variableRows),
   };
+}
+
+export function removeSelectedGraphObject(
+  draft: PipelineDraft,
+  selectedNode: PipelineGraphNode
+): PipelineDraft {
+  if (isActionGraphNode(selectedNode)) {
+    const nodes = draft.nodes.filter((node) => node.nodeKey !== selectedNode.data.nodeKey);
+    const nodeKeySet = new Set(nodes.map((node) => node.nodeKey));
+
+    return {
+      ...draft,
+      nodes,
+      edges: filterEdgesByRemainingNodeKeys(draft, nodeKeySet),
+      variableRows: ensureVariableRows(nodes, draft.variableRows),
+    };
+  }
+
+  if (isStageGraphNode(selectedNode)) {
+    const stages = draft.stages.filter((stage) => stage.stageKey !== selectedNode.data.stageKey);
+    const nodes = draft.nodes.filter((node) => node.stageKey !== selectedNode.data.stageKey);
+    const nodeKeySet = new Set(nodes.map((node) => node.nodeKey));
+
+    return {
+      ...draft,
+      stages,
+      nodes,
+      edges: filterEdgesByRemainingNodeKeys(draft, nodeKeySet),
+      variableRows: ensureVariableRows(nodes, draft.variableRows),
+    };
+  }
+
+  return draft;
 }

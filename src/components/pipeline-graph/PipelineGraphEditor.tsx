@@ -2,6 +2,7 @@ import * as React from "react";
 import {
   Background,
   Controls,
+  MiniMap,
   ReactFlow,
   applyNodeChanges,
   type Connection,
@@ -32,6 +33,7 @@ import {
   PIPELINE_ACTION_NODE_TYPE,
   STAGE_GROUP_NODE_TYPE,
   buildGraphEditorState,
+  removeSelectedGraphObject,
   syncDraftFromGraphState,
   validateGraphConnection,
   type PipelineGraphNode,
@@ -97,6 +99,7 @@ export function PipelineGraphEditor({
   managedProjects = [],
   onChange,
 }: PipelineGraphEditorProps) {
+  const reactFlowRef = React.useRef<{ fitView: () => void } | null>(null);
   const [selectedId, setSelectedId] = React.useState<string | null>(
     () => draft.nodes[0]?.nodeKey ?? draft.stages[0]?.stageKey ?? null
   );
@@ -134,6 +137,16 @@ export function PipelineGraphEditor({
   const connectionCandidates = draft.nodes.filter(
     (node) => node.nodeKey !== selectedActionNode?.nodeKey
   );
+  const selectedSummary = selectedActionNode
+    ? `已选中节点：${BUILTIN_NODE_MAP.get(selectedActionNode.nodeType)?.label ?? selectedActionNode.nodeType}`
+    : selectedStage
+      ? `已选中阶段：${selectedStage.name}`
+      : "未选中对象";
+  const selectedSummaryHint = selectedActionNode
+    ? selectedActionNode.nodeKey
+    : selectedStage
+      ? selectedStage.stageKey
+      : "先在画布中选择一个阶段或节点";
 
   function applyDraft(nextDraft: PipelineDraft) {
     setGraphMessage(null);
@@ -226,6 +239,10 @@ export function PipelineGraphEditor({
     applyDraft(nextDraft);
   }
 
+  function handleSelectionChange(params: { nodes: PipelineGraphNode[] }) {
+    setSelectedId(params.nodes.at(-1)?.id ?? null);
+  }
+
   function commitConnection(connection: Connection) {
     const result = validateGraphConnection(graphState, connection);
     if (!result.valid) {
@@ -252,6 +269,21 @@ export function PipelineGraphEditor({
       source: selectedActionNode.nodeKey,
       target: connectionTarget,
     });
+  }
+
+  function fitCanvasToViewport() {
+    reactFlowRef.current?.fitView();
+  }
+
+  function deleteSelectedObject() {
+    if (!selectedGraphNode) {
+      setGraphMessage("请先选择一个阶段或节点");
+      return;
+    }
+
+    setSelectedId(null);
+    setConnectionTarget("");
+    applyDraft(removeSelectedGraphObject(draft, selectedGraphNode));
   }
 
   return (
@@ -308,6 +340,26 @@ export function PipelineGraphEditor({
           >
             创建连线
           </Button>
+          <Button type="button" variant="outline" onClick={fitCanvasToViewport}>
+            适配全貌
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={deleteSelectedObject}
+            disabled={!selectedGraphNode}
+          >
+            删除选中对象
+          </Button>
+          <div className="rounded-lg border border-border bg-background px-3 py-2">
+            <p
+              className="text-sm font-medium text-foreground"
+              data-testid="pipeline-graph-selection-summary"
+            >
+              {selectedSummary}
+            </p>
+            <p className="text-xs text-muted-foreground">{selectedSummaryHint}</p>
+          </div>
           {graphMessage ? (
             <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-700">
               {graphMessage}
@@ -323,12 +375,20 @@ export function PipelineGraphEditor({
             nodes={graphState.nodes}
             edges={graphState.edges}
             nodeTypes={nodeTypes}
+            onInit={(instance) => {
+              reactFlowRef.current = instance;
+            }}
             onNodeClick={(_, node) => setSelectedId(node.id)}
             onNodesChange={handleNodesChange}
+            onSelectionChange={handleSelectionChange}
             onConnect={commitConnection}
+            panOnDrag
+            zoomOnScroll
+            selectionOnDrag
             fitView
           >
             <Background />
+            <MiniMap />
             <Controls />
           </ReactFlow>
         </div>
