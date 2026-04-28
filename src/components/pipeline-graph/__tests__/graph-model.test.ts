@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildPipelineCreatePayload,
+  createEmptyPipelineDraft,
+  createNodeDraft,
+  createStageDraft,
+  ensureVariableRows,
   toDraftFromDetail,
-  type PipelineDraft,
 } from "@/components/pipeline-editor/draft-model";
 import {
   buildGraphEditorState,
+  removeSelectedGraphObject,
   syncDraftFromGraphState,
   validateGraphConnection,
 } from "@/components/pipeline-graph/graph-model";
@@ -266,5 +270,51 @@ describe("pipeline graph model", () => {
       valid: false,
       message: "不能从后续阶段连回前置阶段",
     });
+  });
+
+  it("removes a stage together with its nodes, edges, and inferred variable rows", () => {
+    const baseDraft = createEmptyPipelineDraft();
+    const deployStage = createStageDraft({
+      id: "deploy",
+      stageKey: "deploy",
+      name: "发布",
+      enabled: true,
+    });
+    const deployNode = createNodeDraft({
+      id: "trigger-release",
+      nodeKey: "trigger_release",
+      stageKey: "deploy",
+      nodeType: "trigger_pipeline",
+      parameters: {
+        project: "team/web-service",
+        ref: "${deploy_branch}",
+      },
+      position: { x: 96, y: 72 },
+    });
+    const draft = {
+      ...baseDraft,
+      stages: [...baseDraft.stages, deployStage],
+      nodes: [...baseDraft.nodes, deployNode],
+      edges: [
+        {
+          id: "checkout_branch_node-1->trigger_release",
+          sourceNodeKey: "checkout_branch_node-1",
+          targetNodeKey: "trigger_release",
+        },
+      ],
+    };
+    draft.variableRows = ensureVariableRows(draft.nodes, draft.variableRows);
+
+    const graphState = buildGraphEditorState(draft);
+    const deployStageNode = graphState.nodes.find((node) => node.id === "deploy");
+
+    expect(deployStageNode).toBeDefined();
+
+    const nextDraft = removeSelectedGraphObject(draft, deployStageNode!);
+
+    expect(nextDraft.stages.map((stage) => stage.stageKey)).toEqual(["stage-1"]);
+    expect(nextDraft.nodes.map((node) => node.nodeKey)).toEqual(["checkout_branch_node-1"]);
+    expect(nextDraft.edges).toEqual([]);
+    expect(nextDraft.variableRows.map((row) => row.key)).toEqual(["source_branch"]);
   });
 });

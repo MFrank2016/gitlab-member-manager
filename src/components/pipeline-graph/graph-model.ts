@@ -56,14 +56,14 @@ function filterEdgesByRemainingNodeKeys(
   );
 }
 
-function isStageGraphNode(node: PipelineGraphNode): node is Node<StageGraphNodeData> {
+export function isStageGraphNode(node: PipelineGraphNode): node is Node<StageGraphNodeData> {
   return (
     node.type === STAGE_GROUP_NODE_TYPE &&
     typeof (node.data as StageGraphNodeData | undefined)?.stageKey === "string"
   );
 }
 
-function isActionGraphNode(node: PipelineGraphNode): node is Node<PipelineActionNodeData> {
+export function isActionGraphNode(node: PipelineGraphNode): node is Node<PipelineActionNodeData> {
   return (
     node.type === PIPELINE_ACTION_NODE_TYPE &&
     typeof (node.data as PipelineActionNodeData | undefined)?.nodeKey === "string"

@@ -33,6 +33,8 @@ import {
   PIPELINE_ACTION_NODE_TYPE,
   STAGE_GROUP_NODE_TYPE,
   buildGraphEditorState,
+  isActionGraphNode,
+  isStageGraphNode,
   removeSelectedGraphObject,
   syncDraftFromGraphState,
   validateGraphConnection,
@@ -86,14 +88,6 @@ const nodeTypes = {
   [PIPELINE_ACTION_NODE_TYPE]: PipelineActionNode,
 };
 
-function isActionGraphNode(node: PipelineGraphNode | null | undefined) {
-  return node?.type === PIPELINE_ACTION_NODE_TYPE;
-}
-
-function isStageGraphNode(node: PipelineGraphNode | null | undefined) {
-  return node?.type === STAGE_GROUP_NODE_TYPE;
-}
-
 export function PipelineGraphEditor({
   draft,
   managedProjects = [],
@@ -113,14 +107,10 @@ export function PipelineGraphEditor({
   );
 
   React.useEffect(() => {
-    if (!selectedId) {
-      setSelectedId(draft.nodes[0]?.nodeKey ?? draft.stages[0]?.stageKey ?? null);
-      return;
+    if (selectedId && !graphNodeMap.has(selectedId)) {
+      setSelectedId(null);
     }
-    if (!graphNodeMap.has(selectedId)) {
-      setSelectedId(draft.nodes[0]?.nodeKey ?? draft.stages[0]?.stageKey ?? null);
-    }
-  }, [draft.nodes, draft.stages, graphNodeMap, selectedId]);
+  }, [graphNodeMap, selectedId]);
 
   const selectedGraphNode = selectedId ? graphNodeMap.get(selectedId) ?? null : null;
   const selectedActionNode =
@@ -240,7 +230,12 @@ export function PipelineGraphEditor({
   }
 
   function handleSelectionChange(params: { nodes: PipelineGraphNode[] }) {
-    setSelectedId(params.nodes.at(-1)?.id ?? null);
+    if (params.nodes.length !== 1) {
+      setSelectedId(null);
+      return;
+    }
+
+    setSelectedId(params.nodes[0]?.id ?? null);
   }
 
   function commitConnection(connection: Connection) {
@@ -384,7 +379,7 @@ export function PipelineGraphEditor({
             onConnect={commitConnection}
             panOnDrag
             zoomOnScroll
-            selectionOnDrag
+            selectionOnDrag={false}
             fitView
           >
             <Background />

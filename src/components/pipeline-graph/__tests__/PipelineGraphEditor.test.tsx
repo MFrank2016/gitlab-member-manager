@@ -33,6 +33,7 @@ vi.mock("@xyflow/react", async () => {
       onNodeClick,
       onSelectionChange,
       onInit,
+      selectionOnDrag,
       children,
     }: {
       nodes: Array<Record<string, unknown>>;
@@ -44,6 +45,7 @@ vi.mock("@xyflow/react", async () => {
         edges: Array<Record<string, unknown>>;
       }) => void;
       onInit?: (instance: { fitView: () => void }) => void;
+      selectionOnDrag?: boolean;
       children?: React.ReactNode;
     }) => {
       const [selectedNodeId, setSelectedNodeId] = ReactModule.useState<string | null>(null);
@@ -55,6 +57,18 @@ vi.mock("@xyflow/react", async () => {
       return (
         <div data-testid="mock-react-flow">
           <div data-testid="mock-react-flow-edge-count">{edges.length}</div>
+          <div data-testid="mock-react-flow-selection-on-drag">
+            {String(Boolean(selectionOnDrag))}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedNodeId(null);
+              onSelectionChange?.({ nodes, edges: [] });
+            }}
+          >
+            模拟多选
+          </button>
           {children}
           {nodes.map((node) => {
             const Component = node.type && nodeTypes ? nodeTypes[String(node.type)] : null;
@@ -214,6 +228,12 @@ describe("PipelineGraphEditor", () => {
     expect(screen.getByTestId("mock-react-flow-minimap")).toBeInTheDocument();
   });
 
+  it("keeps a single-selection model for canvas interactions", () => {
+    render(<EditorHarness />);
+
+    expect(screen.getByTestId("mock-react-flow-selection-on-drag")).toHaveTextContent("false");
+  });
+
   it("exposes a fit-view action", () => {
     render(<EditorHarness />);
 
@@ -245,5 +265,16 @@ describe("PipelineGraphEditor", () => {
       within(screen.getByTestId("graph-node-checkout_branch_node-1")).getByRole("button")
     );
     expect(summary).toHaveTextContent("已选中节点");
+  });
+
+  it("clears the active selection when the flow reports multiple selected nodes", () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "模拟多选" }));
+
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "未选中对象"
+    );
+    expect(screen.getByRole("button", { name: "删除选中对象" })).toBeDisabled();
   });
 });
