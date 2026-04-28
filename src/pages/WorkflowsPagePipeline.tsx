@@ -35,7 +35,6 @@ import {
   getPipelineScheduleRuntimeSnapshots,
   listManagedProjects,
   listPipelineDefinitions,
-  listProjectGroups,
   readCommandErrorMessage,
   updatePipelineDefinition,
 } from "@/lib/invoke";
@@ -104,9 +103,8 @@ export function WorkflowsPagePipeline({
       }
 
       try {
-        const [definitions, , projects] = await Promise.all([
+        const [definitions, projects] = await Promise.all([
           listPipelineDefinitions(),
-          listProjectGroups(),
           listManagedProjects(),
         ]);
         setItems(definitions);
