@@ -1,11 +1,13 @@
 use crate::models::{
     AppSettings, LocalGroup, LocalMember, LocalMemberUpsert, ManagedProject,
-    PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineMigrationSummary, PipelineNode,
-    PipelineNodeInput, PipelineRunDetail, PipelineRunListItem, PipelineRunListPage,
-    PipelineRunListQuery, PipelineRunNode, PipelineRunNodeDiagnostics, PipelineRunProject,
-    PipelineSchedule, PipelineScheduleInput, PipelineVariable, PipelineVariableInput, ProjectGroup,
-    WorkflowDefinitionDetail, WorkflowDefinitionListItem, WorkflowRunDetail, WorkflowRunListItem,
-    WorkflowRunProject, WorkflowRunStep, WorkflowStep, WorkflowStepInput,
+    PipelineDefinitionDetail, PipelineDefinitionListItem, PipelineEdge, PipelineEdgeInput,
+    PipelineGraphNodeInput, PipelineMigrationSummary, PipelineNode, PipelineNodeInput,
+    PipelineRunDetail, PipelineRunListItem, PipelineRunListPage, PipelineRunListQuery,
+    PipelineRunNode, PipelineRunNodeDiagnostics, PipelineRunProject, PipelineRunStage,
+    PipelineSchedule, PipelineScheduleInput, PipelineStage, PipelineStageInput, PipelineVariable,
+    PipelineVariableInput, ProjectGroup, WorkflowDefinitionDetail, WorkflowDefinitionListItem,
+    WorkflowRunDetail, WorkflowRunListItem, WorkflowRunProject, WorkflowRunStep, WorkflowStep,
+    WorkflowStepInput,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -171,6 +173,233 @@ fn normalize_pipeline_node_inputs(nodes: Vec<PipelineNodeInput>) -> Result<Vec<P
     }
 
     Ok(normalized)
+}
+
+fn normalize_optional_pipeline_graph_key(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    })
+}
+
+fn normalize_pipeline_stage_inputs(
+    stages: Vec<PipelineStageInput>,
+) -> Result<Vec<PipelineStageInput>> {
+    let mut normalized = Vec::with_capacity(stages.len());
+    let mut keys = BTreeSet::new();
+
+    for stage in stages {
+        let stage_key = stage.stage_key.trim().to_string();
+        if stage_key.is_empty() {
+            return Err(anyhow!("pipeline stage key is empty"));
+        }
+        if !keys.insert(stage_key.clone()) {
+            return Err(anyhow!("duplicate pipeline stage key: {stage_key}"));
+        }
+
+        let name = stage.name.trim().to_string();
+        if name.is_empty() {
+            return Err(anyhow!("pipeline stage name is empty"));
+        }
+
+        normalized.push(PipelineStageInput {
+            stage_key,
+            name,
+            enabled: stage.enabled,
+        });
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_pipeline_graph_node_inputs(
+    nodes: Vec<PipelineGraphNodeInput>,
+) -> Result<Vec<PipelineGraphNodeInput>> {
+    if nodes.is_empty() {
+        return Err(anyhow!(
+            "pipeline definition must contain at least one node"
+        ));
+    }
+
+    let mut normalized = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let node_type = node.node_type.trim().to_string();
+        if node_type.is_empty() {
+            return Err(anyhow!("pipeline node type is empty"));
+        }
+
+        let parameters = normalize_json_object(node.parameters, "pipeline node parameters")?;
+        normalized.push(PipelineGraphNodeInput {
+            node_type,
+            parameters,
+            stage_key: normalize_optional_pipeline_graph_key(node.stage_key),
+            node_key: normalize_optional_pipeline_graph_key(node.node_key),
+            position_x: Some(node.position_x.unwrap_or(0.0)),
+            position_y: Some(node.position_y.unwrap_or(0.0)),
+            enabled: Some(node.enabled.unwrap_or(true)),
+        });
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_pipeline_edge_inputs(edges: Vec<PipelineEdgeInput>) -> Result<Vec<PipelineEdgeInput>> {
+    let mut normalized = Vec::with_capacity(edges.len());
+    let mut unique_edges = BTreeSet::new();
+
+    for edge in edges {
+        let source_node_key = edge.source_node_key.trim().to_string();
+        let target_node_key = edge.target_node_key.trim().to_string();
+
+        if source_node_key.is_empty() {
+            return Err(anyhow!("pipeline edge source node key is empty"));
+        }
+        if target_node_key.is_empty() {
+            return Err(anyhow!("pipeline edge target node key is empty"));
+        }
+        if source_node_key == target_node_key {
+            return Err(anyhow!(
+                "pipeline edge cannot reference the same node key twice: {source_node_key}"
+            ));
+        }
+
+        let unique_key = format!("{source_node_key}->{target_node_key}");
+        if !unique_edges.insert(unique_key) {
+            return Err(anyhow!(
+                "duplicate pipeline edge: {source_node_key} -> {target_node_key}"
+            ));
+        }
+
+        normalized.push(PipelineEdgeInput {
+            source_node_key,
+            target_node_key,
+        });
+    }
+
+    Ok(normalized)
+}
+
+fn validate_pipeline_graph_shape(
+    stages: &[PipelineStageInput],
+    nodes: &[PipelineGraphNodeInput],
+    edges: &[PipelineEdgeInput],
+) -> Result<()> {
+    let graph_mode = !stages.is_empty()
+        || !edges.is_empty()
+        || nodes
+            .iter()
+            .any(|node| node.stage_key.is_some() || node.node_key.is_some());
+
+    if !graph_mode {
+        return Ok(());
+    }
+
+    if stages.is_empty() {
+        return Err(anyhow!(
+            "stage-aware pipeline definitions must contain at least one stage"
+        ));
+    }
+
+    let mut stage_order_by_key = HashMap::<String, i64>::new();
+    for (index, stage) in stages.iter().enumerate() {
+        stage_order_by_key.insert(
+            stage.stage_key.clone(),
+            i64::try_from(index).map_err(|_| anyhow!("pipeline stage index out of range"))?,
+        );
+    }
+
+    let mut node_stage_by_key = HashMap::<String, String>::new();
+    let mut node_keys = BTreeSet::new();
+    for node in nodes {
+        let stage_key = node
+            .stage_key
+            .clone()
+            .ok_or_else(|| anyhow!("stage-aware pipeline node missing stage_key: {}", node.node_type))?;
+        if !stage_order_by_key.contains_key(&stage_key) {
+            return Err(anyhow!("pipeline node stage key not found: {stage_key}"));
+        }
+
+        let node_key = node
+            .node_key
+            .clone()
+            .ok_or_else(|| anyhow!("stage-aware pipeline node missing node_key: {}", node.node_type))?;
+        if !node_keys.insert(node_key.clone()) {
+            return Err(anyhow!("duplicate pipeline node key: {node_key}"));
+        }
+
+        node_stage_by_key.insert(node_key, stage_key);
+    }
+
+    let mut indegree = HashMap::<String, usize>::new();
+    let mut adjacency = HashMap::<String, Vec<String>>::new();
+    for node_key in node_keys.iter() {
+        indegree.insert(node_key.clone(), 0);
+        adjacency.insert(node_key.clone(), Vec::new());
+    }
+
+    for edge in edges {
+        if !node_stage_by_key.contains_key(&edge.source_node_key) {
+            return Err(anyhow!(
+                "pipeline edge source node key not found: {}",
+                edge.source_node_key
+            ));
+        }
+        if !node_stage_by_key.contains_key(&edge.target_node_key) {
+            return Err(anyhow!(
+                "pipeline edge target node key not found: {}",
+                edge.target_node_key
+            ));
+        }
+
+        let source_stage_order = stage_order_by_key
+            .get(node_stage_by_key.get(&edge.source_node_key).expect("source stage present"))
+            .expect("source stage order present");
+        let target_stage_order = stage_order_by_key
+            .get(node_stage_by_key.get(&edge.target_node_key).expect("target stage present"))
+            .expect("target stage order present");
+        if source_stage_order > target_stage_order {
+            return Err(anyhow!(
+                "pipeline edge points backward from {} to {}",
+                edge.source_node_key,
+                edge.target_node_key
+            ));
+        }
+
+        adjacency
+            .get_mut(&edge.source_node_key)
+            .expect("adjacency entry present")
+            .push(edge.target_node_key.clone());
+        *indegree
+            .get_mut(&edge.target_node_key)
+            .expect("indegree entry present") += 1;
+    }
+
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(node_key, value)| (*value == 0).then_some(node_key.clone()))
+        .collect::<Vec<_>>();
+    let mut visited = 0_usize;
+
+    while let Some(node_key) = ready.pop() {
+        visited += 1;
+        if let Some(targets) = adjacency.get(&node_key) {
+            for target_key in targets {
+                let entry = indegree
+                    .get_mut(target_key)
+                    .expect("target indegree entry present");
+                *entry -= 1;
+                if *entry == 0 {
+                    ready.push(target_key.clone());
+                }
+            }
+        }
+    }
+
+    if visited != node_keys.len() {
+        return Err(anyhow!("pipeline graph contains a cycle"));
+    }
+
+    Ok(())
 }
 
 fn normalize_pipeline_schedule_inputs(
@@ -485,11 +714,29 @@ pub struct WorkflowExecutionDefinition {
 }
 
 #[derive(Debug, Clone)]
+pub struct PipelineExecutionStageDef {
+    pub id: i64,
+    pub stage_key: String,
+    pub name: String,
+    pub stage_order: i64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct PipelineExecutionNodeDef {
     pub id: i64,
     pub node_order: i64,
     pub node_type: String,
     pub parameters: Value,
+    pub stage_key: Option<String>,
+    pub node_key: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PipelineExecutionEdgeDef {
+    pub source_node_key: String,
+    pub target_node_key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -497,7 +744,9 @@ pub struct PipelineExecutionDefinition {
     pub id: i64,
     pub max_concurrency_default: i64,
     pub variables: Vec<PipelineVariable>,
+    pub stages: Vec<PipelineExecutionStageDef>,
     pub nodes: Vec<PipelineExecutionNodeDef>,
+    pub edges: Vec<PipelineExecutionEdgeDef>,
 }
 
 async fn insert_workflow_steps(
@@ -659,12 +908,40 @@ pub async fn load_pipeline_definition_for_execution(
         });
     }
 
-    let node_rows = sqlx::query_as::<_, (i64, i64, String, String)>(
+    let stage_rows = sqlx::query_as::<_, (i64, String, String, i64, i64)>(
         r#"SELECT
-         id, node_order, node_type, parameters_json
-       FROM pipeline_nodes
+         id, stage_key, name, stage_order, enabled
+       FROM pipeline_stages
        WHERE pipeline_definition_id = ?1
-       ORDER BY node_order ASC, id ASC"#,
+       ORDER BY stage_order ASC, id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+    let mut stages = Vec::with_capacity(stage_rows.len());
+    for row in stage_rows {
+        stages.push(PipelineExecutionStageDef {
+            id: row.0,
+            stage_key: row.1,
+            name: row.2,
+            stage_order: row.3,
+            enabled: row.4 != 0,
+        });
+    }
+
+    let node_rows = sqlx::query_as::<_, (i64, i64, String, String, Option<String>, Option<String>, i64)>(
+        r#"SELECT
+         n.id,
+         n.node_order,
+         n.node_type,
+         n.parameters_json,
+         s.stage_key,
+         n.node_key,
+         n.enabled
+       FROM pipeline_nodes n
+       LEFT JOIN pipeline_stages s ON s.id = n.stage_id
+       WHERE n.pipeline_definition_id = ?1
+       ORDER BY n.node_order ASC, n.id ASC"#,
     )
     .bind(pipeline_definition_id)
     .fetch_all(pool)
@@ -683,6 +960,30 @@ pub async fn load_pipeline_definition_for_execution(
             node_order: row.1,
             node_type: row.2,
             parameters: deserialize_json_object(&row.3, "pipeline node parameters")?,
+            stage_key: row.4,
+            node_key: row.5,
+            enabled: row.6 != 0,
+        });
+    }
+
+    let edge_rows = sqlx::query_as::<_, (String, String)>(
+        r#"SELECT
+             source.node_key,
+             target.node_key
+           FROM pipeline_edges e
+           JOIN pipeline_nodes source ON source.id = e.source_node_id
+           JOIN pipeline_nodes target ON target.id = e.target_node_id
+           WHERE e.pipeline_definition_id = ?1
+           ORDER BY e.id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+    let mut edges = Vec::with_capacity(edge_rows.len());
+    for row in edge_rows {
+        edges.push(PipelineExecutionEdgeDef {
+            source_node_key: row.0,
+            target_node_key: row.1,
         });
     }
 
@@ -690,7 +991,9 @@ pub async fn load_pipeline_definition_for_execution(
         id,
         max_concurrency_default,
         variables,
+        stages,
         nodes,
+        edges,
     })
 }
 
@@ -1214,32 +1517,146 @@ async fn insert_pipeline_variables(
     Ok(())
 }
 
+async fn insert_pipeline_stages(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_definition_id: i64,
+    stages: &[PipelineStageInput],
+    now: &str,
+) -> Result<HashMap<String, i64>> {
+    let mut stage_ids_by_key = HashMap::with_capacity(stages.len());
+
+    for (index, stage) in stages.iter().enumerate() {
+        let stage_order = i64::try_from(index)
+            .map_err(|_| anyhow!("pipeline stage index out of range: {index}"))?;
+        let stage_id = sqlx::query(
+            r#"INSERT INTO pipeline_stages (
+                 pipeline_definition_id, stage_key, name, stage_order, enabled, created_at, updated_at
+               ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+        )
+        .bind(pipeline_definition_id)
+        .bind(&stage.stage_key)
+        .bind(&stage.name)
+        .bind(stage_order)
+        .bind(if stage.enabled { 1_i64 } else { 0_i64 })
+        .bind(now)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?
+        .last_insert_rowid();
+
+        stage_ids_by_key.insert(stage.stage_key.clone(), stage_id);
+    }
+
+    Ok(stage_ids_by_key)
+}
+
+async fn insert_pipeline_graph_nodes(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_definition_id: i64,
+    nodes: &[PipelineGraphNodeInput],
+    stage_ids_by_key: &HashMap<String, i64>,
+    now: &str,
+) -> Result<HashMap<String, i64>> {
+    let mut node_ids_by_key = HashMap::new();
+
+    for (index, node) in nodes.iter().enumerate() {
+        let node_order = i64::try_from(index)
+            .map_err(|_| anyhow!("pipeline node index out of range: {index}"))?;
+        let parameters_json = serialize_json(&node.parameters, "pipeline_nodes.parameters_json")?;
+        let stage_id = node
+            .stage_key
+            .as_ref()
+            .map(|stage_key| {
+                stage_ids_by_key
+                    .get(stage_key)
+                    .copied()
+                    .ok_or_else(|| anyhow!("pipeline node stage key not found: {stage_key}"))
+            })
+            .transpose()?;
+
+        let node_id = sqlx::query(
+            r#"INSERT INTO pipeline_nodes (
+                 pipeline_definition_id, stage_id, node_key, node_order, node_type, parameters_json,
+                 position_x, position_y, enabled, created_at, updated_at
+               ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
+        )
+        .bind(pipeline_definition_id)
+        .bind(stage_id)
+        .bind(node.node_key.as_deref())
+        .bind(node_order)
+        .bind(&node.node_type)
+        .bind(&parameters_json)
+        .bind(node.position_x.unwrap_or(0.0))
+        .bind(node.position_y.unwrap_or(0.0))
+        .bind(if node.enabled.unwrap_or(true) { 1_i64 } else { 0_i64 })
+        .bind(now)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?
+        .last_insert_rowid();
+
+        if let Some(node_key) = &node.node_key {
+            node_ids_by_key.insert(node_key.clone(), node_id);
+        }
+    }
+
+    Ok(node_ids_by_key)
+}
+
+async fn insert_pipeline_edges(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_definition_id: i64,
+    edges: &[PipelineEdgeInput],
+    node_ids_by_key: &HashMap<String, i64>,
+    now: &str,
+) -> Result<()> {
+    for edge in edges {
+        let source_node_id = node_ids_by_key
+            .get(&edge.source_node_key)
+            .copied()
+            .ok_or_else(|| anyhow!("pipeline edge source node key not found: {}", edge.source_node_key))?;
+        let target_node_id = node_ids_by_key
+            .get(&edge.target_node_key)
+            .copied()
+            .ok_or_else(|| anyhow!("pipeline edge target node key not found: {}", edge.target_node_key))?;
+
+        sqlx::query(
+            r#"INSERT INTO pipeline_edges (
+                 pipeline_definition_id, source_node_id, target_node_id, created_at
+               ) VALUES (?1, ?2, ?3, ?4)"#,
+        )
+        .bind(pipeline_definition_id)
+        .bind(source_node_id)
+        .bind(target_node_id)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
 async fn insert_pipeline_nodes(
     tx: &mut Transaction<'_, Sqlite>,
     pipeline_definition_id: i64,
     nodes: &[PipelineNodeInput],
     now: &str,
 ) -> Result<()> {
-    for (index, node) in nodes.iter().enumerate() {
-        let node_order = i64::try_from(index)
-            .map_err(|_| anyhow!("pipeline node index out of range: {index}"))?;
-        let parameters_json = serialize_json(&node.parameters, "pipeline_nodes.parameters_json")?;
+    let graph_nodes = nodes
+        .iter()
+        .map(|node| PipelineGraphNodeInput {
+            node_type: node.node_type.clone(),
+            parameters: node.parameters.clone(),
+            stage_key: None,
+            node_key: None,
+            position_x: Some(0.0),
+            position_y: Some(0.0),
+            enabled: Some(true),
+        })
+        .collect::<Vec<_>>();
 
-        sqlx::query(
-            r#"INSERT INTO pipeline_nodes (
-             pipeline_definition_id, node_order, node_type, parameters_json, created_at, updated_at
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
-        )
-        .bind(pipeline_definition_id)
-        .bind(node_order)
-        .bind(&node.node_type)
-        .bind(&parameters_json)
-        .bind(now)
-        .bind(now)
-        .execute(&mut **tx)
-        .await?;
-    }
-
+    let _ = insert_pipeline_graph_nodes(tx, pipeline_definition_id, &graph_nodes, &HashMap::new(), now).await?;
     Ok(())
 }
 
@@ -1317,12 +1734,14 @@ async fn load_pipeline_nodes(
     pool: &SqlitePool,
     pipeline_definition_id: i64,
 ) -> Result<Vec<PipelineNode>> {
-    let rows = sqlx::query_as::<_, (i64, String, String)>(
-        r#"SELECT
-         node_order, node_type, parameters_json
-       FROM pipeline_nodes
-       WHERE pipeline_definition_id = ?1
-       ORDER BY node_order ASC, id ASC"#,
+    let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, Option<String>, f64, f64, i64)>(
+       r#"SELECT
+         n.node_order, n.node_type, n.parameters_json, s.stage_key, n.node_key,
+         n.position_x, n.position_y, n.enabled
+       FROM pipeline_nodes n
+       LEFT JOIN pipeline_stages s ON s.id = n.stage_id
+       WHERE n.pipeline_definition_id = ?1
+       ORDER BY n.node_order ASC, n.id ASC"#,
     )
     .bind(pipeline_definition_id)
     .fetch_all(pool)
@@ -1334,10 +1753,121 @@ async fn load_pipeline_nodes(
             node_order: row.0,
             node_type: row.1,
             parameters: deserialize_json_object(&row.2, "pipeline node parameters")?,
+            stage_key: row.3,
+            node_key: row.4,
+            position_x: row.5,
+            position_y: row.6,
+            enabled: row.7 != 0,
         });
     }
 
     Ok(nodes)
+}
+
+pub(crate) async fn load_pipeline_stages(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+) -> Result<Vec<PipelineStage>> {
+    let rows = sqlx::query_as::<_, (i64, String, String, i64, i64)>(
+        r#"SELECT
+             id, stage_key, name, stage_order, enabled
+           FROM pipeline_stages
+           WHERE pipeline_definition_id = ?1
+           ORDER BY stage_order ASC, id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut stages = Vec::with_capacity(rows.len());
+    for row in rows {
+        stages.push(PipelineStage {
+            id: row.0,
+            stage_key: row.1,
+            name: row.2,
+            stage_order: row.3,
+            enabled: row.4 != 0,
+        });
+    }
+
+    Ok(stages)
+}
+
+pub(crate) async fn load_pipeline_edges(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+) -> Result<Vec<PipelineEdge>> {
+    let rows = sqlx::query_as::<_, (i64, String, String)>(
+        r#"SELECT
+             e.id, source.node_key, target.node_key
+           FROM pipeline_edges e
+           JOIN pipeline_nodes source ON source.id = e.source_node_id
+           JOIN pipeline_nodes target ON target.id = e.target_node_id
+           WHERE e.pipeline_definition_id = ?1
+           ORDER BY e.id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut edges = Vec::with_capacity(rows.len());
+    for row in rows {
+        edges.push(PipelineEdge {
+            id: row.0,
+            source_node_key: row.1,
+            target_node_key: row.2,
+        });
+    }
+
+    Ok(edges)
+}
+
+#[allow(dead_code)]
+pub(crate) async fn load_pipeline_run_stages(
+    pool: &SqlitePool,
+    pipeline_run_id: i64,
+) -> Result<Vec<PipelineRunStage>> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            Option<i64>,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        r#"SELECT
+             id, pipeline_stage_id, stage_order, stage_key, stage_name_snapshot, status,
+             summary_message, started_at, finished_at
+           FROM pipeline_run_stages
+           WHERE pipeline_run_id = ?1
+           ORDER BY stage_order ASC, id ASC"#,
+    )
+    .bind(pipeline_run_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut stages = Vec::with_capacity(rows.len());
+    for row in rows {
+        stages.push(PipelineRunStage {
+            id: row.0,
+            pipeline_stage_id: row.1,
+            stage_order: row.2,
+            stage_key: row.3,
+            stage_name_snapshot: row.4,
+            status: row.5,
+            summary_message: row.6,
+            started_at: row.7,
+            finished_at: row.8,
+        });
+    }
+
+    Ok(stages)
 }
 
 pub(crate) async fn list_pipeline_schedules_for_definition(
@@ -1388,14 +1918,16 @@ pub(crate) async fn list_pipeline_schedules_for_definition(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn create_pipeline_definition(
+async fn create_pipeline_definition_with_graph_internal(
     pool: &SqlitePool,
     name: String,
     description: String,
     enabled: bool,
     max_concurrency_default: i64,
     variables: Vec<PipelineVariableInput>,
-    nodes: Vec<PipelineNodeInput>,
+    stages: Vec<PipelineStageInput>,
+    nodes: Vec<PipelineGraphNodeInput>,
+    edges: Vec<PipelineEdgeInput>,
     schedules: Vec<PipelineScheduleInput>,
 ) -> Result<PipelineDefinitionDetail> {
     let name = name.trim().to_string();
@@ -1407,7 +1939,10 @@ pub async fn create_pipeline_definition(
     }
 
     let variables = normalize_pipeline_variable_inputs(variables)?;
-    let nodes = normalize_pipeline_node_inputs(nodes)?;
+    let stages = normalize_pipeline_stage_inputs(stages)?;
+    let nodes = normalize_pipeline_graph_node_inputs(nodes)?;
+    let edges = normalize_pipeline_edge_inputs(edges)?;
+    validate_pipeline_graph_shape(&stages, &nodes, &edges)?;
     let schedules = normalize_pipeline_schedule_inputs(schedules)?;
     ensure_pipeline_schedule_project_groups_exist(pool, &schedules).await?;
     let description = description.trim().to_string();
@@ -1417,8 +1952,8 @@ pub async fn create_pipeline_definition(
     let mut tx = pool.begin().await?;
     let res = sqlx::query(
         r#"INSERT INTO pipeline_definitions (
-         name, description, enabled, max_concurrency_default, created_at, updated_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+             name, description, enabled, max_concurrency_default, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
     )
     .bind(&name)
     .bind(&description)
@@ -1431,11 +1966,95 @@ pub async fn create_pipeline_definition(
     let pipeline_definition_id = res.last_insert_rowid();
 
     insert_pipeline_variables(&mut tx, pipeline_definition_id, &variables, &now).await?;
-    insert_pipeline_nodes(&mut tx, pipeline_definition_id, &nodes, &now).await?;
+    let stage_ids_by_key =
+        insert_pipeline_stages(&mut tx, pipeline_definition_id, &stages, &now).await?;
+    let node_ids_by_key = insert_pipeline_graph_nodes(
+        &mut tx,
+        pipeline_definition_id,
+        &nodes,
+        &stage_ids_by_key,
+        &now,
+    )
+    .await?;
+    insert_pipeline_edges(
+        &mut tx,
+        pipeline_definition_id,
+        &edges,
+        &node_ids_by_key,
+        &now,
+    )
+    .await?;
     insert_pipeline_schedules(&mut tx, pipeline_definition_id, &schedules, &now).await?;
     tx.commit().await?;
 
     get_pipeline_definition_detail(pool, pipeline_definition_id).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_pipeline_definition(
+    pool: &SqlitePool,
+    name: String,
+    description: String,
+    enabled: bool,
+    max_concurrency_default: i64,
+    variables: Vec<PipelineVariableInput>,
+    nodes: Vec<PipelineNodeInput>,
+    schedules: Vec<PipelineScheduleInput>,
+) -> Result<PipelineDefinitionDetail> {
+    let nodes = normalize_pipeline_node_inputs(nodes)?
+        .into_iter()
+        .map(|node| PipelineGraphNodeInput {
+            node_type: node.node_type,
+            parameters: node.parameters,
+            stage_key: None,
+            node_key: None,
+            position_x: Some(0.0),
+            position_y: Some(0.0),
+            enabled: Some(true),
+        })
+        .collect::<Vec<_>>();
+
+    create_pipeline_definition_with_graph_internal(
+        pool,
+        name,
+        description,
+        enabled,
+        max_concurrency_default,
+        variables,
+        vec![],
+        nodes,
+        vec![],
+        schedules,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_pipeline_definition_graph(
+    pool: &SqlitePool,
+    name: String,
+    description: String,
+    enabled: bool,
+    max_concurrency_default: i64,
+    variables: Vec<PipelineVariableInput>,
+    stages: Vec<PipelineStageInput>,
+    nodes: Vec<PipelineGraphNodeInput>,
+    edges: Vec<PipelineEdgeInput>,
+    schedules: Vec<PipelineScheduleInput>,
+) -> Result<PipelineDefinitionDetail> {
+    create_pipeline_definition_with_graph_internal(
+        pool,
+        name,
+        description,
+        enabled,
+        max_concurrency_default,
+        variables,
+        stages,
+        nodes,
+        edges,
+        schedules,
+    )
+    .await
 }
 
 pub async fn list_pipeline_definitions(
@@ -1512,7 +2131,9 @@ pub async fn get_pipeline_definition_detail(
     .ok_or_else(|| anyhow!("pipeline definition not found: {id}"))?;
 
     let variables = load_pipeline_variables(pool, id).await?;
+    let stages = load_pipeline_stages(pool, id).await?;
     let nodes = load_pipeline_nodes(pool, id).await?;
+    let edges = load_pipeline_edges(pool, id).await?;
     let schedules = list_pipeline_schedules_for_definition(pool, id).await?;
 
     Ok(PipelineDefinitionDetail {
@@ -1525,12 +2146,14 @@ pub async fn get_pipeline_definition_detail(
         created_at: row.6,
         updated_at: row.7,
         variables,
+        stages,
         nodes,
+        edges,
         schedules,
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub async fn update_pipeline_definition(
     pool: &SqlitePool,
     id: i64,
@@ -1542,6 +2165,49 @@ pub async fn update_pipeline_definition(
     nodes: Vec<PipelineNodeInput>,
     schedules: Vec<PipelineScheduleInput>,
 ) -> Result<()> {
+    let nodes = normalize_pipeline_node_inputs(nodes)?
+        .into_iter()
+        .map(|node| PipelineGraphNodeInput {
+            node_type: node.node_type,
+            parameters: node.parameters,
+            stage_key: None,
+            node_key: None,
+            position_x: Some(0.0),
+            position_y: Some(0.0),
+            enabled: Some(true),
+        })
+        .collect::<Vec<_>>();
+
+    update_pipeline_definition_graph(
+        pool,
+        id,
+        name,
+        description,
+        enabled,
+        max_concurrency_default,
+        variables,
+        vec![],
+        nodes,
+        vec![],
+        schedules,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_pipeline_definition_graph(
+    pool: &SqlitePool,
+    id: i64,
+    name: String,
+    description: String,
+    enabled: bool,
+    max_concurrency_default: i64,
+    variables: Vec<PipelineVariableInput>,
+    stages: Vec<PipelineStageInput>,
+    nodes: Vec<PipelineGraphNodeInput>,
+    edges: Vec<PipelineEdgeInput>,
+    schedules: Vec<PipelineScheduleInput>,
+) -> Result<()> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(anyhow!("pipeline definition name is empty"));
@@ -1551,7 +2217,10 @@ pub async fn update_pipeline_definition(
     }
 
     let variables = normalize_pipeline_variable_inputs(variables)?;
-    let nodes = normalize_pipeline_node_inputs(nodes)?;
+    let stages = normalize_pipeline_stage_inputs(stages)?;
+    let nodes = normalize_pipeline_graph_node_inputs(nodes)?;
+    let edges = normalize_pipeline_edge_inputs(edges)?;
+    validate_pipeline_graph_shape(&stages, &nodes, &edges)?;
     let schedules = normalize_pipeline_schedule_inputs(schedules)?;
     ensure_pipeline_schedule_project_groups_exist(pool, &schedules).await?;
     let description = description.trim().to_string();
@@ -1561,12 +2230,12 @@ pub async fn update_pipeline_definition(
     let mut tx = pool.begin().await?;
     let res = sqlx::query(
         r#"UPDATE pipeline_definitions
-       SET name = ?1,
-           description = ?2,
-           enabled = ?3,
-           max_concurrency_default = ?4,
-           updated_at = ?5
-       WHERE id = ?6"#,
+           SET name = ?1,
+               description = ?2,
+               enabled = ?3,
+               max_concurrency_default = ?4,
+               updated_at = ?5
+         WHERE id = ?6"#,
     )
     .bind(&name)
     .bind(&description)
@@ -1585,7 +2254,15 @@ pub async fn update_pipeline_definition(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    sqlx::query(r#"DELETE FROM pipeline_edges WHERE pipeline_definition_id = ?1"#)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(r#"DELETE FROM pipeline_nodes WHERE pipeline_definition_id = ?1"#)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(r#"DELETE FROM pipeline_stages WHERE pipeline_definition_id = ?1"#)
         .bind(id)
         .execute(&mut *tx)
         .await?;
@@ -1595,7 +2272,10 @@ pub async fn update_pipeline_definition(
         .await?;
 
     insert_pipeline_variables(&mut tx, id, &variables, &now).await?;
-    insert_pipeline_nodes(&mut tx, id, &nodes, &now).await?;
+    let stage_ids_by_key = insert_pipeline_stages(&mut tx, id, &stages, &now).await?;
+    let node_ids_by_key =
+        insert_pipeline_graph_nodes(&mut tx, id, &nodes, &stage_ids_by_key, &now).await?;
+    insert_pipeline_edges(&mut tx, id, &edges, &node_ids_by_key, &now).await?;
     insert_pipeline_schedules(&mut tx, id, &schedules, &now).await?;
     tx.commit().await?;
     Ok(())
@@ -2287,7 +2967,6 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
     .bind(id)
     .fetch_all(&mut *tx)
     .await?;
-
     let mut nodes_by_project_id = HashMap::<i64, Vec<PipelineRunNode>>::new();
     for node_row in node_rows {
         let node = PipelineRunNode {
@@ -2345,6 +3024,7 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
     }
 
     tx.commit().await?;
+    let stages = load_pipeline_run_stages(pool, id).await?;
 
     Ok(PipelineRunDetail {
         id: row.id,
@@ -2372,6 +3052,7 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
         finished_at: row.finished_at,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        stages,
         projects,
     })
 }
@@ -3077,6 +3758,7 @@ pub(crate) async fn setup_test_pool() -> SqlitePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_support::now_rfc3339;
 
     async fn count_rows(pool: &SqlitePool, table_name: &str) -> i64 {
         let query = format!("SELECT COUNT(*) FROM {table_name}");
@@ -4576,6 +5258,310 @@ mod tests {
             "expected pipeline_schedules to contain project_group_id, got {:?}",
             column_names
         );
+    }
+
+    #[tokio::test]
+    async fn pipeline_stage_definition_schema_requires_stage_edge_and_run_stage_tables() {
+        let pool = setup_test_pool().await;
+
+        for table_name in ["pipeline_stages", "pipeline_edges", "pipeline_run_stages"] {
+            let exists = sqlx::query_scalar::<_, i64>(
+                r#"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1"#,
+            )
+            .bind(table_name)
+            .fetch_one(&pool)
+            .await
+            .expect("query sqlite_master");
+
+            assert_eq!(exists, 1, "expected table {table_name} to exist");
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_stage_definition_schema_requires_stage_layout_columns_on_pipeline_nodes() {
+        let pool = setup_test_pool().await;
+
+        let columns = sqlx::query_as::<_, (i64, String, String, i64, Option<String>, i64)>(
+            r#"PRAGMA table_info(pipeline_nodes)"#,
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load pipeline_nodes columns");
+
+        let column_names = columns.into_iter().map(|row| row.1).collect::<Vec<_>>();
+        for expected in ["stage_id", "node_key", "position_x", "position_y", "enabled"] {
+            assert!(
+                column_names.iter().any(|name| name == expected),
+                "expected pipeline_nodes to contain {expected}, got {:?}",
+                column_names
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_stage_definition_persists_stage_rows_edge_rows_and_stage_owned_nodes() {
+        let pool = setup_test_pool().await;
+
+        let pipeline = create_pipeline_definition(
+            &pool,
+            "stage-aware-schema-seed".to_string(),
+            "stage-aware schema seed".to_string(),
+            true,
+            2,
+            vec![],
+            vec![
+                PipelineNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({ "project": "team/service-a", "ref": "dev" }),
+                },
+                PipelineNodeInput {
+                    node_type: "wait_pipeline".to_string(),
+                    parameters: serde_json::json!({ "project": "team/service-a", "ref": "dev" }),
+                },
+            ],
+            vec![],
+        )
+        .await
+        .expect("create base pipeline definition");
+
+        let now = now_rfc3339();
+        let stage_a_id = sqlx::query(
+            r#"INSERT INTO pipeline_stages (
+                 pipeline_definition_id, stage_key, name, stage_order, enabled, created_at, updated_at
+               ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+        )
+        .bind(pipeline.id)
+        .bind("merge_gate")
+        .bind("合并门禁")
+        .bind(0_i64)
+        .bind(1_i64)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert stage a")
+        .last_insert_rowid();
+
+        let stage_b_id = sqlx::query(
+            r#"INSERT INTO pipeline_stages (
+                 pipeline_definition_id, stage_key, name, stage_order, enabled, created_at, updated_at
+               ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+        )
+        .bind(pipeline.id)
+        .bind("post_merge")
+        .bind("合并后等待")
+        .bind(1_i64)
+        .bind(1_i64)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert stage b")
+        .last_insert_rowid();
+
+        sqlx::query(
+            r#"UPDATE pipeline_nodes
+               SET stage_id = ?2,
+                   node_key = ?3,
+                   position_x = ?4,
+                   position_y = ?5,
+                   enabled = ?6
+               WHERE pipeline_definition_id = ?1 AND node_order = ?7"#,
+        )
+        .bind(pipeline.id)
+        .bind(stage_a_id)
+        .bind("merge_gate_check")
+        .bind(120.0_f64)
+        .bind(48.0_f64)
+        .bind(1_i64)
+        .bind(0_i64)
+        .execute(&pool)
+        .await
+        .expect("update first node layout");
+
+        sqlx::query(
+            r#"UPDATE pipeline_nodes
+               SET stage_id = ?2,
+                   node_key = ?3,
+                   position_x = ?4,
+                   position_y = ?5,
+                   enabled = ?6
+               WHERE pipeline_definition_id = ?1 AND node_order = ?7"#,
+        )
+        .bind(pipeline.id)
+        .bind(stage_b_id)
+        .bind("post_merge_wait")
+        .bind(420.0_f64)
+        .bind(48.0_f64)
+        .bind(1_i64)
+        .bind(1_i64)
+        .execute(&pool)
+        .await
+        .expect("update second node layout");
+
+        sqlx::query(
+            r#"INSERT INTO pipeline_edges (
+                 pipeline_definition_id, source_node_id, target_node_id, created_at
+               )
+               SELECT ?1, source.id, target.id, ?2
+               FROM pipeline_nodes source
+               JOIN pipeline_nodes target
+                 ON target.pipeline_definition_id = source.pipeline_definition_id
+              WHERE source.pipeline_definition_id = ?1
+                AND source.node_order = 0
+                AND target.node_order = 1"#,
+        )
+        .bind(pipeline.id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert stage edge");
+
+        let stages = load_pipeline_stages(&pool, pipeline.id)
+            .await
+            .expect("load pipeline stages");
+        let edges = load_pipeline_edges(&pool, pipeline.id)
+            .await
+            .expect("load pipeline edges");
+        let staged_node_count = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*) FROM pipeline_nodes
+               WHERE pipeline_definition_id = ?1 AND stage_id IS NOT NULL"#,
+        )
+        .bind(pipeline.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count stage-owned nodes");
+
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].stage_key, "merge_gate");
+        assert_eq!(stages[1].stage_key, "post_merge");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(staged_node_count, 2);
+    }
+
+    #[tokio::test]
+    async fn pipeline_stage_definition_crud_create_detail_persists_stages_edges_and_layout() {
+        let pool = setup_test_pool().await;
+
+        let created = create_pipeline_definition_graph(
+            &pool,
+            "stage-aware-graph-crud".to_string(),
+            "graph crud".to_string(),
+            true,
+            3,
+            vec![PipelineVariableInput {
+                key: "source_branch".to_string(),
+                label: "Source Branch".to_string(),
+                default_value: Some("feature/demo".to_string()),
+                value_type: "string".to_string(),
+                required: true,
+                options: serde_json::json!([]),
+            }],
+            vec![
+                PipelineStageInput {
+                    stage_key: "merge_gate".to_string(),
+                    name: "合并门禁".to_string(),
+                    enabled: true,
+                },
+                PipelineStageInput {
+                    stage_key: "post_merge".to_string(),
+                    name: "合并后".to_string(),
+                    enabled: true,
+                },
+            ],
+            vec![
+                PipelineGraphNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-a",
+                        "ref": "${source_branch}"
+                    }),
+                    stage_key: Some("merge_gate".to_string()),
+                    node_key: Some("merge_gate_check".to_string()),
+                    position_x: Some(120.0),
+                    position_y: Some(48.0),
+                    enabled: Some(true),
+                },
+                PipelineGraphNodeInput {
+                    node_type: "wait_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-a",
+                        "ref": "${source_branch}"
+                    }),
+                    stage_key: Some("post_merge".to_string()),
+                    node_key: Some("post_merge_wait".to_string()),
+                    position_x: Some(420.0),
+                    position_y: Some(48.0),
+                    enabled: Some(true),
+                },
+            ],
+            vec![PipelineEdgeInput {
+                source_node_key: "merge_gate_check".to_string(),
+                target_node_key: "post_merge_wait".to_string(),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create stage-aware graph pipeline definition");
+
+        let detail = get_pipeline_definition_detail(&pool, created.id)
+            .await
+            .expect("get stage-aware graph pipeline detail");
+
+        assert_eq!(detail.stages.len(), 2);
+        assert_eq!(detail.stages[0].stage_key, "merge_gate");
+        assert_eq!(detail.stages[1].stage_key, "post_merge");
+        assert_eq!(detail.nodes.len(), 2);
+        assert_eq!(detail.nodes[0].stage_key.as_deref(), Some("merge_gate"));
+        assert_eq!(detail.nodes[0].node_key.as_deref(), Some("merge_gate_check"));
+        assert_eq!(detail.nodes[0].position_x, 120.0);
+        assert_eq!(detail.nodes[1].position_x, 420.0);
+        assert_eq!(detail.edges.len(), 1);
+        assert_eq!(detail.edges[0].source_node_key, "merge_gate_check");
+        assert_eq!(detail.edges[0].target_node_key, "post_merge_wait");
+    }
+
+    #[tokio::test]
+    async fn pipeline_stage_definition_crud_rejects_edge_with_unknown_node_key() {
+        let pool = setup_test_pool().await;
+
+        let result = create_pipeline_definition_graph(
+            &pool,
+            "invalid-stage-edge".to_string(),
+            "invalid stage edge".to_string(),
+            true,
+            2,
+            vec![],
+            vec![PipelineStageInput {
+                stage_key: "merge_gate".to_string(),
+                name: "合并门禁".to_string(),
+                enabled: true,
+            }],
+            vec![PipelineGraphNodeInput {
+                node_type: "check_pipeline".to_string(),
+                parameters: serde_json::json!({
+                    "project": "team/service-a",
+                    "ref": "dev"
+                }),
+                stage_key: Some("merge_gate".to_string()),
+                node_key: Some("merge_gate_check".to_string()),
+                position_x: Some(120.0),
+                position_y: Some(48.0),
+                enabled: Some(true),
+            }],
+            vec![PipelineEdgeInput {
+                source_node_key: "merge_gate_check".to_string(),
+                target_node_key: "missing_wait".to_string(),
+            }],
+            vec![],
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pipeline edge target node key not found: missing_wait"));
     }
 
     #[tokio::test]

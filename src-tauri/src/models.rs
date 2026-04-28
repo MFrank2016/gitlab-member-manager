@@ -153,6 +153,25 @@ pub struct PipelineVariable {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PipelineStageInput {
+    pub stage_key: String,
+    pub name: String,
+    #[serde(default = "bool_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineStage {
+    pub id: i64,
+    pub stage_key: String,
+    pub name: String,
+    pub stage_order: i64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PipelineNodeInput {
     #[serde(alias = "node_type")]
     pub node_type: String,
@@ -162,10 +181,49 @@ pub struct PipelineNodeInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PipelineGraphNodeInput {
+    #[serde(alias = "node_type")]
+    pub node_type: String,
+    #[serde(default)]
+    pub parameters: Value,
+    #[serde(default)]
+    pub stage_key: Option<String>,
+    #[serde(default)]
+    pub node_key: Option<String>,
+    #[serde(default)]
+    pub position_x: Option<f64>,
+    #[serde(default)]
+    pub position_y: Option<f64>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PipelineNode {
     pub node_order: i64,
     pub node_type: String,
     pub parameters: Value,
+    pub stage_key: Option<String>,
+    pub node_key: Option<String>,
+    pub position_x: f64,
+    pub position_y: f64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineEdgeInput {
+    pub source_node_key: String,
+    pub target_node_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineEdge {
+    pub id: i64,
+    pub source_node_key: String,
+    pub target_node_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,7 +296,9 @@ pub struct PipelineDefinitionDetail {
     pub created_at: String,
     pub updated_at: String,
     pub variables: Vec<PipelineVariable>,
+    pub stages: Vec<PipelineStage>,
     pub nodes: Vec<PipelineNode>,
+    pub edges: Vec<PipelineEdge>,
     pub schedules: Vec<PipelineSchedule>,
 }
 
@@ -348,6 +408,20 @@ pub struct PipelineRunProject {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PipelineRunStage {
+    pub id: i64,
+    pub pipeline_stage_id: Option<i64>,
+    pub stage_order: i64,
+    pub stage_key: String,
+    pub stage_name_snapshot: String,
+    pub status: String,
+    pub summary_message: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PipelineRunDetail {
     pub id: i64,
     pub pipeline_definition_id: i64,
@@ -371,6 +445,7 @@ pub struct PipelineRunDetail {
     pub finished_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub stages: Vec<PipelineRunStage>,
     pub projects: Vec<PipelineRunProject>,
 }
 
@@ -557,9 +632,17 @@ pub struct PipelineRunExecuteResult {
 pub struct PipelineRunRetryRequest {
     pub source_pipeline_run_id: i64,
     #[serde(default)]
+    pub retry_mode: Option<String>,
+    #[serde(default)]
+    pub target_stage_id: Option<i64>,
+    #[serde(default)]
+    pub target_run_node_id: Option<i64>,
+    #[serde(default)]
     pub selected_managed_project_ids: Option<Vec<i64>>,
     #[serde(default)]
     pub max_concurrency_override: Option<i64>,
+    #[serde(default)]
+    pub run_parameters_override: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

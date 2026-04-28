@@ -186,6 +186,14 @@ let scheduleDraftCounter = 0;
 let stageDraftCounter = 0;
 let edgeDraftCounter = 0;
 
+export function resetPipelineDraftCountersForTest() {
+  nodeDraftCounter = 0;
+  variableDraftCounter = 0;
+  scheduleDraftCounter = 0;
+  stageDraftCounter = 0;
+  edgeDraftCounter = 0;
+}
+
 function nextNodeDraftId() {
   nodeDraftCounter += 1;
   return `node-${nodeDraftCounter}`;

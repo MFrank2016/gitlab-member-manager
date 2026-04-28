@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { PipelineRunProjectMatrix } from "@/components/pipeline-run-monitor/PipelineRunProjectMatrix";
+import { PipelineRunStageSummary } from "@/components/pipeline-run-monitor/PipelineRunStageSummary";
 import { Button } from "@/components/ui/button";
 import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -271,19 +272,44 @@ function isActiveRunStatus(status: string | null | undefined) {
   return status === "pending" || status === "running" || status === "waiting" || status === "cancelling";
 }
 
+function isRetryableNodeStatus(status: PipelineRunNode["status"]) {
+  return status === "success" || status === "failed" || status === "skipped" || status === "cancelled";
+}
+
+function collectFailedManagedProjectIds(detail: PipelineRunDetail | null) {
+  if (!detail) {
+    return null;
+  }
+
+  const ids = detail.projects
+    .filter((project) => hasFailedProject(project))
+    .map((project) => project.managedProjectId)
+    .filter((id): id is number => typeof id === "number");
+
+  return ids.length > 0 ? ids : null;
+}
+
 function PipelineNodeCard({
   node,
   diagnostics,
   diagnosticsExpanded,
   loadingDiagnostics,
+  retrying,
+  canRetryFromNode,
+  onRetryNode,
   onToggleDiagnostics,
 }: {
   node: PipelineRunNode;
   diagnostics?: PipelineRunNodeDiagnostics | null;
   diagnosticsExpanded: boolean;
   loadingDiagnostics: boolean;
+  retrying: boolean;
+  canRetryFromNode: boolean;
+  onRetryNode?: (nodeId: number) => void;
   onToggleDiagnostics: (nodeId: number) => void;
 }) {
+  const showNodeRetry = canRetryFromNode && isRetryableNodeStatus(node.status);
+
   return (
     <div className="space-y-2 rounded-lg border border-border bg-muted/20 p-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -326,6 +352,17 @@ function PipelineNodeCard({
         </div>
       ) : null}
       <div className="grid gap-2">
+        {showNodeRetry ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            className="w-fit"
+            disabled={retrying}
+            onClick={() => onRetryNode?.(node.id)}
+          >
+            从当前节点重试（仅重跑当前节点及下游）
+          </Button>
+        ) : null}
         <Button
           variant="outline"
           size="sm"
@@ -572,7 +609,9 @@ export function WorkflowRunsPagePipeline({
       ? executionSegmentLabel(selectedProject, selectedProjectIndex)
       : selectedProject?.projectName ?? null;
   const canCancel = selectedRun?.status === "pending" || selectedRun?.status === "running";
-  const canRetryFailed = selectedRunDetail?.projects.some((project) => hasFailedProject(project)) ?? false;
+  const canRetryRun = selectedRunDetail ? !isActiveRunStatus(selectedRunDetail.status) : false;
+  const hasStageSummaries = (selectedRunDetail?.stages?.length ?? 0) > 0;
+  const failedManagedProjectIds = collectFailedManagedProjectIds(selectedRunDetail);
 
   React.useEffect(() => {
     if (!selectedRunId || !isActiveRunStatus(activeRun?.status)) {
@@ -613,28 +652,77 @@ export function WorkflowRunsPagePipeline({
     }
   }
 
-  async function onRetryFailed() {
+  async function onRetryRun({
+    retryMode,
+    targetStageId = null,
+    targetRunNodeId = null,
+    selectedManagedProjectIds = null,
+    successMessage,
+    failureMessage,
+  }: {
+    retryMode: "full_run" | "stage" | "node";
+    targetStageId?: number | null;
+    targetRunNodeId?: number | null;
+    selectedManagedProjectIds?: number[] | null;
+    successMessage: string;
+    failureMessage: string;
+  }) {
     if (!selectedRunDetail) return;
-
-    const failedManagedProjectIds = selectedRunDetail.projects
-      .filter((project) => hasFailedProject(project))
-      .map((project) => project.managedProjectId)
-      .filter((id): id is number => typeof id === "number");
 
     setRetrying(true);
     try {
       const result = await retryPipelineRun({
         sourcePipelineRunId: selectedRunDetail.id,
-        selectedManagedProjectIds: failedManagedProjectIds.length > 0 ? failedManagedProjectIds : null,
+        retryMode,
+        targetStageId,
+        targetRunNodeId,
+        selectedManagedProjectIds:
+          selectedManagedProjectIds && selectedManagedProjectIds.length > 0
+            ? selectedManagedProjectIds
+            : null,
         maxConcurrencyOverride: null,
       });
-      toast.success(`已创建重试运行：#${result.pipelineRunId}`);
+      toast.success(`${successMessage}：#${result.pipelineRunId}`);
       await refreshRuns(result.pipelineRunId, runPage.page, filters, sortState);
     } catch (error) {
-      toast.error(readCommandErrorMessage(error, "重试失败项目失败。"));
+      toast.error(readCommandErrorMessage(error, failureMessage));
     } finally {
       setRetrying(false);
     }
+  }
+
+  async function onRetryFullRun() {
+    await onRetryRun({
+      retryMode: "full_run",
+      selectedManagedProjectIds: failedManagedProjectIds,
+      successMessage: "已创建全量重试运行",
+      failureMessage: "全量重试失败。",
+    });
+  }
+
+  async function onRetryStage(stageId: number) {
+    await onRetryRun({
+      retryMode: "stage",
+      targetStageId: stageId,
+      selectedManagedProjectIds: failedManagedProjectIds,
+      successMessage: "已创建阶段重试运行",
+      failureMessage: "阶段重试失败。",
+    });
+  }
+
+  async function onRetryNode(nodeId: number) {
+    const selectedProjectManagedProjectIds =
+      typeof selectedProject?.managedProjectId === "number"
+        ? [selectedProject.managedProjectId]
+        : failedManagedProjectIds;
+
+    await onRetryRun({
+      retryMode: "node",
+      targetRunNodeId: nodeId,
+      selectedManagedProjectIds: selectedProjectManagedProjectIds,
+      successMessage: "已创建节点重试运行",
+      failureMessage: "节点重试失败。",
+    });
   }
 
   async function onDeleteRun(runId: number) {
@@ -906,15 +994,17 @@ export function WorkflowRunsPagePipeline({
               >
                 取消运行
               </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                aria-label="重试失败项目"
-                onClick={() => void onRetryFailed()}
-                disabled={!canRetryFailed || retrying}
-              >
-                重试失败项目
-              </Button>
+              {!hasStageSummaries && canRetryRun ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  aria-label="重试全量运行"
+                  onClick={() => void onRetryFullRun()}
+                  disabled={retrying}
+                >
+                  重试全量运行
+                </Button>
+              ) : null}
             </div>
           </PanelHeader>
           <PanelBody>
@@ -954,6 +1044,23 @@ export function WorkflowRunsPagePipeline({
         </Panel>
 
         <div className="space-y-4 xl:col-span-3">
+          {selectedRunDetail?.stages && selectedRunDetail.stages.length > 0 ? (
+            <Panel>
+              <PanelHeader>
+                <h3 className="font-semibold">阶段概览</h3>
+              </PanelHeader>
+              <PanelBody>
+                <PipelineRunStageSummary
+                  runStatus={selectedRunDetail.status}
+                  stages={selectedRunDetail.stages}
+                  retrying={retrying}
+                  onRetryFullRun={() => void onRetryFullRun()}
+                  onRetryStage={(stageId) => void onRetryStage(stageId)}
+                />
+              </PanelBody>
+            </Panel>
+          ) : null}
+
           <Panel>
             <PanelHeader className="flex-wrap gap-2">
               <h3 className="font-semibold">项目级状态</h3>
@@ -1047,6 +1154,9 @@ export function WorkflowRunsPagePipeline({
                       diagnostics={nodeDiagnosticsById[node.id] ?? null}
                       diagnosticsExpanded={!!expandedNodes[node.id]}
                       loadingDiagnostics={!!loadingNodeDiagnosticsById[node.id]}
+                      retrying={retrying}
+                      canRetryFromNode={canRetryRun}
+                      onRetryNode={(nodeId) => void onRetryNode(nodeId)}
                       onToggleDiagnostics={(nodeId) => void onToggleDiagnostics(nodeId)}
                     />
                   ))}

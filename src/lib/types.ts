@@ -108,15 +108,50 @@ export type PipelineVariable = {
   options: unknown;
 };
 
+export type PipelineStageInput = {
+  stageKey: string;
+  name: string;
+  enabled?: boolean;
+};
+
+export type PipelineStage = {
+  id: number;
+  stageKey: string;
+  name: string;
+  stageOrder: number;
+  enabled: boolean;
+};
+
 export type PipelineNodeInput = {
   nodeType: string;
   parameters?: unknown;
+  stageKey?: string | null;
+  nodeKey?: string | null;
+  positionX?: number | null;
+  positionY?: number | null;
+  enabled?: boolean;
 };
 
 export type PipelineNode = {
   nodeOrder: number;
   nodeType: string;
   parameters: unknown;
+  stageKey?: string | null;
+  nodeKey?: string | null;
+  positionX: number;
+  positionY: number;
+  enabled: boolean;
+};
+
+export type PipelineEdgeInput = {
+  sourceNodeKey: string;
+  targetNodeKey: string;
+};
+
+export type PipelineEdge = {
+  id: number;
+  sourceNodeKey: string;
+  targetNodeKey: string;
 };
 
 export type PipelineScheduleInput = {
@@ -174,7 +209,9 @@ export type PipelineDefinitionDetail = {
   createdAt: string;
   updatedAt: string;
   variables: PipelineVariable[];
+  stages: PipelineStage[];
   nodes: PipelineNode[];
+  edges: PipelineEdge[];
   schedules: PipelineSchedule[];
 };
 
@@ -223,6 +260,28 @@ export type PipelineRunNode = {
   waitTarget?: string | null;
   lastRemoteStatus?: string | null;
   remotePipelineId?: number | null;
+};
+
+export type PipelineRunStageStatus =
+  | "pending"
+  | "running"
+  | "waiting"
+  | "success"
+  | "partial_failed"
+  | "failed"
+  | "cancelled"
+  | "reused";
+
+export type PipelineRunStage = {
+  id: number;
+  pipelineStageId?: number | null;
+  stageOrder: number;
+  stageKey: string;
+  stageNameSnapshot: string;
+  status: PipelineRunStageStatus;
+  summaryMessage: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
 };
 
 export type PipelineRunNodeDiagnostics = {
@@ -300,6 +359,7 @@ export type PipelineRunListPage = {
 };
 
 export type PipelineRunDetail = PipelineRunListItem & {
+  stages?: PipelineRunStage[];
   projects: PipelineRunProject[];
 };
 
@@ -357,8 +417,12 @@ export type PipelineRunExecuteResult = {
 
 export type PipelineRunRetryRequest = {
   sourcePipelineRunId: number;
+  retryMode?: "full_run" | "stage" | "node" | null;
+  targetStageId?: number | null;
+  targetRunNodeId?: number | null;
   selectedManagedProjectIds?: number[] | null;
   maxConcurrencyOverride?: number | null;
+  runParametersOverride?: Record<string, unknown> | null;
 };
 
 export type WorkflowRunStatus =

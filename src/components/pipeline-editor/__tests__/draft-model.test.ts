@@ -231,7 +231,24 @@ describe("pipeline draft model working path node", () => {
       description: "",
       enabled: true,
       maxConcurrencyDefault: "2",
-      variableRows: [],
+      variableRows: [
+        {
+          id: "variable-1",
+          key: "source_branch",
+          label: "Source Branch",
+          defaultValue: "main",
+          required: true,
+          source: "manual",
+        },
+        {
+          id: "variable-2",
+          key: "target_branch",
+          label: "Target Branch",
+          defaultValue: "release",
+          required: true,
+          source: "manual",
+        },
+      ],
       stages: [
         { id: "stage-1", stageKey: "prepare", name: "准备", enabled: true },
         { id: "stage-2", stageKey: "deploy", name: "发布", enabled: false },

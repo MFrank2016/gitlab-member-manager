@@ -308,11 +308,11 @@ export function WorkflowsPagePipeline({
               <DialogTrigger asChild>
                 <Button>新建流水线</Button>
               </DialogTrigger>
-              <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+              <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[1200px]">
                 <DialogHeader>
                   <DialogTitle>新建流水线定义</DialogTitle>
                   <DialogDescription>
-                    配置节点顺序、变量和调度策略。
+                    使用阶段化流程图配置变量、节点依赖和调度策略。
                   </DialogDescription>
                 </DialogHeader>
                 <PipelineDraftForm
@@ -424,11 +424,11 @@ export function WorkflowsPagePipeline({
       </Panel>
 
       <Dialog open={editOpen} onOpenChange={handleEditOpenChange}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[1200px]">
           <DialogHeader>
             <DialogTitle>编辑流水线定义</DialogTitle>
             <DialogDescription>
-              更新基础信息、节点顺序和调度规则。
+              更新基础信息、流程图结构和调度规则。
             </DialogDescription>
           </DialogHeader>
           <PipelineDraftForm

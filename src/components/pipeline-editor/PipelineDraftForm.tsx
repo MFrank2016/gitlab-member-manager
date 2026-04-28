@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { PipelineGraphEditor } from "@/components/pipeline-graph/PipelineGraphEditor";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -13,18 +14,11 @@ import { formatDateTime } from "@/lib/utils";
 
 import { StructuredJsonEditor } from "./StructuredJsonEditor";
 import {
-  BUILTIN_NODE_MAP,
-  BUILTIN_NODE_TYPES,
   SCHEDULE_POLICY_OPTIONS,
-  createNodeDraft,
   createScheduleDraft,
   createVariableDraft,
-  ensureVariableRows,
-  normalizeBuiltinParameters,
-  remapNodeDraftForType,
   scheduleRuntimeMessage,
   scheduleRuntimeStateLabel,
-  type NodeDraft,
   type PipelineDraft,
   type ScheduleDraft,
   type VariableDraft,
@@ -39,40 +33,6 @@ type PipelineDraftFormProps = {
   onChange: (next: PipelineDraft) => void;
   onRefreshScheduleRuntime?: () => void;
 };
-
-function splitBuiltinParameters(nodeType: string, parameters: Record<string, unknown>) {
-  const builtin = BUILTIN_NODE_MAP.get(nodeType);
-  if (!builtin) {
-    return { builtinParameters: {}, extraParameters: parameters };
-  }
-
-  const normalized = normalizeBuiltinParameters(nodeType, parameters);
-  const builtinParameters: Record<string, unknown> = {};
-  const extraParameters: Record<string, unknown> = {};
-
-  for (const field of builtin.fields) {
-    builtinParameters[field.key] = normalized[field.key];
-  }
-
-  for (const [key, value] of Object.entries(normalized)) {
-    if (!(key in builtinParameters)) {
-      extraParameters[key] = value;
-    }
-  }
-
-  return { builtinParameters, extraParameters };
-}
-
-function mergeBuiltinParameters(
-  nodeType: string,
-  builtinParameters: Record<string, unknown>,
-  extraParameters: Record<string, unknown>
-) {
-  return {
-    ...extraParameters,
-    ...normalizeBuiltinParameters(nodeType, builtinParameters),
-  };
-}
 
 function PipelineBasicsSection({
   draft,
@@ -216,272 +176,6 @@ function PipelineVariablesSection({
   );
 }
 
-function PipelineNodeCard({
-  node,
-  index,
-  managedProjects = [],
-  onUpdate,
-  onMove,
-  onRemove,
-  disableRemove,
-}: {
-  node: NodeDraft;
-  index: number;
-  managedProjects?: ManagedProject[];
-  onUpdate: (index: number, updater: (node: NodeDraft) => NodeDraft) => void;
-  onMove: (index: number, direction: -1 | 1) => void;
-  onRemove: (index: number) => void;
-  disableRemove: boolean;
-}) {
-  const builtin = BUILTIN_NODE_MAP.get(node.nodeType);
-  const { builtinParameters, extraParameters } = splitBuiltinParameters(
-    node.nodeType,
-    node.parameters
-  );
-  const selectValue = builtin ? node.nodeType : "__custom__";
-
-  function updateBuiltinField(fieldKey: string, nextValue: string) {
-    onUpdate(index, (current) => {
-      const nextBuiltinParameters = { ...builtinParameters, [fieldKey]: nextValue };
-      return {
-        ...current,
-        parameters: mergeBuiltinParameters(
-          current.nodeType,
-          nextBuiltinParameters,
-          extraParameters
-        ),
-      };
-    });
-  }
-
-  const selectedManagedProject =
-    builtin?.value === "switch_project"
-      ? managedProjects.find(
-          (project) =>
-            String(project.id) === String(builtinParameters.managedProjectId ?? "")
-        ) ?? null
-      : null;
-
-  return (
-    <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
-      <div className="flex items-center justify-between">
-        <h4 className="text-sm font-semibold">节点 {index + 1}</h4>
-        <div className="flex items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => onMove(index, -1)}
-            disabled={index === 0}
-          >
-            上移
-          </Button>
-          <Button type="button" variant="ghost" size="sm" onClick={() => onMove(index, 1)}>
-            下移
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="text-destructive"
-            onClick={() => onRemove(index)}
-            disabled={disableRemove}
-            aria-label={`删除节点 ${index + 1}`}
-          >
-            删除
-          </Button>
-        </div>
-      </div>
-
-      <div className="grid gap-1">
-        <Label>节点类型</Label>
-        <select
-          className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-          value={selectValue}
-          onChange={(event) =>
-            onUpdate(index, (current) => {
-              if (event.target.value === "__custom__") {
-                return {
-                  ...current,
-                  nodeType: builtin ? "" : current.nodeType,
-                  parameters: builtin ? {} : current.parameters,
-                };
-              }
-
-              return remapNodeDraftForType(current, event.target.value);
-            })
-          }
-          aria-label={`节点 ${index + 1} 类型`}
-        >
-          {BUILTIN_NODE_TYPES.map((item) => (
-            <option key={item.value} value={item.value}>
-              {item.label}
-            </option>
-          ))}
-          <option value="__custom__">自定义节点</option>
-        </select>
-      </div>
-
-      {!builtin ? (
-        <div className="grid gap-1">
-          <Label>自定义节点类型</Label>
-          <Input
-            aria-label={`节点 ${index + 1} 自定义类型`}
-            value={node.nodeType}
-            onChange={(event) =>
-              onUpdate(index, (current) => ({ ...current, nodeType: event.target.value }))
-            }
-            placeholder="custom_release_gate"
-          />
-        </div>
-      ) : null}
-
-      {builtin ? (
-        <div className="grid gap-3">
-          <div className="grid gap-2">
-            {builtin.fields.map((field) => {
-              const fieldValue =
-                typeof builtinParameters[field.key] === "string"
-                  ? String(builtinParameters[field.key])
-                  : "";
-
-              if (builtin.value === "switch_project" && field.key === "managedProjectId") {
-                return (
-                  <div key={field.key} className="grid gap-1">
-                    <Label>{field.label}</Label>
-                    <select
-                      className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-                      value={fieldValue}
-                      onChange={(event) =>
-                        updateBuiltinField(field.key, event.target.value)
-                      }
-                      aria-label={`节点 ${index + 1} ${field.label}`}
-                    >
-                      <option value="">{field.placeholder}</option>
-                      {managedProjects.map((project) => (
-                        <option key={project.id} value={String(project.id)}>
-                          {project.name}
-                        </option>
-                      ))}
-                    </select>
-                    {selectedManagedProject ? (
-                      <p className="text-xs text-muted-foreground">
-                        {selectedManagedProject.pathWithNamespace} ·{" "}
-                        {selectedManagedProject.repoPath}
-                      </p>
-                    ) : managedProjects.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">
-                        暂无可选托管项目，请先在“托管项目”里配置。
-                      </p>
-                    ) : null}
-                  </div>
-                );
-              }
-
-              return (
-                <div key={field.key} className="grid gap-1">
-                  <Label>{field.label}</Label>
-                  <Input
-                    value={fieldValue}
-                    onChange={(event) => updateBuiltinField(field.key, event.target.value)}
-                    placeholder={field.placeholder}
-                    aria-label={`节点 ${index + 1} ${field.label}`}
-                  />
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="grid gap-1">
-            <Label>附加参数</Label>
-            <StructuredJsonEditor
-              value={extraParameters}
-              onChange={(nextValue) =>
-                onUpdate(index, (current) => {
-                  const nextExtraParameters =
-                    nextValue && typeof nextValue === "object" && !Array.isArray(nextValue)
-                      ? (nextValue as Record<string, unknown>)
-                      : {};
-                  return {
-                    ...current,
-                    parameters: mergeBuiltinParameters(
-                      current.nodeType,
-                      builtinParameters,
-                      nextExtraParameters
-                    ),
-                  };
-                })
-              }
-              testId={`pipeline-node-extra-parameter-editor-${index}`}
-            />
-          </div>
-        </div>
-      ) : (
-        <div className="grid gap-1">
-          <Label>参数</Label>
-          <StructuredJsonEditor
-            value={node.parameters}
-            onChange={(nextValue) =>
-              onUpdate(index, (current) => ({
-                ...current,
-                parameters:
-                  nextValue && typeof nextValue === "object" && !Array.isArray(nextValue)
-                    ? (nextValue as Record<string, unknown>)
-                    : {},
-              }))
-            }
-            testId={`pipeline-node-structured-editor-${index}`}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function PipelineNodesSection({
-  nodes,
-  managedProjects,
-  onAdd,
-  onUpdate,
-  onMove,
-  onRemove,
-}: {
-  nodes: NodeDraft[];
-  managedProjects?: ManagedProject[];
-  onAdd: () => void;
-  onUpdate: (index: number, updater: (node: NodeDraft) => NodeDraft) => void;
-  onMove: (index: number, direction: -1 | 1) => void;
-  onRemove: (index: number) => void;
-}) {
-  return (
-    <section className="grid gap-3">
-      <div className="flex items-center justify-between">
-        <div className="space-y-1">
-          <h3 className="text-base font-semibold">节点</h3>
-          <p className="text-sm text-muted-foreground">
-            按顺序定义项目切换、本地 Git 和远端 GitLab 节点。
-          </p>
-        </div>
-        <Button type="button" size="sm" variant="secondary" onClick={onAdd}>
-          添加节点
-        </Button>
-      </div>
-      {nodes.map((node, index) => (
-        <PipelineNodeCard
-          key={node.id}
-          node={node}
-          index={index}
-          managedProjects={managedProjects}
-          onUpdate={onUpdate}
-          onMove={onMove}
-          onRemove={onRemove}
-          disableRemove={nodes.length <= 1}
-        />
-      ))}
-    </section>
-  );
-}
-
 function PipelineSchedulesSection({
   schedules,
   scheduleRuntimeSnapshots,
@@ -511,7 +205,7 @@ function PipelineSchedulesSection({
         <div className="space-y-1">
           <h3 className="text-base font-semibold">调度</h3>
           <p className="text-sm text-muted-foreground">
-            配置 Cron、策略和调度变量；执行目标由节点里的项目切换决定。
+            配置 Cron、策略和调度变量；执行目标由流程图中的节点决定。
           </p>
         </div>
         <Button type="button" size="sm" variant="secondary" onClick={onAdd}>
@@ -693,121 +387,56 @@ export function PipelineDraftForm(props: PipelineDraftFormProps) {
     onChange,
   } = props;
 
-  function updateDraft(
-    next: PipelineDraft,
-    { syncVariables = true }: { syncVariables?: boolean } = {}
-  ) {
-    if (!syncVariables) {
-      onChange(next);
-      return;
-    }
-
-    onChange({
-      ...next,
-      variableRows: ensureVariableRows(next.nodes, next.variableRows),
-    });
-  }
-
-  function updateNode(index: number, updater: (node: NodeDraft) => NodeDraft) {
-    updateDraft({
-      ...draft,
-      nodes: draft.nodes.map((node, nodeIndex) =>
-        nodeIndex === index ? updater(node) : node
-      ),
-    });
-  }
-
-  function addNode() {
-    updateDraft({
-      ...draft,
-      nodes: [...draft.nodes, createNodeDraft("git_pull")],
-    });
-  }
-
-  function removeNode(index: number) {
-    updateDraft({
-      ...draft,
-      nodes: draft.nodes.filter((_, nodeIndex) => nodeIndex !== index),
-    });
-  }
-
-  function moveNode(index: number, direction: -1 | 1) {
-    const target = index + direction;
-    if (target < 0 || target >= draft.nodes.length) return;
-
-    const nextNodes = [...draft.nodes];
-    [nextNodes[index], nextNodes[target]] = [nextNodes[target], nextNodes[index]];
-    updateDraft({ ...draft, nodes: nextNodes });
-  }
-
   function addVariable() {
-    updateDraft(
-      {
-        ...draft,
-        variableRows: [...draft.variableRows, createVariableDraft("")],
-      },
-      { syncVariables: false }
-    );
+    onChange({
+      ...draft,
+      variableRows: [...draft.variableRows, createVariableDraft("")],
+    });
   }
 
   function updateVariableRow(
     index: number,
     updater: (row: VariableDraft) => VariableDraft
   ) {
-    updateDraft(
-      {
-        ...draft,
-        variableRows: draft.variableRows.map((row, rowIndex) =>
-          rowIndex === index ? { ...updater(row), source: "manual" } : row
-        ),
-      },
-      { syncVariables: false }
-    );
+    onChange({
+      ...draft,
+      variableRows: draft.variableRows.map((row, rowIndex) =>
+        rowIndex === index ? { ...updater(row), source: "manual" } : row
+      ),
+    });
   }
 
   function removeVariableRow(index: number) {
-    updateDraft(
-      {
-        ...draft,
-        variableRows: draft.variableRows.filter((_, rowIndex) => rowIndex !== index),
-      },
-      { syncVariables: false }
-    );
+    onChange({
+      ...draft,
+      variableRows: draft.variableRows.filter((_, rowIndex) => rowIndex !== index),
+    });
   }
 
   function addSchedule() {
-    updateDraft(
-      {
-        ...draft,
-        schedules: [...draft.schedules, createScheduleDraft()],
-      },
-      { syncVariables: false }
-    );
+    onChange({
+      ...draft,
+      schedules: [...draft.schedules, createScheduleDraft()],
+    });
   }
 
   function updateSchedule(
     index: number,
     updater: (schedule: ScheduleDraft) => ScheduleDraft
   ) {
-    updateDraft(
-      {
-        ...draft,
-        schedules: draft.schedules.map((schedule, scheduleIndex) =>
-          scheduleIndex === index ? updater(schedule) : schedule
-        ),
-      },
-      { syncVariables: false }
-    );
+    onChange({
+      ...draft,
+      schedules: draft.schedules.map((schedule, scheduleIndex) =>
+        scheduleIndex === index ? updater(schedule) : schedule
+      ),
+    });
   }
 
   function removeSchedule(index: number) {
-    updateDraft(
-      {
-        ...draft,
-        schedules: draft.schedules.filter((_, scheduleIndex) => scheduleIndex !== index),
-      },
-      { syncVariables: false }
-    );
+    onChange({
+      ...draft,
+      schedules: draft.schedules.filter((_, scheduleIndex) => scheduleIndex !== index),
+    });
   }
 
   return (
@@ -819,13 +448,10 @@ export function PipelineDraftForm(props: PipelineDraftFormProps) {
         onUpdate={updateVariableRow}
         onRemove={removeVariableRow}
       />
-      <PipelineNodesSection
-        nodes={draft.nodes}
+      <PipelineGraphEditor
+        draft={draft}
         managedProjects={managedProjects}
-        onAdd={addNode}
-        onUpdate={updateNode}
-        onMove={moveNode}
-        onRemove={removeNode}
+        onChange={onChange}
       />
       <PipelineSchedulesSection
         schedules={draft.schedules}

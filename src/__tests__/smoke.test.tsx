@@ -20,6 +20,7 @@ import {
 import { ProjectGroupsPage } from "@/pages/ProjectGroupsPage";
 import { WorkflowsPagePipeline } from "@/pages/WorkflowsPagePipeline";
 import { WorkflowRunsPage } from "@/pages/WorkflowRunsPage";
+import { WorkflowRunsPagePipeline } from "@/pages/WorkflowRunsPagePipeline";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -300,7 +301,9 @@ describe("pipeline definition upgrade smoke", () => {
           createdAt: "2026-03-18T00:00:00Z",
           updatedAt: "2026-03-18T00:00:00Z",
           variables: args?.variables ?? [],
+          stages: args?.stages ?? [],
           nodes: args?.nodes ?? [],
+          edges: args?.edges ?? [],
           schedules: args?.schedules ?? [],
         };
       }
@@ -318,7 +321,7 @@ describe("pipeline definition upgrade smoke", () => {
     fireEvent.click(screen.getByText("新建流水线"));
     expect(screen.getByText("基础信息")).toBeInTheDocument();
     expect(screen.getByText("变量")).toBeInTheDocument();
-    expect(screen.getByText("节点")).toBeInTheDocument();
+    expect(screen.getByText("流程图")).toBeInTheDocument();
     expect(screen.getByText("调度")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /添加调度/i })).toBeInTheDocument();
   });
@@ -383,13 +386,28 @@ describe("pipeline definition upgrade smoke", () => {
               options: [],
             },
           ],
+          stages: [
+            {
+              id: 21,
+              stageKey: "release_stage",
+              name: "发布阶段",
+              stageOrder: 0,
+              enabled: true,
+            },
+          ],
           nodes: [
             {
               nodeOrder: 0,
               nodeType: "switch_project",
               parameters: { managedProjectId: "11" },
+              stageKey: "release_stage",
+              nodeKey: "switch_project_web_service",
+              positionX: 120,
+              positionY: 72,
+              enabled: true,
             },
           ],
+          edges: [],
           schedules: [],
         };
       }
@@ -551,13 +569,28 @@ describe("pipeline schedule runtime feedback", () => {
           createdAt: "2026-03-18T00:00:00Z",
           updatedAt: "2026-03-18T00:00:00Z",
           variables: [],
+          stages: [
+            {
+              id: 31,
+              stageKey: "default_stage",
+              name: "默认阶段",
+              stageOrder: 0,
+              enabled: true,
+            },
+          ],
           nodes: [
             {
               nodeOrder: 0,
               nodeType: "checkout_branch",
               parameters: { branch: "${source_branch}" },
+              stageKey: "default_stage",
+              nodeKey: "checkout_source_branch",
+              positionX: 120,
+              positionY: 72,
+              enabled: true,
             },
           ],
+          edges: [],
           schedules: [
             {
               id: 701,
@@ -629,7 +662,30 @@ describe("pipeline definition structured editor guardrails", () => {
     variables: Array<Record<string, unknown>>;
     nodes: Array<Record<string, unknown>>;
     schedules: Array<Record<string, unknown>>;
+    stages?: Array<Record<string, unknown>>;
+    edges?: Array<Record<string, unknown>>;
   }) {
+    const stages =
+      detail.stages ?? [
+        {
+          id: detail.id * 10,
+          stageKey: "default_stage",
+          name: "默认阶段",
+          stageOrder: 0,
+          enabled: true,
+        },
+      ];
+    const fallbackStageKey = String(stages[0]?.stageKey ?? "default_stage");
+    const nodes = detail.nodes.map((node, index) => ({
+      ...node,
+      stageKey: typeof node.stageKey === "string" ? node.stageKey : fallbackStageKey,
+      nodeKey: typeof node.nodeKey === "string" ? node.nodeKey : `node_${index + 1}`,
+      positionX: typeof node.positionX === "number" ? node.positionX : 120,
+      positionY: typeof node.positionY === "number" ? node.positionY : 72 + index * 120,
+      enabled: typeof node.enabled === "boolean" ? node.enabled : true,
+    }));
+    const edges = detail.edges ?? [];
+
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "list_pipeline_definitions") {
         return [
@@ -662,7 +718,9 @@ describe("pipeline definition structured editor guardrails", () => {
           createdAt: "2026-03-18T00:00:00Z",
           updatedAt: "2026-03-18T00:00:00Z",
           variables: detail.variables,
-          nodes: detail.nodes,
+          stages,
+          nodes,
+          edges,
           schedules: detail.schedules,
         };
       }
@@ -680,6 +738,13 @@ describe("pipeline definition structured editor guardrails", () => {
 
     await screen.findByRole("heading", { name: "编辑流水线定义" });
     return screen.getByRole("dialog");
+  }
+
+  async function openNodeStructuredEditor(pipelineName: string, nodeLabel: string) {
+    const dialog = await openEditDialog(pipelineName);
+    fireEvent.click(within(dialog).getAllByText(nodeLabel)[0]!);
+    const editor = await within(dialog).findByTestId(/pipeline-node-structured-editor-/);
+    return { dialog, editor };
   }
 
   it("supports structured editing for nested custom-node parameters", async () => {
@@ -700,8 +765,10 @@ describe("pipeline definition structured editor guardrails", () => {
       schedules: [],
     });
 
-    const dialog = await openEditDialog("custom-node-structured-editor");
-    const editor = within(dialog).getByTestId("pipeline-node-structured-editor-0");
+    const { dialog, editor } = await openNodeStructuredEditor(
+      "custom-node-structured-editor",
+      "custom_release_gate"
+    );
 
     fireEvent.click(within(editor).getByRole("button", { name: "添加字段" }));
     const rootField = within(editor).getAllByTestId("structured-json-field-row")[0];
@@ -737,12 +804,12 @@ describe("pipeline definition structured editor guardrails", () => {
         expect.objectContaining({
           id: 151,
           nodes: [
-            {
+            expect.objectContaining({
               nodeType: "custom_release_gate",
               parameters: {
                 targets: [{ project: "team/service-a" }],
               },
-            },
+            }),
           ],
         })
       );
@@ -843,8 +910,10 @@ describe("pipeline definition structured editor guardrails", () => {
       schedules: [],
     });
 
-    const dialog = await openEditDialog("structured-json-fallback");
-    const editor = within(dialog).getByTestId("pipeline-node-structured-editor-0");
+    const { dialog, editor } = await openNodeStructuredEditor(
+      "structured-json-fallback",
+      "custom_release_gate"
+    );
 
     expect(within(editor).getByRole("button", { name: "结构化模式" })).toBeInTheDocument();
     fireEvent.click(within(editor).getByRole("button", { name: "JSON 模式" }));
@@ -862,13 +931,13 @@ describe("pipeline definition structured editor guardrails", () => {
         expect.objectContaining({
           id: 153,
           nodes: [
-            {
+            expect.objectContaining({
               nodeType: "custom_release_gate",
               parameters: {
                 target: { project: "team/service-a" },
                 approvals: 2,
               },
-            },
+            }),
           ],
         })
       );
@@ -895,7 +964,9 @@ describe("pipeline wrapper smoke", () => {
           createdAt: "2026-03-18T00:00:00Z",
           updatedAt: "2026-03-18T00:00:00Z",
           variables: [],
+          stages: [],
           nodes: [],
+          edges: [],
           schedules: [],
         };
       }
@@ -975,13 +1046,28 @@ describe("pipeline wrapper smoke", () => {
               options: [],
             },
           ],
+          stages: [
+            {
+              id: 21,
+              stageKey: "merge_gate",
+              name: "合并门禁",
+              stageOrder: 0,
+              enabled: true,
+            },
+          ],
           nodes: [
             {
               nodeOrder: 0,
               nodeType: "checkout_branch",
               parameters: { branch: "${source_branch}" },
+              stageKey: "merge_gate",
+              nodeKey: "checkout_source",
+              positionX: 120,
+              positionY: 48,
+              enabled: true,
             },
           ],
+          edges: [],
           schedules: [],
         };
       }
@@ -1018,12 +1104,25 @@ describe("pipeline wrapper smoke", () => {
           options: ["main", "release"],
         },
       ],
+      stages: [
+        {
+          stageKey: "merge_gate",
+          name: "合并门禁",
+          enabled: true,
+        },
+      ],
       nodes: [
         {
           nodeType: "checkout_branch",
           parameters: { branch: "${source_branch}" },
+          stageKey: "merge_gate",
+          nodeKey: "checkout_source",
+          positionX: 120,
+          positionY: 48,
+          enabled: true,
         },
       ],
+      edges: [],
       schedules: [],
     });
     const pipelineDetail = await getPipelineDefinitionDetail(11);
@@ -1043,12 +1142,25 @@ describe("pipeline wrapper smoke", () => {
           options: ["main", "release"],
         },
       ],
+      stages: [
+        {
+          stageKey: "merge_gate",
+          name: "合并门禁",
+          enabled: true,
+        },
+      ],
       nodes: [
         {
           nodeType: "checkout_branch",
           parameters: { branch: "${source_branch}" },
+          stageKey: "merge_gate",
+          nodeKey: "checkout_source",
+          positionX: 120,
+          positionY: 48,
+          enabled: true,
         },
       ],
+      edges: [],
       schedules: [],
     });
 	    await deletePipelineDefinition(11);
@@ -1077,7 +1189,9 @@ describe("pipeline wrapper smoke", () => {
 	    const workflowList = await listWorkflowDefinitions();
 
     expect(pipelineList).toEqual([]);
+    expect(pipelineDetail.stages).toHaveLength(1);
     expect(pipelineDetail.nodes).toHaveLength(1);
+    expect(pipelineDetail.nodes[0].nodeKey).toBe("checkout_source");
 	    expect(pipelineDetail.variables[0].options).toEqual([]);
 	    expect(executeResult.pipelineRunId).toBe(302);
 	    expect(retryResult.pipelineRunId).toBe(303);
@@ -1098,6 +1212,12 @@ describe("pipeline wrapper smoke", () => {
             options: ["main", "release"],
           }),
         ],
+        stages: [
+          expect.objectContaining({
+            stageKey: "merge_gate",
+          }),
+        ],
+        edges: [],
       })
     );
     expect(invokeMock).toHaveBeenCalledWith("get_pipeline_definition_detail", { id: 11 });
@@ -1111,6 +1231,12 @@ describe("pipeline wrapper smoke", () => {
             options: ["main", "release"],
           }),
         ],
+        stages: [
+          expect.objectContaining({
+            stageKey: "merge_gate",
+          }),
+        ],
+        edges: [],
       })
     );
 	    expect(invokeMock).toHaveBeenCalledWith("delete_pipeline_definition", { id: 11 });
@@ -1129,8 +1255,12 @@ describe("pipeline wrapper smoke", () => {
 	    expect(invokeMock).toHaveBeenCalledWith("retry_pipeline_run", {
 	      request: {
 	        sourcePipelineRunId: 301,
+	        retryMode: null,
+	        targetStageId: null,
+	        targetRunNodeId: null,
 	        selectedManagedProjectIds: [44],
 	        maxConcurrencyOverride: 1,
+	        runParametersOverride: {},
 	      },
 	    });
 	    expect(invokeMock).toHaveBeenCalledWith("list_pipeline_runs", {
@@ -1820,13 +1950,177 @@ describe("pipeline run monitor interactions", () => {
       });
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /重试失败项目/i }));
+    expect(screen.queryByRole("button", { name: /重试全量运行/i })).not.toBeInTheDocument();
+  }, 10_000);
+});
+
+describe("stage-aware pipeline run monitor", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("renders stage summaries and sends full, stage, and node retry requests", async () => {
+    const runListItem = {
+      id: 301,
+      pipelineDefinitionId: 201,
+      pipelineDefinitionName: "release-pipeline",
+      projectGroupId: 5,
+      projectGroupName: "release-train",
+      legacyWorkflowRunId: null,
+      sourcePipelineRunId: null,
+      triggerKind: "manual",
+      status: "partial_failed",
+      runParameters: {
+        source_branch: "release/2.0",
+      },
+      maxConcurrency: 2,
+      projectsTotal: 1,
+      projectsQueued: 0,
+      projectsRunning: 0,
+      projectsSuccess: 0,
+      projectsFailed: 1,
+      projectsCancelled: 0,
+      projectsFailedPrecheck: 0,
+      startedAt: "2026-04-28T09:55:00Z",
+      finishedAt: "2026-04-28T10:10:00Z",
+      createdAt: "2026-04-28T09:55:00Z",
+      updatedAt: "2026-04-28T10:10:00Z",
+    } as const;
+
+    const runDetail = {
+      ...runListItem,
+      stages: [
+        {
+          id: 81,
+          pipelineStageId: 71,
+          stageOrder: 0,
+          stageKey: "merge_gate",
+          stageNameSnapshot: "合并门禁",
+          status: "failed",
+          summaryMessage: "触发远端流水线失败",
+          startedAt: "2026-04-28T10:00:00Z",
+          finishedAt: "2026-04-28T10:05:00Z",
+        },
+        {
+          id: 82,
+          pipelineStageId: 72,
+          stageOrder: 1,
+          stageKey: "release_verify",
+          stageNameSnapshot: "发版验证",
+          status: "pending",
+          summaryMessage: "",
+          startedAt: null,
+          finishedAt: null,
+        },
+      ],
+      projects: [
+        {
+          id: 901,
+          managedProjectId: 502,
+          gitlabProjectId: 1002,
+          projectName: "web-service",
+          projectPathWithNamespace: "platform/web-service",
+          repoPath: "D:/repos/web-service",
+          status: "failed",
+          summaryMessage: "trigger_pipeline failed",
+          startedAt: "2026-04-28T10:00:00Z",
+          finishedAt: "2026-04-28T10:05:00Z",
+          nodes: [
+            {
+              id: 602,
+              pipelineNodeId: 11,
+              nodeOrder: 1,
+              nodeType: "trigger_pipeline",
+              renderedParameters: { project: "platform/web-service", ref: "main" },
+              status: "failed",
+              startedAt: "2026-04-28T10:02:00Z",
+              finishedAt: "2026-04-28T10:05:00Z",
+              exitCode: null,
+              summaryMessage: "远端流水线失败",
+              errorCode: "pipeline_failed",
+              titleZh: "远端流水线失败",
+              detailZh: "目标项目的流水线最终状态为 failed。",
+              suggestionZh: "请先检查远端流水线日志，再决定是否重试。",
+              waitTarget: null,
+              lastRemoteStatus: "failed",
+              remotePipelineId: 777,
+            },
+          ],
+        },
+      ],
+    };
+
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_runs") {
+        return {
+          items: [runListItem],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "get_pipeline_run_detail") {
+        expect(args).toEqual({ id: 301 });
+        return runDetail;
+      }
+      if (cmd === "retry_pipeline_run") {
+        return { pipelineRunId: 302 };
+      }
+      return undefined;
+    });
+
+    render(<WorkflowRunsPagePipeline />);
+
+    expect(
+      await screen.findByRole("button", { name: "从阶段「合并门禁」重试" })
+    ).toBeInTheDocument();
+    expect(screen.getByText(/发版验证/)).toBeInTheDocument();
+    expect(
+      screen.getByText("阻断原因：前序阶段「合并门禁」失败，当前阶段未进入调度。")
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试全量运行" }));
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("retry_pipeline_run", {
         request: {
           sourcePipelineRunId: 301,
+          retryMode: "full_run",
+          targetStageId: null,
+          targetRunNodeId: null,
           selectedManagedProjectIds: [502],
           maxConcurrencyOverride: null,
+          runParametersOverride: {},
+        },
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "从阶段「合并门禁」重试" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("retry_pipeline_run", {
+        request: {
+          sourcePipelineRunId: 301,
+          retryMode: "stage",
+          targetStageId: 81,
+          targetRunNodeId: null,
+          selectedManagedProjectIds: [502],
+          maxConcurrencyOverride: null,
+          runParametersOverride: {},
+        },
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /从当前节点重试/i }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("retry_pipeline_run", {
+        request: {
+          sourcePipelineRunId: 301,
+          retryMode: "node",
+          targetStageId: null,
+          targetRunNodeId: 602,
+          selectedManagedProjectIds: [502],
+          maxConcurrencyOverride: null,
+          runParametersOverride: {},
         },
       });
     });
