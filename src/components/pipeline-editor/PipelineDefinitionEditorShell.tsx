@@ -12,7 +12,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
   ManagedProject,
   PipelineScheduleRuntimeSnapshot,
-  ProjectGroup,
 } from "@/lib/types";
 
 type EditorTab = "canvas" | "variables" | "schedules" | "basics";
@@ -21,7 +20,6 @@ export type PipelineDefinitionEditorShellProps = {
   mode: "create" | "edit";
   draft: PipelineDraft;
   managedProjects?: ManagedProject[];
-  projectGroups: ProjectGroup[];
   scheduleRuntimeSnapshots?: PipelineScheduleRuntimeSnapshot[];
   dirty: boolean;
   saving: boolean;
@@ -53,7 +51,6 @@ export function PipelineDefinitionEditorShell(
     mode,
     draft,
     managedProjects = [],
-    projectGroups: _projectGroups,
     scheduleRuntimeSnapshots,
     dirty,
     saving,
@@ -102,18 +99,10 @@ export function PipelineDefinitionEditorShell(
         className="flex min-h-0 flex-1 flex-col gap-4"
       >
         <TabsList className="h-auto w-full justify-start gap-1 rounded-xl p-1">
-          <TabsTrigger value="canvas" onClick={() => setActiveTab("canvas")}>
-            画布
-          </TabsTrigger>
-          <TabsTrigger value="variables" onClick={() => setActiveTab("variables")}>
-            变量
-          </TabsTrigger>
-          <TabsTrigger value="schedules" onClick={() => setActiveTab("schedules")}>
-            调度
-          </TabsTrigger>
-          <TabsTrigger value="basics" onClick={() => setActiveTab("basics")}>
-            基础信息
-          </TabsTrigger>
+          <TabsTrigger value="canvas">画布</TabsTrigger>
+          <TabsTrigger value="variables">变量</TabsTrigger>
+          <TabsTrigger value="schedules">调度</TabsTrigger>
+          <TabsTrigger value="basics">基础信息</TabsTrigger>
         </TabsList>
 
         <TabsContent value="canvas" className="min-h-0 flex-1">
