@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   BUILTIN_NODE_MAP,
   buildPipelineCreatePayload,
+  createEmptyPipelineDraft,
   ensureVariableRows,
   normalizeBuiltinParameters,
   remapNodeDraftForType,
+  toDraftFromDetail,
   type PipelineDraft,
 } from "@/components/pipeline-editor/draft-model";
 
@@ -44,32 +46,52 @@ describe("pipeline draft model working path node", () => {
       enabled: true,
       maxConcurrencyDefault: "1",
       variableRows: [],
+      stages: [{ id: "stage-1", stageKey: "prepare", name: "准备", enabled: true }],
       nodes: [
         {
           id: "node-1",
+          nodeKey: "working-path-relative",
+          stageKey: "prepare",
           nodeType: "set_working_path",
+          position: { x: 96, y: 72 },
+          enabled: true,
           parameters: normalizeBuiltinParameters("set_working_path", {
             path: "../another-repo",
           }),
         },
         {
           id: "node-2",
+          nodeKey: "working-path-absolute",
+          stageKey: "prepare",
           nodeType: "set_working_path",
+          position: { x: 96, y: 188 },
+          enabled: true,
           parameters: normalizeBuiltinParameters("set_working_path", {
             path: "D:/repos/project-a",
           }),
         },
       ],
+      edges: [],
       schedules: [],
     };
 
     expect(buildPipelineCreatePayload(draft).nodes).toEqual([
       {
         nodeType: "set_working_path",
+        nodeKey: "working-path-relative",
+        stageKey: "prepare",
+        positionX: 96,
+        positionY: 72,
+        enabled: true,
         parameters: { path: "../another-repo" },
       },
       {
         nodeType: "set_working_path",
+        nodeKey: "working-path-absolute",
+        stageKey: "prepare",
+        positionX: 96,
+        positionY: 188,
+        enabled: true,
         parameters: { path: "D:/repos/project-a" },
       },
     ]);
@@ -82,21 +104,32 @@ describe("pipeline draft model working path node", () => {
       enabled: true,
       maxConcurrencyDefault: "1",
       variableRows: [],
+      stages: [{ id: "stage-1", stageKey: "prepare", name: "准备", enabled: true }],
       nodes: [
         {
           id: "node-1",
+          nodeKey: "switch-project",
+          stageKey: "prepare",
           nodeType: "switch_project",
+          position: { x: 96, y: 72 },
+          enabled: true,
           parameters: normalizeBuiltinParameters("switch_project", {
             managedProjectId: "42",
           }),
         },
       ],
+      edges: [],
       schedules: [],
     };
 
     expect(buildPipelineCreatePayload(draft).nodes).toEqual([
       {
         nodeType: "switch_project",
+        nodeKey: "switch-project",
+        stageKey: "prepare",
+        positionX: 96,
+        positionY: 72,
+        enabled: true,
         parameters: { managedProjectId: "42" },
       },
     ]);
@@ -130,7 +163,11 @@ describe("pipeline draft model working path node", () => {
   it("keeps inferred variables aligned to the latest placeholder instead of accumulating typing intermediates", () => {
     const node = (branch: string) => ({
       id: "node-1",
+      nodeKey: "checkout-source",
+      stageKey: "prepare",
       nodeType: "checkout_branch",
+      position: { x: 96, y: 72 },
+      enabled: true,
       parameters: normalizeBuiltinParameters("checkout_branch", { branch }),
     });
 
@@ -145,5 +182,106 @@ describe("pipeline draft model working path node", () => {
 
     const afterFinalEdit = ensureVariableRows([node("${release_branch}")], afterSecondEdit);
     expect(afterFinalEdit.map((row) => row.key)).toEqual(["release_branch"]);
+  });
+
+  it("creates a default stage-aware draft instead of a stage-less linear draft", () => {
+    const draft = createEmptyPipelineDraft();
+
+    expect(draft.stages).toHaveLength(1);
+    expect(draft.nodes).toHaveLength(1);
+    expect(draft.nodes[0]?.stageKey).toBe(draft.stages[0]?.stageKey);
+    expect(draft.edges).toEqual([]);
+  });
+
+  it("hydrates legacy stage-less definitions into a single default stage", () => {
+    const draft = toDraftFromDetail({
+      id: 9,
+      name: "legacy-release",
+      description: "",
+      enabled: true,
+      maxConcurrencyDefault: 2,
+      createdAt: "2026-04-28T00:00:00Z",
+      updatedAt: "2026-04-28T00:00:00Z",
+      variables: [],
+      stages: [],
+      nodes: [
+        {
+          nodeOrder: 0,
+          nodeType: "checkout_branch",
+          parameters: { branch: "${source_branch}" },
+          stageKey: null,
+          nodeKey: null,
+          positionX: 48,
+          positionY: 60,
+          enabled: true,
+        },
+      ],
+      edges: [],
+      schedules: [],
+    });
+
+    expect(draft.stages).toHaveLength(1);
+    expect(draft.nodes[0]?.stageKey).toBe(draft.stages[0]?.stageKey);
+    expect(draft.nodes[0]?.nodeKey).toBeTruthy();
+  });
+
+  it("serializes stages and edges together with nodes", () => {
+    const draft: PipelineDraft = {
+      name: "release-pipeline",
+      description: "",
+      enabled: true,
+      maxConcurrencyDefault: "2",
+      variableRows: [],
+      stages: [
+        { id: "stage-1", stageKey: "prepare", name: "准备", enabled: true },
+        { id: "stage-2", stageKey: "deploy", name: "发布", enabled: false },
+      ],
+      nodes: [
+        {
+          id: "node-1",
+          nodeKey: "checkout-source",
+          stageKey: "prepare",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 72 },
+          enabled: true,
+          parameters: normalizeBuiltinParameters("checkout_branch", {
+            branch: "${source_branch}",
+          }),
+        },
+        {
+          id: "node-2",
+          nodeKey: "trigger-release",
+          stageKey: "deploy",
+          nodeType: "trigger_pipeline",
+          position: { x: 96, y: 72 },
+          enabled: true,
+          parameters: normalizeBuiltinParameters("trigger_pipeline", {
+            project: "team/web-service",
+            ref: "${target_branch}",
+          }),
+        },
+      ],
+      edges: [
+        {
+          id: "edge-1",
+          sourceNodeKey: "checkout-source",
+          targetNodeKey: "trigger-release",
+        },
+      ],
+      schedules: [],
+    };
+
+    const payload = buildPipelineCreatePayload(draft);
+
+    expect(payload.stages).toEqual([
+      { stageKey: "prepare", name: "准备", enabled: true },
+      { stageKey: "deploy", name: "发布", enabled: false },
+    ]);
+    expect(payload.edges).toEqual([
+      {
+        sourceNodeKey: "checkout-source",
+        targetNodeKey: "trigger-release",
+      },
+    ]);
   });
 });
