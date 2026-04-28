@@ -938,14 +938,9 @@ async fn retry_pipeline_run(
     state: State<'_, AppState>,
     request: PipelineRunRetryRequest,
 ) -> Result<PipelineRunExecuteResult, CommandError> {
-    let run_id = workflows::retry_pipeline_run(
-        &state.db,
-        request.source_pipeline_run_id,
-        request.selected_managed_project_ids,
-        request.max_concurrency_override,
-    )
-    .await
-    .map_err(pipeline_command_error)?;
+    let run_id = workflows::retry_pipeline_run_with_request(&state.db, request.clone())
+        .await
+        .map_err(pipeline_command_error)?;
 
     tracing::info!(
         source_pipeline_run_id = request.source_pipeline_run_id,

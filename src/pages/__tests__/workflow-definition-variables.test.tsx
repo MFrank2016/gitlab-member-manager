@@ -1,6 +1,8 @@
+import * as React from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { resetPipelineDraftCountersForTest } from "@/components/pipeline-editor/draft-model";
 import { WorkflowsPage } from "@/pages/WorkflowsPage";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -17,6 +19,71 @@ vi.mock("sonner", () => ({
     success: toastSuccessMock,
   },
 }));
+
+vi.mock("@xyflow/react", async () => {
+  const ReactModule = await import("react");
+
+  return {
+    Background: () => null,
+    Controls: () => null,
+    Handle: () => null,
+    Position: {
+      Top: "top",
+      Right: "right",
+      Bottom: "bottom",
+      Left: "left",
+    },
+    applyNodeChanges: (_changes: unknown, nodes: unknown) => nodes,
+    ReactFlow: ({
+      nodes,
+      edges,
+      nodeTypes,
+      onNodeClick,
+    }: {
+      nodes: Array<Record<string, unknown>>;
+      edges: Array<Record<string, unknown>>;
+      nodeTypes?: Record<string, React.ComponentType<Record<string, unknown>>>;
+      onNodeClick?: (event: unknown, node: Record<string, unknown>) => void;
+    }) => (
+      <div data-testid="mock-react-flow">
+        <div data-testid="mock-react-flow-edge-count">{edges.length}</div>
+        {nodes.map((node) => {
+          const Component = node.type && nodeTypes ? nodeTypes[String(node.type)] : null;
+          const data = (node.data ?? {}) as Record<string, unknown>;
+          const label =
+            typeof data.name === "string"
+              ? data.name
+              : typeof data.label === "string"
+                ? data.label
+                : String(node.id);
+
+          return (
+            <div key={String(node.id)} data-testid={`graph-node-${String(node.id)}`}>
+              <button type="button" onClick={() => onNodeClick?.({}, node)}>
+                {label}
+              </button>
+              {Component ? (
+                <Component
+                  id={String(node.id)}
+                  data={data}
+                  selected={false}
+                  dragging={false}
+                  type={String(node.type ?? "")}
+                  zIndex={0}
+                  isConnectable
+                  xPos={0}
+                  yPos={0}
+                  targetPosition="top"
+                  sourcePosition="bottom"
+                />
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    ),
+  };
+});
 
 const projectGroups = [
   {
@@ -73,6 +140,7 @@ function getPipelineNameInput() {
 
 describe("pipeline definition editor", () => {
   beforeEach(() => {
+    resetPipelineDraftCountersForTest();
     invokeMock.mockReset();
     toastErrorMock.mockReset();
     toastSuccessMock.mockReset();
@@ -119,13 +187,28 @@ describe("pipeline definition editor", () => {
               options: [],
             },
           ],
+          stages: [
+            {
+              id: 1,
+              stageKey: "prepare",
+              name: "准备",
+              stageOrder: 0,
+              enabled: true,
+            },
+          ],
           nodes: [
             {
               nodeOrder: 0,
               nodeType: "switch_project",
               parameters: { managedProjectId: "11" },
+              stageKey: "prepare",
+              nodeKey: "switch_project_prepare",
+              positionX: 96,
+              positionY: 72,
+              enabled: true,
             },
           ],
+          edges: [],
           schedules: [],
         };
       }
@@ -140,7 +223,9 @@ describe("pipeline definition editor", () => {
           createdAt: "2026-04-14T00:00:00Z",
           updatedAt: "2026-04-14T00:00:00Z",
           variables: args?.variables ?? [],
+          stages: args?.stages ?? [],
           nodes: args?.nodes ?? [],
+          edges: args?.edges ?? [],
           schedules: args?.schedules ?? [],
         };
       }
@@ -153,30 +238,54 @@ describe("pipeline definition editor", () => {
     });
   });
 
-  it("shows pipeline sections and persists schedule-aware pipeline payloads", async () => {
+  it("shows the graph editor and persists stage-aware payloads", async () => {
     render(<WorkflowsPage />);
 
     expect(await screen.findByText("legacy-release-pipeline")).toBeInTheDocument();
     expect(screen.getByText("迁移自工作流 #91")).toBeInTheDocument();
 
-    fireEvent.click(await getCreateTrigger());
+    fireEvent.click(getCreateTrigger());
 
     expect(screen.getByText("基础信息")).toBeInTheDocument();
     expect(screen.getByText("变量")).toBeInTheDocument();
-    expect(screen.getByText("节点")).toBeInTheDocument();
+    expect(screen.getByText("流程图")).toBeInTheDocument();
     expect(screen.getByText("调度")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /添加调度/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加阶段" })).toBeInTheDocument();
 
-    const variableRows = await screen.findAllByTestId("pipeline-variable-row");
-    expect(variableRows).toHaveLength(1);
-    expect(within(variableRows[0]).getByDisplayValue("source_branch")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /添加节点/i }));
+    fireEvent.click(
+      within(screen.getByTestId("graph-node-stage-1")).getByRole("button")
+    );
+    fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
     await waitFor(() => {
-      expect(screen.getAllByTestId("pipeline-variable-row")).toHaveLength(2);
+      expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(2);
+    });
+    const actionNodes = screen.getAllByTestId(/graph-node-checkout_branch_node-/);
+    const secondNodeKey =
+      actionNodes[actionNodes.length - 1]
+        ?.getAttribute("data-testid")
+        ?.replace("graph-node-", "") ?? "";
+    fireEvent.click(
+      within(actionNodes[actionNodes.length - 1]!).getByRole("button")
+    );
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "git_pull" },
+    });
+    fireEvent.change(screen.getByLabelText("分支"), {
+      target: { value: "${target_branch}" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /添加调度/i }));
+    fireEvent.click(
+      within(screen.getByTestId("graph-node-checkout_branch_node-1")).getByRole("button")
+    );
+    fireEvent.change(screen.getByLabelText("连接到节点"), {
+      target: { value: secondNodeKey },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建连线" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("mock-react-flow-edge-count")).toHaveTextContent("1");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "添加调度" }));
     const scheduleRows = await screen.findAllByTestId("pipeline-schedule-row");
     expect(scheduleRows).toHaveLength(1);
 
@@ -209,16 +318,26 @@ describe("pipeline definition editor", () => {
               options: [],
             },
           ],
+          stages: [{ stageKey: "stage-1", name: "阶段 1", enabled: true }],
           nodes: [
-            {
+            expect.objectContaining({
               nodeType: "checkout_branch",
+              nodeKey: "checkout_branch_node-1",
+              stageKey: "stage-1",
+              positionX: 96,
+              positionY: 72,
+              enabled: true,
               parameters: { branch: "${source_branch}" },
-            },
-            {
+            }),
+            expect.objectContaining({
               nodeType: "git_pull",
+              stageKey: "stage-1",
+              positionX: 96,
+              enabled: true,
               parameters: { branch: "${target_branch}" },
-            },
+            }),
           ],
+          edges: [expect.objectContaining({ sourceNodeKey: "checkout_branch_node-1" })],
           schedules: [
             {
               cronExpr: "0 9 * * 1-5",
@@ -237,7 +356,7 @@ describe("pipeline definition editor", () => {
   it("keeps create disabled until the draft is valid and shows a readiness summary", async () => {
     render(<WorkflowsPage />);
 
-    fireEvent.click(await getCreateTrigger());
+    fireEvent.click(getCreateTrigger());
 
     const createButton = getCreateSubmit();
     expect(createButton).toBeDisabled();
@@ -251,27 +370,24 @@ describe("pipeline definition editor", () => {
       expect(createButton).not.toBeDisabled();
     });
 
-    expect(screen.getByText("已就绪：1 个变量，1 个节点，0 个调度。")).toBeInTheDocument();
+    expect(screen.getByText("已就绪：1 个阶段，1 个节点，0 个调度。")).toBeInTheDocument();
   });
 
   it("shows managed project names for switch_project nodes and persists the selection", async () => {
     render(<WorkflowsPage />);
 
-    fireEvent.click(await getCreateTrigger());
-    fireEvent.click(screen.getByRole("button", { name: /添加节点/i }));
-
-    fireEvent.change(screen.getByLabelText("节点 2 类型"), {
+    fireEvent.click(getCreateTrigger());
+    fireEvent.click(within(screen.getByTestId("graph-node-checkout_branch_node-1")).getByRole("button"));
+    fireEvent.change(screen.getByLabelText("节点类型"), {
       target: { value: "switch_project" },
     });
 
     await waitFor(() => {
       expect(screen.getByRole("option", { name: "web-service" })).toBeInTheDocument();
-      expect(
-        screen.getByRole("option", { name: "worker-service" })
-      ).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: "worker-service" })).toBeInTheDocument();
     });
 
-    const projectSelect = screen.getByLabelText("节点 2 项目");
+    const projectSelect = screen.getByLabelText("项目");
     fireEvent.change(projectSelect, { target: { value: "11" } });
     expect(screen.getByText("team/web-service · D:/repos/web-service")).toBeInTheDocument();
 
@@ -287,11 +403,12 @@ describe("pipeline definition editor", () => {
           name: "cross-project-release",
           nodes: [
             {
-              nodeType: "checkout_branch",
-              parameters: { branch: "${source_branch}" },
-            },
-            {
               nodeType: "switch_project",
+              nodeKey: "checkout_branch_node-1",
+              stageKey: "stage-1",
+              positionX: 96,
+              positionY: 72,
+              enabled: true,
               parameters: { managedProjectId: "11" },
             },
           ],
@@ -303,7 +420,7 @@ describe("pipeline definition editor", () => {
   it("rejects save when a referenced variable has been deleted from the form", async () => {
     render(<WorkflowsPage />);
 
-    fireEvent.click(await getCreateTrigger());
+    fireEvent.click(getCreateTrigger());
     fireEvent.change(getPipelineNameInput(), {
       target: { value: "release-pipeline" },
     });

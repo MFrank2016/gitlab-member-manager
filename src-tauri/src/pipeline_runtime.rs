@@ -1,4 +1,4 @@
-use crate::db::{self, PipelineExecutionNodeDef};
+use crate::db::{self, PipelineExecutionDefinition, PipelineExecutionNodeDef};
 use crate::failure_envelope::{build_failure_envelope, FailureEnvelope};
 use crate::git_executor::{
     self, build_execution_step_operation, execute_git_command, run_execution_step_prechecks,
@@ -6,7 +6,7 @@ use crate::git_executor::{
 };
 use crate::gitlab::{self, GitLabConfig};
 use crate::gitlab_executor::{self, WaitMetadata};
-use crate::models::{ManagedProject, PipelineVariable};
+use crate::models::{ManagedProject, PipelineRunRetryRequest, PipelineVariable};
 use crate::runtime_support::{
     derive_run_final_status, get_repo_lease, normalize_run_parameters, now_rfc3339,
     render_value, ProjectExecutionStep, ProjectOutcome,
@@ -14,7 +14,8 @@ use crate::runtime_support::{
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use sqlx::{Sqlite, SqlitePool, Transaction};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant};
 use tokio::task::JoinSet;
 
@@ -54,6 +55,119 @@ struct PipelineRetrySourceRun {
     pipeline_definition_id: i64,
     project_group_id: Option<i64>,
     run_parameters: Value,
+}
+
+#[derive(Debug, Clone)]
+struct PipelineExecutionContextState {
+    managed_project_id: Option<i64>,
+    project: Option<ManagedProject>,
+    working_dir: Option<PathBuf>,
+}
+
+impl PipelineExecutionContextState {
+    fn from_project(project: &ManagedProject) -> Self {
+        Self {
+            managed_project_id: Some(project.id),
+            project: Some(project.clone()),
+            working_dir: Some(PathBuf::from(&project.repo_path)),
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            managed_project_id: None,
+            project: None,
+            working_dir: None,
+        }
+    }
+
+    fn project_ref(&self) -> Option<&ManagedProject> {
+        self.project.as_ref()
+    }
+
+    fn working_dir(&self) -> Option<&Path> {
+        self.working_dir.as_deref()
+    }
+
+    fn working_dir_display(&self) -> Option<String> {
+        self.working_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RenderedPipelineStageDefinition {
+    pipeline_stage_id: i64,
+    stage_key: String,
+    name: String,
+    stage_order: i64,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedPipelineGraphNodeDefinition {
+    pipeline_node_id: i64,
+    node_order: i64,
+    node_key: String,
+    stage_key: String,
+    stage_order: i64,
+    stage_name: String,
+    node_type: String,
+    rendered_parameters: Value,
+    enabled: bool,
+    predecessors: Vec<String>,
+    successors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SeededPipelineRunStage {
+    run_stage_id: i64,
+    pipeline_stage_id: i64,
+    stage_key: String,
+    stage_name: String,
+    stage_order: i64,
+}
+
+#[derive(Debug, Clone)]
+struct PipelineGraphExecutionNode {
+    run_node_id: i64,
+    run_stage_id: i64,
+    pipeline_node_id: i64,
+    node_order: i64,
+    node_key: String,
+    stage_key: String,
+    stage_order: i64,
+    stage_name: String,
+    node_type: String,
+    rendered_parameters: Value,
+    enabled: bool,
+    predecessors: Vec<String>,
+    successors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PipelineGraphExecutionPlan {
+    run_project_id: i64,
+    project: Option<ManagedProject>,
+    nodes_by_key: HashMap<String, PipelineGraphExecutionNode>,
+    stage_node_keys: BTreeMap<i64, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphNodeFailureKind {
+    Failed,
+    FailedPrecheck,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+enum GraphNodeExecutionOutcome {
+    Success {
+        context: PipelineExecutionContextState,
+    },
+    Failed {
+        kind: GraphNodeFailureKind,
+    },
 }
 
 fn read_optional_u64_param(parameters: &Value, key: &str) -> Result<Option<u64>> {
@@ -133,6 +247,101 @@ fn render_pipeline_nodes_for_run(
         });
     }
     Ok(rendered_nodes)
+}
+
+fn render_pipeline_graph_for_run(
+    pipeline: &PipelineExecutionDefinition,
+    run_parameters: &Value,
+) -> Result<(
+    Vec<RenderedPipelineStageDefinition>,
+    Vec<RenderedPipelineGraphNodeDefinition>,
+)> {
+    let variable_map = run_parameters
+        .as_object()
+        .ok_or_else(|| anyhow!("run_parameters must be a JSON object"))?;
+
+    if pipeline.stages.is_empty() {
+        return Err(anyhow!("stage-aware pipeline definition has no stages"));
+    }
+
+    let mut stages = Vec::new();
+    let mut stage_order_by_key = HashMap::<String, i64>::new();
+    let mut stage_name_by_key = HashMap::<String, String>::new();
+    let mut enabled_stage_keys = HashSet::<String>::new();
+    for stage in &pipeline.stages {
+        if !stage.enabled {
+            continue;
+        }
+        stage_order_by_key.insert(stage.stage_key.clone(), stage.stage_order);
+        stage_name_by_key.insert(stage.stage_key.clone(), stage.name.clone());
+        enabled_stage_keys.insert(stage.stage_key.clone());
+        stages.push(RenderedPipelineStageDefinition {
+            pipeline_stage_id: stage.id,
+            stage_key: stage.stage_key.clone(),
+            name: stage.name.clone(),
+            stage_order: stage.stage_order,
+        });
+    }
+
+    let mut predecessors_by_key = HashMap::<String, Vec<String>>::new();
+    let mut successors_by_key = HashMap::<String, Vec<String>>::new();
+    for edge in &pipeline.edges {
+        predecessors_by_key
+            .entry(edge.target_node_key.clone())
+            .or_default()
+            .push(edge.source_node_key.clone());
+        successors_by_key
+            .entry(edge.source_node_key.clone())
+            .or_default()
+            .push(edge.target_node_key.clone());
+    }
+
+    let mut rendered_nodes = Vec::new();
+    for node in &pipeline.nodes {
+        if !node.enabled {
+            continue;
+        }
+        let Some(stage_key) = node.stage_key.clone() else {
+            return Err(anyhow!(
+                "stage-aware pipeline node missing stage_key for execution: {}",
+                node.node_type
+            ));
+        };
+        if !enabled_stage_keys.contains(&stage_key) {
+            continue;
+        }
+        let Some(node_key) = node.node_key.clone() else {
+            return Err(anyhow!(
+                "stage-aware pipeline node missing node_key for execution: {}",
+                node.node_type
+            ));
+        };
+        let stage_order = *stage_order_by_key
+            .get(&stage_key)
+            .ok_or_else(|| anyhow!("pipeline node stage key not found during execution: {stage_key}"))?;
+        let stage_name = stage_name_by_key
+            .get(&stage_key)
+            .cloned()
+            .ok_or_else(|| anyhow!("pipeline node stage name not found during execution: {stage_key}"))?;
+        rendered_nodes.push(RenderedPipelineGraphNodeDefinition {
+            pipeline_node_id: node.id,
+            node_order: node.node_order,
+            node_key: node_key.clone(),
+            stage_key: stage_key.clone(),
+            stage_order,
+            stage_name,
+            node_type: node.node_type.clone(),
+            rendered_parameters: render_value(&node.parameters, variable_map)?,
+            enabled: true,
+            predecessors: predecessors_by_key.remove(&node_key).unwrap_or_default(),
+            successors: successors_by_key.remove(&node_key).unwrap_or_default(),
+        });
+    }
+
+    rendered_nodes.sort_by_key(|node| (node.stage_order, node.node_order));
+    stages.sort_by_key(|stage| stage.stage_order);
+
+    Ok((stages, rendered_nodes))
 }
 
 fn node_requires_working_dir(node_type: &str) -> bool {
@@ -405,6 +614,44 @@ async fn insert_pipeline_run_project_row(
     Ok(result.last_insert_rowid())
 }
 
+async fn insert_pipeline_run_stage_rows(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_run_id: i64,
+    stages: &[RenderedPipelineStageDefinition],
+) -> Result<HashMap<String, SeededPipelineRunStage>> {
+    let now = now_rfc3339();
+    let mut seeded = HashMap::with_capacity(stages.len());
+    for stage in stages {
+        let result = sqlx::query(
+            r#"INSERT INTO pipeline_run_stages (
+                 pipeline_run_id, pipeline_stage_id, stage_order, stage_key, stage_name_snapshot,
+                 status, summary_message, started_at, finished_at, created_at, updated_at
+               ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', '', NULL, NULL, ?6, ?7)"#,
+        )
+        .bind(pipeline_run_id)
+        .bind(stage.pipeline_stage_id)
+        .bind(stage.stage_order)
+        .bind(&stage.stage_key)
+        .bind(&stage.name)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut **tx)
+        .await?;
+
+        seeded.insert(
+            stage.stage_key.clone(),
+            SeededPipelineRunStage {
+                run_stage_id: result.last_insert_rowid(),
+                pipeline_stage_id: stage.pipeline_stage_id,
+                stage_key: stage.stage_key.clone(),
+                stage_name: stage.name.clone(),
+                stage_order: stage.stage_order,
+            },
+        );
+    }
+    Ok(seeded)
+}
+
 async fn insert_pipeline_run_node_row(
     tx: &mut Transaction<'_, Sqlite>,
     pipeline_run_project_id: i64,
@@ -419,6 +666,35 @@ async fn insert_pipeline_run_node_row(
          status, started_at, finished_at, stdout, stderr, exit_code, summary_message,
          error_code, title_zh, detail_zh, suggestion_zh, evidence, created_at, updated_at
        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, '', '', NULL, '', NULL, NULL, NULL, NULL, NULL, ?7, ?8)"#,
+    )
+    .bind(pipeline_run_project_id)
+    .bind(rendered_node.pipeline_node_id)
+    .bind(rendered_node.node_order)
+    .bind(&rendered_node.node_type)
+    .bind(rendered_parameters_json)
+    .bind("pending")
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
+async fn insert_pipeline_graph_run_node_row(
+    tx: &mut Transaction<'_, Sqlite>,
+    pipeline_run_project_id: i64,
+    rendered_node: &RenderedPipelineGraphNodeDefinition,
+) -> Result<i64> {
+    let now = now_rfc3339();
+    let rendered_parameters_json = serde_json::to_string(&rendered_node.rendered_parameters)
+        .context("serialize rendered graph node parameters")?;
+    let result = sqlx::query(
+        r#"INSERT INTO pipeline_run_nodes (
+             pipeline_run_project_id, pipeline_node_id, node_order, node_type, rendered_parameters_json,
+             status, started_at, finished_at, stdout, stderr, exit_code, summary_message,
+             error_code, title_zh, detail_zh, suggestion_zh, evidence, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, '', '', NULL, '', NULL, NULL, NULL, NULL, NULL, ?7, ?8)"#,
     )
     .bind(pipeline_run_project_id)
     .bind(rendered_node.pipeline_node_id)
@@ -530,6 +806,86 @@ async fn seed_pipeline_run_for_segments(
     Ok((pipeline_run_id, plans))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn seed_pipeline_graph_run(
+    pool: &SqlitePool,
+    pipeline_definition_id: i64,
+    project_group_id: Option<i64>,
+    source_pipeline_run_id: Option<i64>,
+    trigger_kind: &str,
+    run_parameters: &Value,
+    max_concurrency: i64,
+    stages: &[RenderedPipelineStageDefinition],
+    rendered_nodes: &[RenderedPipelineGraphNodeDefinition],
+    projects: Vec<Option<ManagedProject>>,
+) -> Result<(
+    i64,
+    Vec<SeededPipelineRunStage>,
+    Vec<PipelineGraphExecutionPlan>,
+)> {
+    let mut tx = pool.begin().await?;
+    let pipeline_run_id = insert_pipeline_run_row(
+        &mut tx,
+        pipeline_definition_id,
+        project_group_id,
+        source_pipeline_run_id,
+        trigger_kind,
+        run_parameters,
+        max_concurrency,
+    )
+    .await?;
+    let seeded_stage_map = insert_pipeline_run_stage_rows(&mut tx, pipeline_run_id, stages).await?;
+
+    let mut seeded_stages = seeded_stage_map.values().cloned().collect::<Vec<_>>();
+    seeded_stages.sort_by_key(|stage| stage.stage_order);
+
+    let mut plans = Vec::with_capacity(projects.len());
+    for project in projects {
+        let run_project_id =
+            insert_pipeline_run_project_row(&mut tx, pipeline_run_id, project.as_ref()).await?;
+        let mut nodes_by_key = HashMap::with_capacity(rendered_nodes.len());
+        let mut stage_node_keys = BTreeMap::<i64, Vec<String>>::new();
+        for rendered_node in rendered_nodes {
+            let run_node_id =
+                insert_pipeline_graph_run_node_row(&mut tx, run_project_id, rendered_node).await?;
+            nodes_by_key.insert(
+                rendered_node.node_key.clone(),
+                PipelineGraphExecutionNode {
+                    run_node_id,
+                    run_stage_id: seeded_stage_map
+                        .get(&rendered_node.stage_key)
+                        .expect("seeded stage present for node")
+                        .run_stage_id,
+                    pipeline_node_id: rendered_node.pipeline_node_id,
+                    node_order: rendered_node.node_order,
+                    node_key: rendered_node.node_key.clone(),
+                    stage_key: rendered_node.stage_key.clone(),
+                    stage_order: rendered_node.stage_order,
+                    stage_name: rendered_node.stage_name.clone(),
+                    node_type: rendered_node.node_type.clone(),
+                    rendered_parameters: rendered_node.rendered_parameters.clone(),
+                    enabled: rendered_node.enabled,
+                    predecessors: rendered_node.predecessors.clone(),
+                    successors: rendered_node.successors.clone(),
+                },
+            );
+            stage_node_keys
+                .entry(rendered_node.stage_order)
+                .or_default()
+                .push(rendered_node.node_key.clone());
+        }
+        plans.push(PipelineGraphExecutionPlan {
+            run_project_id,
+            project,
+            nodes_by_key,
+            stage_node_keys,
+        });
+    }
+
+    tx.commit().await?;
+    Ok((pipeline_run_id, seeded_stages, plans))
+}
+
 async fn mark_pipeline_run_finished(
     pool: &SqlitePool,
     pipeline_run_id: i64,
@@ -602,6 +958,93 @@ async fn mark_pipeline_project_finished(
     .bind(&now)
     .bind(&now)
     .bind(run_project_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn mark_pipeline_stage_running(pool: &SqlitePool, run_stage_id: i64) -> Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"UPDATE pipeline_run_stages
+           SET status = 'running',
+               started_at = COALESCE(started_at, ?1),
+               updated_at = ?2
+         WHERE id = ?3"#,
+    )
+    .bind(&now)
+    .bind(&now)
+    .bind(run_stage_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn mark_pipeline_stage_waiting(
+    pool: &SqlitePool,
+    run_stage_id: i64,
+    summary_message: &str,
+) -> Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"UPDATE pipeline_run_stages
+           SET status = 'waiting',
+               summary_message = ?1,
+               started_at = COALESCE(started_at, ?2),
+               updated_at = ?3
+         WHERE id = ?4 AND status IN ('pending', 'running', 'waiting')"#,
+    )
+    .bind(summary_message)
+    .bind(&now)
+    .bind(&now)
+    .bind(run_stage_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn mark_pipeline_stage_finished(
+    pool: &SqlitePool,
+    run_stage_id: i64,
+    status: &str,
+    summary_message: &str,
+) -> Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"UPDATE pipeline_run_stages
+           SET status = ?1,
+               summary_message = ?2,
+               started_at = COALESCE(started_at, ?3),
+               finished_at = ?4,
+               updated_at = ?5
+         WHERE id = ?6"#,
+    )
+    .bind(status)
+    .bind(summary_message)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .bind(run_stage_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn mark_pipeline_stage_blocked(
+    pool: &SqlitePool,
+    run_stage_id: i64,
+    summary_message: &str,
+) -> Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"UPDATE pipeline_run_stages
+           SET summary_message = ?1,
+               updated_at = ?2
+         WHERE id = ?3 AND status = 'pending'"#,
+    )
+    .bind(summary_message)
+    .bind(&now)
+    .bind(run_stage_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -707,6 +1150,579 @@ async fn update_pipeline_node_wait_state(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+fn is_graph_dependency_satisfied(status: &str) -> bool {
+    matches!(status, "success" | "reused")
+}
+
+fn merge_execution_contexts(
+    contexts: &[PipelineExecutionContextState],
+) -> Result<PipelineExecutionContextState> {
+    let Some(first) = contexts.first() else {
+        return Ok(PipelineExecutionContextState::empty());
+    };
+    for context in contexts.iter().skip(1) {
+        let same_project = context.managed_project_id == first.managed_project_id;
+        let same_working_dir = context
+            .working_dir()
+            .map(|path| path.to_path_buf())
+            == first.working_dir().map(|path| path.to_path_buf());
+        if !same_project || !same_working_dir {
+            return Err(anyhow!(
+                "multiple upstream execution contexts conflict for the same DAG node"
+            ));
+        }
+    }
+    Ok(first.clone())
+}
+
+fn resolve_graph_node_input_context(
+    base_context: &PipelineExecutionContextState,
+    node: &PipelineGraphExecutionNode,
+    completed_contexts: &HashMap<(usize, String), PipelineExecutionContextState>,
+    plan_index: usize,
+) -> Result<PipelineExecutionContextState> {
+    if node.predecessors.is_empty() {
+        return Ok(base_context.clone());
+    }
+
+    let mut contexts = Vec::with_capacity(node.predecessors.len());
+    for predecessor_key in &node.predecessors {
+        let context = completed_contexts
+            .get(&(plan_index, predecessor_key.clone()))
+            .cloned()
+            .ok_or_else(|| anyhow!("missing execution context for predecessor node: {predecessor_key}"))?;
+        contexts.push(context);
+    }
+    merge_execution_contexts(&contexts)
+}
+
+async fn mark_graph_nodes_with_status(
+    pool: &SqlitePool,
+    plan: &PipelineGraphExecutionPlan,
+    node_keys: &[String],
+    status: &str,
+    summary_message: &str,
+) -> Result<()> {
+    for node_key in node_keys {
+        let Some(node) = plan.nodes_by_key.get(node_key) else {
+            continue;
+        };
+        let current = load_pipeline_node_status(pool, node.run_node_id).await?;
+        if current == "pending" || current == "running" || current == "waiting" {
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                status,
+                "",
+                "",
+                None,
+                summary_message,
+                None,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn execute_graph_node(
+    pool: &SqlitePool,
+    _plan: &PipelineGraphExecutionPlan,
+    plan_index: usize,
+    node: &PipelineGraphExecutionNode,
+    gitlab_cfg: Option<&GitLabConfig>,
+    base_context: &PipelineExecutionContextState,
+    completed_contexts: &HashMap<(usize, String), PipelineExecutionContextState>,
+) -> Result<GraphNodeExecutionOutcome> {
+    let input_context =
+        resolve_graph_node_input_context(base_context, node, completed_contexts, plan_index)?;
+
+    if node.node_type == "switch_project" {
+        let managed_project_id = read_switch_project_id(&node.rendered_parameters)?;
+        let project = load_enabled_managed_project(pool, managed_project_id).await?;
+        let next_context = PipelineExecutionContextState::from_project(&project);
+        let summary = format!("已切换到项目 {}", project.name);
+        mark_pipeline_node_finished(
+            pool,
+            node.run_node_id,
+            "success",
+            "",
+            "",
+            Some(0),
+            &summary,
+            None,
+        )
+        .await?;
+        return Ok(GraphNodeExecutionOutcome::Success {
+            context: next_context,
+        });
+    }
+
+    if matches!(
+        node.node_type.as_str(),
+        "check_pipeline" | "wait_pipeline" | "trigger_pipeline"
+    ) {
+        let cfg = match gitlab_cfg {
+            Some(cfg) => cfg,
+            None => {
+                let envelope = gitlab_executor::classify_missing_gitlab_config();
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "failed",
+                    "",
+                    "",
+                    None,
+                    &envelope.title_zh,
+                    Some(&envelope),
+                )
+                .await?;
+                return Ok(GraphNodeExecutionOutcome::Failed {
+                    kind: GraphNodeFailureKind::FailedPrecheck,
+                });
+            }
+        };
+
+        let project_path = match gitlab_executor::read_pipeline_project_param(
+            &node.rendered_parameters,
+            input_context.project_ref(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let envelope = classify_invalid_execution_parameters(&error.to_string());
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "failed",
+                    "",
+                    "",
+                    None,
+                    &envelope.title_zh,
+                    Some(&envelope),
+                )
+                .await?;
+                return Ok(GraphNodeExecutionOutcome::Failed {
+                    kind: GraphNodeFailureKind::FailedPrecheck,
+                });
+            }
+        };
+        let reference = match gitlab_executor::read_pipeline_reference_param(
+            &node.rendered_parameters,
+            input_context.project_ref(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let envelope = classify_invalid_execution_parameters(&error.to_string());
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "failed",
+                    "",
+                    "",
+                    None,
+                    &envelope.title_zh,
+                    Some(&envelope),
+                )
+                .await?;
+                return Ok(GraphNodeExecutionOutcome::Failed {
+                    kind: GraphNodeFailureKind::FailedPrecheck,
+                });
+            }
+        };
+        let sha =
+            match gitlab_executor::read_optional_string_param(&node.rendered_parameters, "sha") {
+                Some(value) if !value.is_empty() => Some(value),
+                _ => None,
+            };
+
+        let gitlab_result: std::result::Result<(String, String), FailureEnvelope> =
+            match node.node_type.as_str() {
+                "check_pipeline" => match gitlab::check_pipeline(
+                    cfg,
+                    &project_path,
+                    &reference,
+                    sha.as_deref(),
+                )
+                .await
+                {
+                    Ok(Some(pipeline)) if pipeline.status == "success" => Ok((
+                        format!("GitLab 流水线检查通过：#{}", pipeline.id),
+                        gitlab_executor::pipeline_evidence_text(&pipeline),
+                    )),
+                    Ok(Some(pipeline)) => Err(
+                        gitlab_executor::classify_gitlab_pipeline_status_failure(
+                            &pipeline,
+                            "check_pipeline",
+                        ),
+                    ),
+                    Ok(None) => Err(gitlab_executor::classify_pipeline_not_found(
+                        &project_path,
+                        &reference,
+                        sha.as_deref(),
+                    )),
+                    Err(error) => Err(gitlab_executor::classify_gitlab_error(&error.to_string())),
+                },
+                "trigger_pipeline" => {
+                    let variables =
+                        match gitlab_executor::read_pipeline_variables_param(&node.rendered_parameters)
+                        {
+                            Ok(value) => value,
+                            Err(error) => {
+                                let envelope =
+                                    classify_invalid_execution_parameters(&error.to_string());
+                                mark_pipeline_node_finished(
+                                    pool,
+                                    node.run_node_id,
+                                    "failed",
+                                    "",
+                                    "",
+                                    None,
+                                    &envelope.title_zh,
+                                    Some(&envelope),
+                                )
+                                .await?;
+                                return Ok(GraphNodeExecutionOutcome::Failed {
+                                    kind: GraphNodeFailureKind::FailedPrecheck,
+                                });
+                            }
+                        };
+                    match gitlab::trigger_pipeline(cfg, &project_path, &reference, &variables).await {
+                        Ok(pipeline) => Ok((
+                            format!("已触发下游流水线 #{}", pipeline.id),
+                            gitlab_executor::pipeline_evidence_text(&pipeline),
+                        )),
+                        Err(error) => Err(gitlab_executor::classify_gitlab_error(&error.to_string())),
+                    }
+                }
+                "wait_pipeline" => {
+                    let timeout_ms =
+                        match read_optional_u64_param(&node.rendered_parameters, "timeout_ms") {
+                            Ok(Some(value)) => value,
+                            Ok(None) => DEFAULT_PIPELINE_WAIT_TIMEOUT_MS,
+                            Err(error) => {
+                                let envelope =
+                                    classify_invalid_execution_parameters(&error.to_string());
+                                mark_pipeline_node_finished(
+                                    pool,
+                                    node.run_node_id,
+                                    "failed",
+                                    "",
+                                    "",
+                                    None,
+                                    &envelope.title_zh,
+                                    Some(&envelope),
+                                )
+                                .await?;
+                                return Ok(GraphNodeExecutionOutcome::Failed {
+                                    kind: GraphNodeFailureKind::FailedPrecheck,
+                                });
+                            }
+                        };
+                    let poll_interval_ms = match read_optional_u64_param(
+                        &node.rendered_parameters,
+                        "poll_interval_ms",
+                    ) {
+                        Ok(Some(value)) if value > 0 => value,
+                        Ok(Some(_)) => DEFAULT_PIPELINE_WAIT_POLL_INTERVAL_MS,
+                        Ok(None) => DEFAULT_PIPELINE_WAIT_POLL_INTERVAL_MS,
+                        Err(error) => {
+                            let envelope =
+                                classify_invalid_execution_parameters(&error.to_string());
+                            mark_pipeline_node_finished(
+                                pool,
+                                node.run_node_id,
+                                "failed",
+                                "",
+                                "",
+                                None,
+                                &envelope.title_zh,
+                                Some(&envelope),
+                            )
+                            .await?;
+                            return Ok(GraphNodeExecutionOutcome::Failed {
+                                kind: GraphNodeFailureKind::FailedPrecheck,
+                            });
+                        }
+                    };
+
+                    let wait_deadline = Instant::now() + StdDuration::from_millis(timeout_ms);
+                    loop {
+                        match gitlab::check_pipeline(cfg, &project_path, &reference, sha.as_deref())
+                            .await
+                        {
+                            Ok(Some(pipeline)) if pipeline.status == "success" => {
+                                break Ok((
+                                    format!("远端流水线已完成：#{}", pipeline.id),
+                                    gitlab_executor::pipeline_evidence_text(&pipeline),
+                                ));
+                            }
+                            Ok(Some(pipeline)) if pipeline.status == "running" || pipeline.status == "pending" => {
+                                let elapsed_ms = timeout_ms.saturating_sub(
+                                    wait_deadline
+                                        .saturating_duration_since(Instant::now())
+                                        .as_millis() as u64,
+                                ) as u128;
+                                let wait_metadata =
+                                    gitlab_executor::update_wait_metadata_with_pipeline(
+                                        &project_path,
+                                        &reference,
+                                        sha.as_deref(),
+                                        Some(&pipeline),
+                                        elapsed_ms,
+                                        poll_interval_ms,
+                                        timeout_ms as u128,
+                                    )?;
+                                let summary = format!(
+                                    "等待远端流水线 #{}，当前状态：{}",
+                                    pipeline.id, pipeline.status
+                                );
+                                update_pipeline_node_wait_state(
+                                    pool,
+                                    node.run_node_id,
+                                    &summary,
+                                    &wait_metadata,
+                                )
+                                .await?;
+                                mark_pipeline_stage_waiting(pool, node.run_stage_id, &summary).await?;
+                                if Instant::now() >= wait_deadline {
+                                    break Err(gitlab_executor::classify_gitlab_error(
+                                        &format!(
+                                            "wait_pipeline timed out for project={project_path}, ref={reference}, pipeline_id={}",
+                                            pipeline.id
+                                        ),
+                                    ));
+                                }
+                                tokio::time::sleep(StdDuration::from_millis(poll_interval_ms)).await;
+                            }
+                            Ok(Some(pipeline)) => {
+                                break Err(gitlab_executor::classify_gitlab_pipeline_status_failure(
+                                    &pipeline,
+                                    "wait_pipeline",
+                                ));
+                            }
+                            Ok(None) => {
+                                break Err(gitlab_executor::classify_pipeline_not_found(
+                                    &project_path,
+                                    &reference,
+                                    sha.as_deref(),
+                                ));
+                            }
+                            Err(error) => {
+                                break Err(gitlab_executor::classify_gitlab_error(&error.to_string()));
+                            }
+                        }
+                    }
+                }
+                _ => unreachable!("checked gitlab node type"),
+            };
+
+        match gitlab_result {
+            Ok((summary, evidence)) => {
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "success",
+                    "",
+                    "",
+                    Some(0),
+                    &summary,
+                    None,
+                )
+                .await?;
+                if !evidence.is_empty() {
+                    sqlx::query(
+                        r#"UPDATE pipeline_run_nodes
+                           SET evidence = ?1, updated_at = ?2
+                         WHERE id = ?3"#,
+                    )
+                    .bind(evidence)
+                    .bind(now_rfc3339())
+                    .bind(node.run_node_id)
+                    .execute(pool)
+                    .await?;
+                }
+                return Ok(GraphNodeExecutionOutcome::Success {
+                    context: input_context,
+                });
+            }
+            Err(envelope) => {
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "failed",
+                    "",
+                    "",
+                    None,
+                    &envelope.title_zh,
+                    Some(&envelope),
+                )
+                .await?;
+                return Ok(GraphNodeExecutionOutcome::Failed {
+                    kind: GraphNodeFailureKind::Failed,
+                });
+            }
+        }
+    }
+
+    let operation = match build_execution_step_operation(
+        &node.node_type,
+        &node.rendered_parameters,
+        input_context.project_ref(),
+        input_context.working_dir(),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            let envelope = classify_invalid_execution_parameters(&error.to_string());
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "failed",
+                "",
+                "",
+                None,
+                &envelope.title_zh,
+                Some(&envelope),
+            )
+            .await?;
+            return Ok(GraphNodeExecutionOutcome::Failed {
+                kind: GraphNodeFailureKind::FailedPrecheck,
+            });
+        }
+    };
+
+    match operation {
+        StepOperation::SetWorkingPath { ref target_path } => {
+            if let Err(error) = run_execution_step_prechecks(
+                input_context.working_dir(),
+                input_context.project_ref(),
+                &operation,
+            )
+            .await
+            {
+                let envelope = classify_precheck_failure(&error.to_string());
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "failed",
+                    "",
+                    "",
+                    None,
+                    &envelope.title_zh,
+                    Some(&envelope),
+                )
+                .await?;
+                return Ok(GraphNodeExecutionOutcome::Failed {
+                    kind: GraphNodeFailureKind::FailedPrecheck,
+                });
+            }
+
+            let mut next_context = input_context.clone();
+            next_context.working_dir = Some(target_path.clone());
+            let summary = format!("执行路径已切换到 {}", target_path.display());
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "success",
+                "",
+                "",
+                Some(0),
+                &summary,
+                None,
+            )
+            .await?;
+            Ok(GraphNodeExecutionOutcome::Success {
+                context: next_context,
+            })
+        }
+        _ => {
+            let Some(working_dir) = input_context.working_dir() else {
+                let envelope =
+                    classify_precheck_failure("working directory is required for this step");
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "failed",
+                    "",
+                    "",
+                    None,
+                    &envelope.title_zh,
+                    Some(&envelope),
+                )
+                .await?;
+                return Ok(GraphNodeExecutionOutcome::Failed {
+                    kind: GraphNodeFailureKind::FailedPrecheck,
+                });
+            };
+
+            if let Err(error) = run_execution_step_prechecks(
+                Some(working_dir),
+                input_context.project_ref(),
+                &operation,
+            )
+            .await
+            {
+                let envelope = classify_precheck_failure(&error.to_string());
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "failed",
+                    "",
+                    "",
+                    None,
+                    &envelope.title_zh,
+                    Some(&envelope),
+                )
+                .await?;
+                return Ok(GraphNodeExecutionOutcome::Failed {
+                    kind: GraphNodeFailureKind::FailedPrecheck,
+                });
+            }
+
+            let working_dir_display = input_context
+                .working_dir_display()
+                .ok_or_else(|| anyhow!("working directory is required for this step"))?;
+            let repo_lease = get_repo_lease(&working_dir_display).await;
+            let _repo_guard = repo_lease.lock().await;
+            let command_result =
+                execute_git_command(working_dir_display, operation.to_args()).await?;
+
+            if command_result.success {
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "success",
+                    &command_result.stdout,
+                    &command_result.stderr,
+                    command_result.exit_code,
+                    "node completed",
+                    None,
+                )
+                .await?;
+                Ok(GraphNodeExecutionOutcome::Success {
+                    context: input_context,
+                })
+            } else {
+                let envelope =
+                    git_executor::classify_git_command_failure(&node.node_type, &command_result);
+                mark_pipeline_node_finished(
+                    pool,
+                    node.run_node_id,
+                    "failed",
+                    &command_result.stdout,
+                    &command_result.stderr,
+                    command_result.exit_code,
+                    &envelope.title_zh,
+                    Some(&envelope),
+                )
+                .await?;
+                Ok(GraphNodeExecutionOutcome::Failed {
+                    kind: GraphNodeFailureKind::Failed,
+                })
+            }
+        }
+    }
 }
 
 async fn mark_remaining_pipeline_nodes_skipped(
@@ -1651,6 +2667,379 @@ async fn execute_pipeline_project_plan(
     Ok(ProjectOutcome::Success)
 }
 
+fn collect_graph_stage_ready_nodes(
+    plans: &[PipelineGraphExecutionPlan],
+    stage_order: i64,
+    node_statuses: &HashMap<(usize, String), String>,
+) -> Vec<(usize, String)> {
+    let mut ready = Vec::<(usize, i64, String)>::new();
+    for (plan_index, plan) in plans.iter().enumerate() {
+        let Some(node_keys) = plan.stage_node_keys.get(&stage_order) else {
+            continue;
+        };
+        for node_key in node_keys {
+            let Some(node) = plan.nodes_by_key.get(node_key) else {
+                continue;
+            };
+            let status = node_statuses
+                .get(&(plan_index, node_key.clone()))
+                .map(String::as_str)
+                .unwrap_or("pending");
+            if status != "pending" {
+                continue;
+            }
+            let dependencies_ready = node.predecessors.iter().all(|predecessor_key| {
+                node_statuses
+                    .get(&(plan_index, predecessor_key.clone()))
+                    .map(|value| is_graph_dependency_satisfied(value))
+                    .unwrap_or(false)
+            });
+            if dependencies_ready {
+                ready.push((plan_index, node.node_order, node_key.clone()));
+            }
+        }
+    }
+    ready.sort_by_key(|(plan_index, node_order, _)| (*node_order, *plan_index));
+    ready.into_iter().map(|(plan_index, _, node_key)| (plan_index, node_key)).collect()
+}
+
+async fn run_pipeline_graph_in_background(
+    pool: SqlitePool,
+    pipeline_run_id: i64,
+    stages: Vec<SeededPipelineRunStage>,
+    plans: Vec<PipelineGraphExecutionPlan>,
+    max_concurrency: i64,
+    gitlab_cfg: Option<GitLabConfig>,
+    reused_stage_orders: HashSet<i64>,
+    initial_node_statuses: HashMap<(usize, String), String>,
+    initial_completed_contexts: HashMap<(usize, String), PipelineExecutionContextState>,
+) -> Result<()> {
+    if plans.is_empty() {
+        mark_pipeline_run_finished(&pool, pipeline_run_id, "completed").await?;
+        return Ok(());
+    }
+
+    let max_concurrency = usize::try_from(max_concurrency.max(1))
+        .map_err(|_| anyhow!("max_concurrency is out of range"))?;
+
+    for plan in &plans {
+        mark_pipeline_project_running(&pool, plan.run_project_id).await?;
+    }
+
+    let mut node_statuses = initial_node_statuses;
+    let mut completed_contexts = initial_completed_contexts;
+    let base_contexts = plans
+        .iter()
+        .map(|plan| {
+            plan.project
+                .as_ref()
+                .map(PipelineExecutionContextState::from_project)
+                .unwrap_or_else(PipelineExecutionContextState::empty)
+        })
+        .collect::<Vec<_>>();
+    let mut plan_failed = vec![false; plans.len()];
+    let mut plan_failed_precheck = vec![false; plans.len()];
+    let mut plan_cancelled = vec![false; plans.len()];
+    let mut run_cancelled = false;
+    let mut run_failed = false;
+    let mut blocked_stage_message: Option<String> = None;
+
+    for stage in &stages {
+        if reused_stage_orders.contains(&stage.stage_order) {
+            continue;
+        }
+        if is_pipeline_run_cancelling(&pool, pipeline_run_id).await? {
+            run_cancelled = true;
+            mark_pipeline_stage_finished(&pool, stage.run_stage_id, "cancelled", "运行已取消").await?;
+            continue;
+        }
+        if let Some(message) = &blocked_stage_message {
+            mark_pipeline_stage_blocked(&pool, stage.run_stage_id, message).await?;
+            continue;
+        }
+
+        mark_pipeline_stage_running(&pool, stage.run_stage_id).await?;
+        let mut stage_failed_kind: Option<GraphNodeFailureKind> = None;
+        let mut join_set = JoinSet::new();
+
+        loop {
+            let ready_nodes = if stage_failed_kind.is_none() {
+                collect_graph_stage_ready_nodes(&plans, stage.stage_order, &node_statuses)
+            } else {
+                Vec::new()
+            };
+
+            for (plan_index, node_key) in ready_nodes {
+                if join_set.len() >= max_concurrency {
+                    break;
+                }
+                let status_key = (plan_index, node_key.clone());
+                if node_statuses
+                    .get(&status_key)
+                    .map(String::as_str)
+                    .unwrap_or("pending")
+                    != "pending"
+                {
+                    continue;
+                }
+                let plan = plans[plan_index].clone();
+                let node = plan
+                    .nodes_by_key
+                    .get(&node_key)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("graph node missing from plan: {node_key}"))?;
+                let contexts_snapshot = completed_contexts.clone();
+                let gitlab_cfg = gitlab_cfg.clone();
+                let base_context = base_contexts[plan_index].clone();
+                mark_pipeline_node_running(&pool, node.run_node_id).await?;
+                node_statuses.insert(status_key, "running".to_string());
+                let pool_cloned = pool.clone();
+                join_set.spawn(async move {
+                    let result = execute_graph_node(
+                        &pool_cloned,
+                        &plan,
+                        plan_index,
+                        &node,
+                        gitlab_cfg.as_ref(),
+                        &base_context,
+                        &contexts_snapshot,
+                    )
+                    .await;
+                    (plan_index, node, result)
+                });
+            }
+
+            if join_set.is_empty() {
+                break;
+            }
+
+            let (plan_index, node, outcome) = match join_set.join_next().await {
+                Some(Ok(value)) => value,
+                Some(Err(error)) => {
+                    return Err(anyhow!("stage runtime task join failed: {error}"));
+                }
+                None => break,
+            };
+
+            match outcome? {
+                GraphNodeExecutionOutcome::Success { context } => {
+                    node_statuses.insert((plan_index, node.node_key.clone()), "success".to_string());
+                    completed_contexts.insert((plan_index, node.node_key.clone()), context);
+                }
+                GraphNodeExecutionOutcome::Failed { kind } => {
+                    node_statuses.insert((plan_index, node.node_key.clone()), "failed".to_string());
+                    match kind {
+                        GraphNodeFailureKind::Failed => {
+                            plan_failed[plan_index] = true;
+                            run_failed = true;
+                        }
+                        GraphNodeFailureKind::FailedPrecheck => {
+                            plan_failed_precheck[plan_index] = true;
+                            run_failed = true;
+                        }
+                        GraphNodeFailureKind::Cancelled => {
+                            plan_cancelled[plan_index] = true;
+                            run_cancelled = true;
+                        }
+                    }
+                    stage_failed_kind.get_or_insert(kind);
+                }
+            }
+        }
+
+        let mut stage_has_success = false;
+        let mut stage_has_failure = false;
+        for (plan_index, plan) in plans.iter().enumerate() {
+            for node_key in plan
+                .stage_node_keys
+                .get(&stage.stage_order)
+                .cloned()
+                .unwrap_or_default()
+            {
+                match node_statuses
+                    .get(&(plan_index, node_key))
+                    .map(String::as_str)
+                    .unwrap_or("pending")
+                {
+                    "success" => stage_has_success = true,
+                    "failed" => stage_has_failure = true,
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(kind) = stage_failed_kind {
+            for (plan_index, plan) in plans.iter().enumerate() {
+                let pending_current_stage = plan
+                    .stage_node_keys
+                    .get(&stage.stage_order)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|node_key| {
+                        node_statuses
+                            .get(&(plan_index, node_key.clone()))
+                            .map(String::as_str)
+                            .unwrap_or("pending")
+                            == "pending"
+                    })
+                    .collect::<Vec<_>>();
+                if !pending_current_stage.is_empty() {
+                    mark_graph_nodes_with_status(
+                        &pool,
+                        plan,
+                        &pending_current_stage,
+                        "skipped",
+                        "同阶段已有节点失败，未再调度当前节点",
+                    )
+                    .await?;
+                    for node_key in pending_current_stage {
+                        node_statuses.insert((plan_index, node_key), "skipped".to_string());
+                    }
+                }
+
+                let downstream_node_keys = plan
+                    .stage_node_keys
+                    .iter()
+                    .filter(|(order, _)| **order > stage.stage_order)
+                    .flat_map(|(_, node_keys)| node_keys.clone())
+                    .filter(|node_key| {
+                        node_statuses
+                            .get(&(plan_index, node_key.clone()))
+                            .map(String::as_str)
+                            .unwrap_or("pending")
+                            == "pending"
+                    })
+                    .collect::<Vec<_>>();
+                if !downstream_node_keys.is_empty() {
+                    mark_graph_nodes_with_status(
+                        &pool,
+                        plan,
+                        &downstream_node_keys,
+                        "skipped",
+                        &format!("阶段 {} 失败，后续阶段未启动", stage.stage_name),
+                    )
+                    .await?;
+                    for node_key in downstream_node_keys {
+                        node_statuses.insert((plan_index, node_key), "skipped".to_string());
+                    }
+                }
+            }
+
+            let summary = format!("阶段 {} 失败，已阻断后续阶段", stage.stage_name);
+            let stage_status = match kind {
+                GraphNodeFailureKind::FailedPrecheck | GraphNodeFailureKind::Failed => {
+                    if stage_has_success && stage_has_failure {
+                        "partial_failed"
+                    } else {
+                        "failed"
+                    }
+                }
+                GraphNodeFailureKind::Cancelled => "cancelled",
+            };
+            mark_pipeline_stage_finished(&pool, stage.run_stage_id, stage_status, &summary).await?;
+            blocked_stage_message = Some(summary);
+            continue;
+        }
+
+        mark_pipeline_stage_finished(&pool, stage.run_stage_id, "success", "阶段执行完成").await?;
+    }
+
+    for (plan_index, plan) in plans.iter().enumerate() {
+        let status = if plan_failed[plan_index] {
+            "failed"
+        } else if plan_failed_precheck[plan_index] {
+            "failed_precheck"
+        } else if plan_cancelled[plan_index] || blocked_stage_message.is_some() {
+            "cancelled"
+        } else {
+            "success"
+        };
+        let summary = match status {
+            "failed" => "图执行失败",
+            "failed_precheck" => "图执行预检查失败",
+            "cancelled" => "图执行已停止",
+            _ => "图执行完成",
+        };
+        mark_pipeline_project_finished(&pool, plan.run_project_id, status, summary).await?;
+    }
+
+    let final_status = derive_run_final_status(run_failed, run_cancelled);
+    mark_pipeline_run_finished(&pool, pipeline_run_id, final_status).await?;
+    Ok(())
+}
+
+fn collect_graph_descendants(
+    rendered_nodes: &[RenderedPipelineGraphNodeDefinition],
+    root_node_key: &str,
+) -> HashSet<String> {
+    let mut successors_by_key = HashMap::<String, Vec<String>>::new();
+    for node in rendered_nodes {
+        successors_by_key.insert(node.node_key.clone(), node.successors.clone());
+    }
+
+    let mut descendants = HashSet::new();
+    let mut stack = vec![root_node_key.to_string()];
+    while let Some(node_key) = stack.pop() {
+        if !descendants.insert(node_key.clone()) {
+            continue;
+        }
+        if let Some(successors) = successors_by_key.get(&node_key) {
+            for successor in successors {
+                stack.push(successor.clone());
+            }
+        }
+    }
+    descendants
+}
+
+async fn derive_reused_graph_contexts(
+    pool: &SqlitePool,
+    plan_index: usize,
+    plan: &PipelineGraphExecutionPlan,
+    reused_node_keys: &HashSet<String>,
+    base_context: &PipelineExecutionContextState,
+) -> Result<HashMap<(usize, String), PipelineExecutionContextState>> {
+    let mut contexts = HashMap::<(usize, String), PipelineExecutionContextState>::new();
+    let mut nodes = plan.nodes_by_key.values().cloned().collect::<Vec<_>>();
+    nodes.sort_by_key(|node| (node.stage_order, node.node_order));
+
+    for node in nodes {
+        if !reused_node_keys.contains(&node.node_key) {
+            continue;
+        }
+        let input_context =
+            resolve_graph_node_input_context(base_context, &node, &contexts, plan_index)?;
+        let output_context = match node.node_type.as_str() {
+            "switch_project" => {
+                let managed_project_id = read_switch_project_id(&node.rendered_parameters)?;
+                let project = load_enabled_managed_project(pool, managed_project_id).await?;
+                PipelineExecutionContextState::from_project(&project)
+            }
+            "set_working_path" => {
+                let operation = build_execution_step_operation(
+                    &node.node_type,
+                    &node.rendered_parameters,
+                    input_context.project_ref(),
+                    input_context.working_dir(),
+                )?;
+                match operation {
+                    StepOperation::SetWorkingPath { target_path } => {
+                        let mut next_context = input_context.clone();
+                        next_context.working_dir = Some(target_path);
+                        next_context
+                    }
+                    _ => input_context.clone(),
+                }
+            }
+            _ => input_context.clone(),
+        };
+        contexts.insert((plan_index, node.node_key.clone()), output_context);
+    }
+
+    Ok(contexts)
+}
+
 async fn mark_unscheduled_pipeline_plans_cancelled(
     pool: &SqlitePool,
     plans: &[PipelineProjectExecutionPlan],
@@ -1893,6 +3282,45 @@ async fn start_pipeline_run_with_projects(
         return Err(anyhow!("pipeline max concurrency must be >= 1"));
     }
 
+    if !pipeline.stages.is_empty() {
+        let (stages, rendered_nodes) = render_pipeline_graph_for_run(&pipeline, &run_parameters)?;
+        let graph_projects = projects.into_iter().map(Some).collect::<Vec<_>>();
+        let (pipeline_run_id, seeded_stages, plans) = seed_pipeline_graph_run(
+            pool,
+            pipeline.id,
+            project_group_id,
+            source_pipeline_run_id,
+            trigger_kind,
+            &run_parameters,
+            max_concurrency,
+            &stages,
+            &rendered_nodes,
+            graph_projects,
+        )
+        .await?;
+        let pool_for_task = pool.clone();
+        tokio::spawn(async move {
+            if let Err(error) = run_pipeline_graph_in_background(
+                pool_for_task.clone(),
+                pipeline_run_id,
+                seeded_stages,
+                plans,
+                max_concurrency,
+                gitlab_cfg,
+                HashSet::new(),
+                HashMap::new(),
+                HashMap::new(),
+            )
+            .await
+            {
+                tracing::error!(pipeline_run_id = pipeline_run_id, error = %error, "stage-aware pipeline background execution failed");
+                let _ =
+                    mark_pipeline_run_finished(&pool_for_task, pipeline_run_id, "partial_failed").await;
+            }
+        });
+        return Ok(pipeline_run_id);
+    }
+
     let rendered_nodes = render_pipeline_nodes_for_run(&pipeline.nodes, &run_parameters)?;
     let (pipeline_run_id, plans) = seed_pipeline_run_and_children(
         pool,
@@ -1945,7 +3373,6 @@ async fn start_pipeline_run_with_segments(
     let pipeline = db::load_pipeline_definition_for_execution(pool, pipeline_definition_id).await?;
     let gitlab_cfg = load_runtime_gitlab_config(pool).await?;
     let run_parameters = normalize_pipeline_run_parameters(&pipeline.variables, run_parameters)?;
-    let rendered_nodes = render_pipeline_nodes_for_run(&pipeline.nodes, &run_parameters)?;
     let max_concurrency = match max_concurrency_override {
         Some(value) if value >= 1 => value,
         Some(value) => {
@@ -1959,6 +3386,54 @@ async fn start_pipeline_run_with_segments(
         return Err(anyhow!("pipeline max concurrency must be >= 1"));
     }
 
+    if !pipeline.stages.is_empty() {
+        if selected_managed_project_ids.is_some() {
+            return Err(anyhow!(
+                "stage-aware graph retry with managed project filtering is not supported yet"
+            ));
+        }
+        let (stages, rendered_nodes) = render_pipeline_graph_for_run(&pipeline, &run_parameters)?;
+        let (pipeline_run_id, seeded_stages, plans) = seed_pipeline_graph_run(
+            pool,
+            pipeline.id,
+            None,
+            source_pipeline_run_id,
+            trigger_kind,
+            &run_parameters,
+            max_concurrency,
+            &stages,
+            &rendered_nodes,
+            vec![None],
+        )
+        .await?;
+        let pool_for_task = pool.clone();
+        tokio::spawn(async move {
+            if let Err(error) = run_pipeline_graph_in_background(
+                pool_for_task.clone(),
+                pipeline_run_id,
+                seeded_stages,
+                plans,
+                max_concurrency,
+                gitlab_cfg,
+                HashSet::new(),
+                HashMap::new(),
+                HashMap::new(),
+            )
+            .await
+            {
+                tracing::error!(
+                    pipeline_run_id = pipeline_run_id,
+                    error = %error,
+                    "stage-aware pipeline background execution failed"
+                );
+                let _ = mark_pipeline_run_finished(&pool_for_task, pipeline_run_id, "partial_failed")
+                    .await;
+            }
+        });
+        return Ok(pipeline_run_id);
+    }
+
+    let rendered_nodes = render_pipeline_nodes_for_run(&pipeline.nodes, &run_parameters)?;
     let mut segments = build_pipeline_segment_seeds(pool, &rendered_nodes).await?;
     if let Some(selected_project_ids) = selected_managed_project_ids {
         segments.retain(|segment| {
@@ -2124,7 +3599,7 @@ pub(crate) async fn cancel_pipeline_run(pool: &SqlitePool, pipeline_run_id: i64)
     }
 }
 
-pub(crate) async fn retry_pipeline_run(
+pub(crate) async fn retry_pipeline_run_legacy(
     pool: &SqlitePool,
     source_pipeline_run_id: i64,
     selected_managed_project_ids: Option<Vec<i64>>,
@@ -2219,6 +3694,254 @@ pub(crate) async fn retry_pipeline_run(
         projects,
     )
     .await
+}
+
+pub(crate) async fn retry_pipeline_run(
+    pool: &SqlitePool,
+    request: PipelineRunRetryRequest,
+) -> Result<i64> {
+    let retry_mode = request.retry_mode.as_deref().unwrap_or("");
+    if retry_mode.is_empty() && request.selected_managed_project_ids.is_some() {
+        return retry_pipeline_run_legacy(
+            pool,
+            request.source_pipeline_run_id,
+            request.selected_managed_project_ids,
+            request.max_concurrency_override,
+        )
+        .await;
+    }
+
+    let source_run = load_pipeline_retry_source_run(pool, request.source_pipeline_run_id).await?;
+    let merged_run_parameters = match request.run_parameters_override {
+        Some(override_value) => {
+            let mut merged = source_run.run_parameters.clone();
+            let target = merged
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("source pipeline run parameters must be a JSON object"))?;
+            let override_map = normalize_run_parameters(override_value)?
+                .as_object()
+                .cloned()
+                .ok_or_else(|| anyhow!("run_parameters_override must be a JSON object"))?;
+            for (key, value) in override_map {
+                target.insert(key, value);
+            }
+            merged
+        }
+        None => source_run.run_parameters,
+    };
+
+    let execution_definition =
+        db::load_pipeline_definition_for_execution(pool, source_run.pipeline_definition_id).await?;
+    let graph_mode = !execution_definition.stages.is_empty();
+
+    if matches!(retry_mode, "stage" | "node") {
+        if !graph_mode {
+            return Err(anyhow!("linear pipeline definitions do not support stage/node derived retries"));
+        }
+        if source_run.project_group_id.is_some() {
+            return Err(anyhow!(
+                "stage/node derived retries are currently only supported for no-group stage-aware pipeline runs"
+            ));
+        }
+
+        let source_detail = db::get_pipeline_run_detail(pool, request.source_pipeline_run_id).await?;
+        if source_detail.projects.len() != 1 {
+            return Err(anyhow!(
+                "stage/node derived retries currently require exactly one runtime project lane"
+            ));
+        }
+
+        let (rendered_stages, rendered_nodes) =
+            render_pipeline_graph_for_run(&execution_definition, &merged_run_parameters)?;
+        let node_key_by_pipeline_node_id = rendered_nodes
+            .iter()
+            .map(|node| (node.pipeline_node_id, node.node_key.clone()))
+            .collect::<HashMap<_, _>>();
+        let source_node_status_by_key = source_detail.projects[0]
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                node.pipeline_node_id.and_then(|pipeline_node_id| {
+                    node_key_by_pipeline_node_id
+                        .get(&pipeline_node_id)
+                        .cloned()
+                        .map(|node_key| (node_key, node.status.clone()))
+                })
+            })
+            .collect::<HashMap<_, _>>();
+
+        let rerun_node_keys = if retry_mode == "stage" {
+            let target_stage_id = request
+                .target_stage_id
+                .ok_or_else(|| anyhow!("target_stage_id is required for stage retry"))?;
+            let target_stage_order = rendered_stages
+                .iter()
+                .find(|stage| stage.pipeline_stage_id == target_stage_id)
+                .map(|stage| stage.stage_order)
+                .ok_or_else(|| anyhow!("target stage not found in current pipeline definition"))?;
+            rendered_nodes
+                .iter()
+                .filter(|node| node.stage_order >= target_stage_order)
+                .map(|node| node.node_key.clone())
+                .collect::<HashSet<_>>()
+        } else {
+            let target_run_node_id = request
+                .target_run_node_id
+                .ok_or_else(|| anyhow!("target_run_node_id is required for node retry"))?;
+            let target_node_key = source_detail.projects[0]
+                .nodes
+                .iter()
+                .find(|node| node.id == target_run_node_id)
+                .and_then(|node| node.pipeline_node_id)
+                .and_then(|pipeline_node_id| node_key_by_pipeline_node_id.get(&pipeline_node_id).cloned())
+                .ok_or_else(|| anyhow!("target run node not found in current pipeline definition"))?;
+            collect_graph_descendants(&rendered_nodes, &target_node_key)
+        };
+
+        let reused_node_keys = rendered_nodes
+            .iter()
+            .filter(|node| !rerun_node_keys.contains(&node.node_key))
+            .filter_map(|node| {
+                let status = source_node_status_by_key.get(&node.node_key)?;
+                (status == "success").then_some(node.node_key.clone())
+            })
+            .collect::<HashSet<_>>();
+        let reused_stage_orders = rendered_stages
+            .iter()
+            .filter_map(|stage| {
+                let stage_node_keys = rendered_nodes
+                    .iter()
+                    .filter(|node| node.stage_order == stage.stage_order)
+                    .map(|node| node.node_key.clone())
+                    .collect::<Vec<_>>();
+                (!stage_node_keys.is_empty()
+                    && stage_node_keys
+                        .iter()
+                        .all(|node_key| reused_node_keys.contains(node_key)))
+                .then_some(stage.stage_order)
+            })
+            .collect::<HashSet<_>>();
+
+        let gitlab_cfg = load_runtime_gitlab_config(pool).await?;
+        let max_concurrency = request
+            .max_concurrency_override
+            .unwrap_or(execution_definition.max_concurrency_default);
+        let (pipeline_run_id, seeded_stages, plans) = seed_pipeline_graph_run(
+            pool,
+            execution_definition.id,
+            None,
+            Some(request.source_pipeline_run_id),
+            if retry_mode == "stage" {
+                "retry_stage"
+            } else {
+                "retry_node"
+            },
+            &merged_run_parameters,
+            max_concurrency,
+            &rendered_stages,
+            &rendered_nodes,
+            vec![None],
+        )
+        .await?;
+
+        let plan = plans
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow!("seeded retry graph plan is missing"))?;
+        for stage in &seeded_stages {
+            if reused_stage_orders.contains(&stage.stage_order) {
+                mark_pipeline_stage_finished(
+                    pool,
+                    stage.run_stage_id,
+                    "reused",
+                    "复用上次成功阶段结果",
+                )
+                .await?;
+            }
+        }
+
+        let mut initial_node_statuses = HashMap::<(usize, String), String>::new();
+        for node_key in &reused_node_keys {
+            let node = plan
+                .nodes_by_key
+                .get(node_key)
+                .ok_or_else(|| anyhow!("reused node missing from retry plan: {node_key}"))?;
+            mark_pipeline_node_finished(
+                pool,
+                node.run_node_id,
+                "skipped",
+                "",
+                "",
+                None,
+                "复用上次成功结果",
+                None,
+            )
+            .await?;
+            initial_node_statuses.insert((0, node_key.clone()), "reused".to_string());
+        }
+        let initial_completed_contexts = derive_reused_graph_contexts(
+            pool,
+            0,
+            &plan,
+            &reused_node_keys,
+            &PipelineExecutionContextState::empty(),
+        )
+        .await?;
+
+        let pool_for_task = pool.clone();
+        tokio::spawn(async move {
+            if let Err(error) = run_pipeline_graph_in_background(
+                pool_for_task.clone(),
+                pipeline_run_id,
+                seeded_stages,
+                plans,
+                max_concurrency,
+                gitlab_cfg,
+                reused_stage_orders,
+                initial_node_statuses,
+                initial_completed_contexts,
+            )
+            .await
+            {
+                tracing::error!(
+                    pipeline_run_id = pipeline_run_id,
+                    error = %error,
+                    "stage/node retry background execution failed"
+                );
+                let _ = mark_pipeline_run_finished(&pool_for_task, pipeline_run_id, "partial_failed")
+                    .await;
+            }
+        });
+        return Ok(pipeline_run_id);
+    }
+
+    match source_run.project_group_id {
+        Some(project_group_id) => {
+            let mut projects = db::list_project_group_projects(pool, project_group_id).await?;
+            projects.retain(|project| project.enabled);
+            start_pipeline_run_with_projects(
+                pool,
+                source_run.pipeline_definition_id,
+                Some(project_group_id),
+                merged_run_parameters,
+                request.max_concurrency_override,
+                Some(request.source_pipeline_run_id),
+                "retry_full_run",
+                projects,
+            )
+            .await
+        }
+        None => start_pipeline_run_with_segments(
+            pool,
+            source_run.pipeline_definition_id,
+            request.max_concurrency_override,
+            Some(request.source_pipeline_run_id),
+            "retry_full_run",
+            merged_run_parameters,
+            None,
+        )
+        .await,
+    }
 }
 
 #[cfg(test)]

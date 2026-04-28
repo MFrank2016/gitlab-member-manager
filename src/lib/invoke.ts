@@ -542,8 +542,15 @@ export async function retryPipelineRun(request: PipelineRunRetryRequest) {
   return loggedInvoke<PipelineRunExecuteResult>("retry_pipeline_run", {
     request: {
       sourcePipelineRunId: request.sourcePipelineRunId,
+      retryMode: request.retryMode ?? null,
+      targetStageId: request.targetStageId ?? null,
+      targetRunNodeId: request.targetRunNodeId ?? null,
       selectedManagedProjectIds: request.selectedManagedProjectIds ?? null,
       maxConcurrencyOverride: request.maxConcurrencyOverride ?? null,
+      runParametersOverride: normalizeJsonObject(
+        request.runParametersOverride,
+        "runParametersOverride"
+      ),
     },
   });
 }

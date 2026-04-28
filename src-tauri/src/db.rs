@@ -714,11 +714,29 @@ pub struct WorkflowExecutionDefinition {
 }
 
 #[derive(Debug, Clone)]
+pub struct PipelineExecutionStageDef {
+    pub id: i64,
+    pub stage_key: String,
+    pub name: String,
+    pub stage_order: i64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct PipelineExecutionNodeDef {
     pub id: i64,
     pub node_order: i64,
     pub node_type: String,
     pub parameters: Value,
+    pub stage_key: Option<String>,
+    pub node_key: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PipelineExecutionEdgeDef {
+    pub source_node_key: String,
+    pub target_node_key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -726,7 +744,9 @@ pub struct PipelineExecutionDefinition {
     pub id: i64,
     pub max_concurrency_default: i64,
     pub variables: Vec<PipelineVariable>,
+    pub stages: Vec<PipelineExecutionStageDef>,
     pub nodes: Vec<PipelineExecutionNodeDef>,
+    pub edges: Vec<PipelineExecutionEdgeDef>,
 }
 
 async fn insert_workflow_steps(
@@ -888,12 +908,40 @@ pub async fn load_pipeline_definition_for_execution(
         });
     }
 
-    let node_rows = sqlx::query_as::<_, (i64, i64, String, String)>(
+    let stage_rows = sqlx::query_as::<_, (i64, String, String, i64, i64)>(
         r#"SELECT
-         id, node_order, node_type, parameters_json
-       FROM pipeline_nodes
+         id, stage_key, name, stage_order, enabled
+       FROM pipeline_stages
        WHERE pipeline_definition_id = ?1
-       ORDER BY node_order ASC, id ASC"#,
+       ORDER BY stage_order ASC, id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+    let mut stages = Vec::with_capacity(stage_rows.len());
+    for row in stage_rows {
+        stages.push(PipelineExecutionStageDef {
+            id: row.0,
+            stage_key: row.1,
+            name: row.2,
+            stage_order: row.3,
+            enabled: row.4 != 0,
+        });
+    }
+
+    let node_rows = sqlx::query_as::<_, (i64, i64, String, String, Option<String>, Option<String>, i64)>(
+        r#"SELECT
+         n.id,
+         n.node_order,
+         n.node_type,
+         n.parameters_json,
+         s.stage_key,
+         n.node_key,
+         n.enabled
+       FROM pipeline_nodes n
+       LEFT JOIN pipeline_stages s ON s.id = n.stage_id
+       WHERE n.pipeline_definition_id = ?1
+       ORDER BY n.node_order ASC, n.id ASC"#,
     )
     .bind(pipeline_definition_id)
     .fetch_all(pool)
@@ -912,6 +960,30 @@ pub async fn load_pipeline_definition_for_execution(
             node_order: row.1,
             node_type: row.2,
             parameters: deserialize_json_object(&row.3, "pipeline node parameters")?,
+            stage_key: row.4,
+            node_key: row.5,
+            enabled: row.6 != 0,
+        });
+    }
+
+    let edge_rows = sqlx::query_as::<_, (String, String)>(
+        r#"SELECT
+             source.node_key,
+             target.node_key
+           FROM pipeline_edges e
+           JOIN pipeline_nodes source ON source.id = e.source_node_id
+           JOIN pipeline_nodes target ON target.id = e.target_node_id
+           WHERE e.pipeline_definition_id = ?1
+           ORDER BY e.id ASC"#,
+    )
+    .bind(pipeline_definition_id)
+    .fetch_all(pool)
+    .await?;
+    let mut edges = Vec::with_capacity(edge_rows.len());
+    for row in edge_rows {
+        edges.push(PipelineExecutionEdgeDef {
+            source_node_key: row.0,
+            target_node_key: row.1,
         });
     }
 
@@ -919,7 +991,9 @@ pub async fn load_pipeline_definition_for_execution(
         id,
         max_concurrency_default,
         variables,
+        stages,
         nodes,
+        edges,
     })
 }
 
@@ -2893,7 +2967,6 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
     .bind(id)
     .fetch_all(&mut *tx)
     .await?;
-
     let mut nodes_by_project_id = HashMap::<i64, Vec<PipelineRunNode>>::new();
     for node_row in node_rows {
         let node = PipelineRunNode {
@@ -2951,6 +3024,7 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
     }
 
     tx.commit().await?;
+    let stages = load_pipeline_run_stages(pool, id).await?;
 
     Ok(PipelineRunDetail {
         id: row.id,
@@ -2978,6 +3052,7 @@ pub async fn get_pipeline_run_detail(pool: &SqlitePool, id: i64) -> Result<Pipel
         finished_at: row.finished_at,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        stages,
         projects,
     })
 }

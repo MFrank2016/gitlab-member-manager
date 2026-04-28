@@ -445,6 +445,7 @@ pub struct PipelineRunDetail {
     pub finished_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub stages: Vec<PipelineRunStage>,
     pub projects: Vec<PipelineRunProject>,
 }
 
@@ -631,9 +632,17 @@ pub struct PipelineRunExecuteResult {
 pub struct PipelineRunRetryRequest {
     pub source_pipeline_run_id: i64,
     #[serde(default)]
+    pub retry_mode: Option<String>,
+    #[serde(default)]
+    pub target_stage_id: Option<i64>,
+    #[serde(default)]
+    pub target_run_node_id: Option<i64>,
+    #[serde(default)]
     pub selected_managed_project_ids: Option<Vec<i64>>,
     #[serde(default)]
     pub max_concurrency_override: Option<i64>,
+    #[serde(default)]
+    pub run_parameters_override: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

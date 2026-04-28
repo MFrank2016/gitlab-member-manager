@@ -1,5 +1,6 @@
 use crate::{pipeline_runtime, workflow_runtime_legacy};
 use anyhow::Result;
+use crate::models::PipelineRunRetryRequest;
 use serde_json::Value;
 use sqlx::SqlitePool;
 
@@ -85,13 +86,20 @@ pub async fn retry_pipeline_run(
     selected_managed_project_ids: Option<Vec<i64>>,
     max_concurrency_override: Option<i64>,
 ) -> Result<i64> {
-    pipeline_runtime::retry_pipeline_run(
+    pipeline_runtime::retry_pipeline_run_legacy(
         pool,
         source_pipeline_run_id,
         selected_managed_project_ids,
         max_concurrency_override,
     )
     .await
+}
+
+pub async fn retry_pipeline_run_with_request(
+    pool: &SqlitePool,
+    request: PipelineRunRetryRequest,
+) -> Result<i64> {
+    pipeline_runtime::retry_pipeline_run(pool, request).await
 }
 
 #[cfg(test)]
@@ -105,7 +113,10 @@ mod tests {
         build_execution_step_operation, run_execution_step_prechecks, run_repository_precheck,
         StepOperation,
     };
-    use crate::models::{ManagedProject, PipelineNodeInput, WorkflowStepInput};
+    use crate::models::{
+        ManagedProject, PipelineEdgeInput, PipelineGraphNodeInput, PipelineNodeInput,
+        PipelineRunRetryRequest, PipelineStageInput, WorkflowStepInput,
+    };
     use crate::runtime_support::{
         derive_run_final_status, derive_run_final_status_from_project_counts, get_repo_lease,
         normalize_run_parameters, now_rfc3339, ProjectExecutionStep, ProjectOutcome,
@@ -261,48 +272,48 @@ mod tests {
                     Ok(value) => value,
                     Err(_) => break,
                 };
-
-                let mut raw = Vec::new();
-                let mut header_end = None;
-                let mut content_length = 0usize;
-                loop {
-                    let mut buffer = vec![0_u8; 2048];
-                    let bytes_read = match stream.read(&mut buffer).await {
-                        Ok(value) => value,
-                        Err(_) => return,
-                    };
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    raw.extend_from_slice(&buffer[..bytes_read]);
-
-                    if header_end.is_none() {
-                        let header_probe = String::from_utf8_lossy(&raw).to_string();
-                        if let Some(position) = header_probe.find("\r\n\r\n") {
-                            header_end = Some(position);
-                            let header_text = &header_probe[..position];
-                            content_length = header_text
-                                .lines()
-                                .find_map(|line| {
-                                    let lower = line.to_ascii_lowercase();
-                                    lower
-                                        .strip_prefix("content-length:")
-                                        .and_then(|value| value.trim().parse::<usize>().ok())
-                                })
-                                .unwrap_or(0);
-                        }
-                    }
-
-                    if let Some(position) = header_end {
-                        let expected_len = position + 4 + content_length;
-                        if raw.len() >= expected_len {
+                let responses_for_connection = Arc::clone(&responses_for_task);
+                tokio::spawn(async move {
+                    let mut raw = Vec::new();
+                    let mut header_end = None;
+                    let mut content_length = 0usize;
+                    loop {
+                        let mut buffer = vec![0_u8; 2048];
+                        let bytes_read = match stream.read(&mut buffer).await {
+                            Ok(value) => value,
+                            Err(_) => return,
+                        };
+                        if bytes_read == 0 {
                             break;
                         }
-                    }
-                }
+                        raw.extend_from_slice(&buffer[..bytes_read]);
 
-                let response =
-                    responses_for_task
+                        if header_end.is_none() {
+                            let header_probe = String::from_utf8_lossy(&raw).to_string();
+                            if let Some(position) = header_probe.find("\r\n\r\n") {
+                                header_end = Some(position);
+                                let header_text = &header_probe[..position];
+                                content_length = header_text
+                                    .lines()
+                                    .find_map(|line| {
+                                        let lower = line.to_ascii_lowercase();
+                                        lower
+                                            .strip_prefix("content-length:")
+                                            .and_then(|value| value.trim().parse::<usize>().ok())
+                                    })
+                                    .unwrap_or(0);
+                            }
+                        }
+
+                        if let Some(position) = header_end {
+                            let expected_len = position + 4 + content_length;
+                            if raw.len() >= expected_len {
+                                break;
+                            }
+                        }
+                    }
+
+                    let response = responses_for_connection
                         .lock()
                         .await
                         .pop_front()
@@ -313,24 +324,23 @@ mod tests {
                             delay_ms: 0,
                         });
 
-                if response.delay_ms > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(response.delay_ms)).await;
-                }
+                    if response.delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(response.delay_ms))
+                            .await;
+                    }
 
-                let mut response_text = format!(
-                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
-                    response.status_line,
-                    response.body.len()
-                );
-                for (key, value) in response.extra_headers {
-                    response_text.push_str(&format!("{key}: {value}\r\n"));
-                }
-                response_text.push_str("\r\n");
-                response_text.push_str(&response.body);
-
-                if stream.write_all(response_text.as_bytes()).await.is_err() {
-                    break;
-                }
+                    let mut response_text = format!(
+                        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+                        response.status_line,
+                        response.body.len()
+                    );
+                    for (key, value) in response.extra_headers {
+                        response_text.push_str(&format!("{key}: {value}\r\n"));
+                    }
+                    response_text.push_str("\r\n");
+                    response_text.push_str(&response.body);
+                    let _ = stream.write_all(response_text.as_bytes()).await;
+                });
             }
         });
 
@@ -1915,6 +1925,698 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("pipeline_id=601"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pipeline_stage_runtime_runs_stage_two_only_after_stage_one_success() {
+        let pool = setup_test_pool().await;
+        let base_url = spawn_gitlab_test_server(vec![
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":801,"status":"success","ref":"main","sha":"sha-stage-one","web_url":"https://gitlab.example/p/801"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 200,
+            },
+            TestHttpResponse {
+                status_line: "201 Created",
+                body: r#"{"id":802,"status":"pending","ref":"main","sha":"sha-stage-two","web_url":"https://gitlab.example/p/802"}"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+        ])
+        .await;
+        db::set_gitlab_config(&pool, &base_url, "test-token", None, None, None)
+            .await
+            .expect("save gitlab config");
+
+        let pipeline = db::create_pipeline_definition_graph(
+            &pool,
+            "stage-serial-runtime".to_string(),
+            "stage serial runtime".to_string(),
+            true,
+            2,
+            vec![],
+            vec![
+                PipelineStageInput {
+                    stage_key: "gate".to_string(),
+                    name: "门禁".to_string(),
+                    enabled: true,
+                },
+                PipelineStageInput {
+                    stage_key: "release".to_string(),
+                    name: "发布".to_string(),
+                    enabled: true,
+                },
+            ],
+            vec![
+                PipelineGraphNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-a",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("gate".to_string()),
+                    node_key: Some("gate_check".to_string()),
+                    position_x: Some(120.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+                PipelineGraphNodeInput {
+                    node_type: "trigger_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-a",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("release".to_string()),
+                    node_key: Some("release_trigger".to_string()),
+                    position_x: Some(420.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+            ],
+            vec![PipelineEdgeInput {
+                source_node_key: "gate_check".to_string(),
+                target_node_key: "release_trigger".to_string(),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create stage-aware pipeline definition");
+
+        let run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(2))
+            .await
+            .expect("execute stage-aware pipeline run");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        let stages = db::load_pipeline_run_stages(&pool, run_id)
+            .await
+            .expect("load pipeline run stages");
+
+        assert_eq!(detail.status, "completed");
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].stage_key, "gate");
+        assert_eq!(stages[0].status, "success");
+        assert_eq!(stages[1].stage_key, "release");
+        assert_eq!(stages[1].status, "success");
+        assert!(stages[0].finished_at.is_some());
+        assert!(stages[1].started_at.is_some());
+        assert!(
+            stages[0].finished_at.as_deref() <= stages[1].started_at.as_deref(),
+            "expected second stage to start only after first stage finished: {:?}",
+            stages
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pipeline_stage_runtime_runs_independent_nodes_in_parallel() {
+        let pool = setup_test_pool().await;
+        let base_url = spawn_gitlab_test_server(vec![
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":811,"status":"success","ref":"main","sha":"sha-a","web_url":"https://gitlab.example/p/811"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 250,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":812,"status":"success","ref":"main","sha":"sha-b","web_url":"https://gitlab.example/p/812"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 250,
+            },
+        ])
+        .await;
+        db::set_gitlab_config(&pool, &base_url, "test-token", None, None, None)
+            .await
+            .expect("save gitlab config");
+
+        let pipeline = db::create_pipeline_definition_graph(
+            &pool,
+            "stage-parallel-runtime".to_string(),
+            "stage parallel runtime".to_string(),
+            true,
+            4,
+            vec![],
+            vec![PipelineStageInput {
+                stage_key: "gate".to_string(),
+                name: "并行门禁".to_string(),
+                enabled: true,
+            }],
+            vec![
+                PipelineGraphNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-a",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("gate".to_string()),
+                    node_key: Some("gate_check_a".to_string()),
+                    position_x: Some(120.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+                PipelineGraphNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-b",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("gate".to_string()),
+                    node_key: Some("gate_check_b".to_string()),
+                    position_x: Some(320.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+            ],
+            vec![],
+            vec![],
+        )
+        .await
+        .expect("create stage-aware pipeline definition");
+
+        let run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(4))
+            .await
+            .expect("execute parallel stage-aware pipeline run");
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        let node_a_started_at = chrono::DateTime::parse_from_rfc3339(
+            detail.projects[0].nodes[0].started_at.as_deref().expect("node a started_at"),
+        )
+        .expect("parse node a started_at");
+        let node_b_started_at = chrono::DateTime::parse_from_rfc3339(
+            detail.projects[0].nodes[1].started_at.as_deref().expect("node b started_at"),
+        )
+        .expect("parse node b started_at");
+        let started_gap_ms = (node_a_started_at - node_b_started_at)
+            .num_milliseconds()
+            .unsigned_abs();
+
+        assert_eq!(detail.status, "completed");
+        assert!(
+            started_gap_ms < 200,
+            "expected independent nodes to start nearly together, gap_ms={started_gap_ms}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pipeline_stage_runtime_blocks_downstream_stages_after_failure() {
+        let pool = setup_test_pool().await;
+        let base_url = spawn_gitlab_test_server(vec![
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":821,"status":"failed","ref":"main","sha":"sha-fail","web_url":"https://gitlab.example/p/821"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":822,"status":"success","ref":"main","sha":"sha-success","web_url":"https://gitlab.example/p/822"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 250,
+            },
+        ])
+        .await;
+        db::set_gitlab_config(&pool, &base_url, "test-token", None, None, None)
+            .await
+            .expect("save gitlab config");
+
+        let pipeline = db::create_pipeline_definition_graph(
+            &pool,
+            "stage-failure-blocking-runtime".to_string(),
+            "stage failure blocking runtime".to_string(),
+            true,
+            4,
+            vec![],
+            vec![
+                PipelineStageInput {
+                    stage_key: "gate".to_string(),
+                    name: "门禁".to_string(),
+                    enabled: true,
+                },
+                PipelineStageInput {
+                    stage_key: "deploy".to_string(),
+                    name: "部署".to_string(),
+                    enabled: true,
+                },
+            ],
+            vec![
+                PipelineGraphNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-a",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("gate".to_string()),
+                    node_key: Some("gate_fail".to_string()),
+                    position_x: Some(120.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+                PipelineGraphNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-b",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("gate".to_string()),
+                    node_key: Some("gate_success".to_string()),
+                    position_x: Some(320.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+                PipelineGraphNodeInput {
+                    node_type: "trigger_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/downstream",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("deploy".to_string()),
+                    node_key: Some("deploy_trigger".to_string()),
+                    position_x: Some(520.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+            ],
+            vec![],
+            vec![],
+        )
+        .await
+        .expect("create stage-aware pipeline definition");
+
+        let run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(4))
+            .await
+            .expect("execute stage-aware pipeline run");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        let stages = db::load_pipeline_run_stages(&pool, run_id)
+            .await
+            .expect("load stage runtime rows");
+
+        assert_eq!(detail.status, "partial_failed");
+        assert_eq!(detail.projects.len(), 1);
+        let node_statuses = detail.projects[0]
+            .nodes
+            .iter()
+            .map(|node| node.status.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            node_statuses.contains(&"failed"),
+            "expected one gate node to fail, got {:?}",
+            node_statuses
+        );
+        assert!(
+            node_statuses.contains(&"success"),
+            "expected already-started peer node to finish, got {:?}",
+            node_statuses
+        );
+        assert!(
+            !node_statuses.contains(&"success") || node_statuses.len() == 3,
+            "expected downstream node to remain blocked, got {:?}",
+            node_statuses
+        );
+        assert_eq!(stages.len(), 2);
+        assert!(
+            stages[0].status == "failed" || stages[0].status == "partial_failed",
+            "expected first stage to fail, got {:?}",
+            stages
+        );
+        assert_eq!(stages[1].status, "pending");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pipeline_stage_runtime_wait_node_persists_stage_waiting_context() {
+        let pool = setup_test_pool().await;
+        let base_url = spawn_gitlab_test_server(vec![
+            TestHttpResponse {
+                status_line: "201 Created",
+                body: r#"{"id":831,"status":"pending","ref":"main","sha":"sha-trigger","web_url":"https://gitlab.example/p/831"}"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":831,"status":"running","ref":"main","sha":"sha-trigger","web_url":"https://gitlab.example/p/831"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":831,"status":"success","ref":"main","sha":"sha-trigger","web_url":"https://gitlab.example/p/831"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+        ])
+        .await;
+        db::set_gitlab_config(&pool, &base_url, "test-token", None, None, None)
+            .await
+            .expect("save gitlab config");
+
+        let pipeline = db::create_pipeline_definition_graph(
+            &pool,
+            "stage-wait-runtime".to_string(),
+            "stage wait runtime".to_string(),
+            true,
+            2,
+            vec![],
+            vec![PipelineStageInput {
+                stage_key: "deploy".to_string(),
+                name: "部署".to_string(),
+                enabled: true,
+            }],
+            vec![
+                PipelineGraphNodeInput {
+                    node_type: "trigger_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-a",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("deploy".to_string()),
+                    node_key: Some("deploy_trigger".to_string()),
+                    position_x: Some(120.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+                PipelineGraphNodeInput {
+                    node_type: "wait_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-a",
+                        "ref": "main",
+                        "poll_interval_ms": 10,
+                        "timeout_ms": 500
+                    }),
+                    stage_key: Some("deploy".to_string()),
+                    node_key: Some("deploy_wait".to_string()),
+                    position_x: Some(320.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+            ],
+            vec![PipelineEdgeInput {
+                source_node_key: "deploy_trigger".to_string(),
+                target_node_key: "deploy_wait".to_string(),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create stage-aware pipeline definition");
+
+        let run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(2))
+            .await
+            .expect("execute stage-aware pipeline run");
+
+        let detail = wait_for_terminal_pipeline_run_status(&pool, run_id, 15_000).await;
+        let stages = db::load_pipeline_run_stages(&pool, run_id)
+            .await
+            .expect("load stage runtime rows");
+        let wait_node = detail.projects[0]
+            .nodes
+            .iter()
+            .find(|node| node.node_type == "wait_pipeline")
+            .expect("find wait node");
+        let diagnostics = db::get_pipeline_run_node_diagnostics(&pool, wait_node.id)
+            .await
+            .expect("load wait diagnostics");
+
+        assert_eq!(detail.status, "completed");
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].status, "success");
+        assert!(stages[0].started_at.is_some());
+        assert!(stages[0].finished_at.is_some());
+        assert_eq!(
+            diagnostics
+                .wait_context
+                .as_ref()
+                .and_then(|value| value.get("webUrl"))
+                .and_then(Value::as_str),
+            Some("https://gitlab.example/p/831")
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pipeline_stage_retry_marks_earlier_successful_stages_as_reused() {
+        let pool = setup_test_pool().await;
+        let base_url = spawn_gitlab_test_server(vec![
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":841,"status":"success","ref":"main","sha":"sha-gate","web_url":"https://gitlab.example/p/841"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":842,"status":"failed","ref":"main","sha":"sha-release-failed","web_url":"https://gitlab.example/p/842"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":843,"status":"success","ref":"main","sha":"sha-release-success","web_url":"https://gitlab.example/p/843"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+        ])
+        .await;
+        db::set_gitlab_config(&pool, &base_url, "test-token", None, None, None)
+            .await
+            .expect("save gitlab config");
+
+        let pipeline = db::create_pipeline_definition_graph(
+            &pool,
+            "stage-retry-runtime".to_string(),
+            "stage retry runtime".to_string(),
+            true,
+            2,
+            vec![],
+            vec![
+                PipelineStageInput {
+                    stage_key: "gate".to_string(),
+                    name: "门禁".to_string(),
+                    enabled: true,
+                },
+                PipelineStageInput {
+                    stage_key: "release".to_string(),
+                    name: "发布".to_string(),
+                    enabled: true,
+                },
+            ],
+            vec![
+                PipelineGraphNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-a",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("gate".to_string()),
+                    node_key: Some("gate_check".to_string()),
+                    position_x: Some(120.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+                PipelineGraphNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-b",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("release".to_string()),
+                    node_key: Some("release_check".to_string()),
+                    position_x: Some(320.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+            ],
+            vec![PipelineEdgeInput {
+                source_node_key: "gate_check".to_string(),
+                target_node_key: "release_check".to_string(),
+            }],
+            vec![],
+        )
+        .await
+        .expect("create stage-aware pipeline definition");
+
+        let source_run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(2))
+            .await
+            .expect("execute source stage-aware pipeline run");
+        let source_detail = wait_for_terminal_pipeline_run_status(&pool, source_run_id, 15_000).await;
+        assert_eq!(source_detail.status, "partial_failed");
+        assert_eq!(source_detail.stages.len(), 2);
+
+        let retry_run_id = super::retry_pipeline_run_with_request(
+            &pool,
+            PipelineRunRetryRequest {
+                source_pipeline_run_id: source_run_id,
+                retry_mode: Some("stage".to_string()),
+                target_stage_id: source_detail
+                    .stages
+                    .get(1)
+                    .and_then(|stage| stage.pipeline_stage_id),
+                target_run_node_id: None,
+                selected_managed_project_ids: None,
+                max_concurrency_override: Some(2),
+                run_parameters_override: None,
+            },
+        )
+        .await
+        .expect("retry from failed stage");
+
+        let retry_detail = wait_for_terminal_pipeline_run_status(&pool, retry_run_id, 15_000).await;
+        let retry_stages = &retry_detail.stages;
+        assert_eq!(retry_detail.status, "completed");
+        assert_eq!(retry_detail.source_pipeline_run_id, Some(source_run_id));
+        assert_eq!(retry_stages[0].status, "reused");
+        assert_eq!(retry_stages[1].status, "success");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pipeline_stage_retry_reruns_selected_node_and_downstream_dependency_chain_only() {
+        let pool = setup_test_pool().await;
+        let base_url = spawn_gitlab_test_server(vec![
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":851,"status":"success","ref":"main","sha":"sha-gate","web_url":"https://gitlab.example/p/851"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":852,"status":"failed","ref":"main","sha":"sha-build-failed","web_url":"https://gitlab.example/p/852"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "200 OK",
+                body: r#"[{"id":853,"status":"success","ref":"main","sha":"sha-build-success","web_url":"https://gitlab.example/p/853"}]"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "201 Created",
+                body: r#"{"id":854,"status":"pending","ref":"main","sha":"sha-deploy","web_url":"https://gitlab.example/p/854"}"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+        ])
+        .await;
+        db::set_gitlab_config(&pool, &base_url, "test-token", None, None, None)
+            .await
+            .expect("save gitlab config");
+
+        let pipeline = db::create_pipeline_definition_graph(
+            &pool,
+            "node-retry-runtime".to_string(),
+            "node retry runtime".to_string(),
+            true,
+            2,
+            vec![],
+            vec![
+                PipelineStageInput {
+                    stage_key: "gate".to_string(),
+                    name: "门禁".to_string(),
+                    enabled: true,
+                },
+                PipelineStageInput {
+                    stage_key: "build".to_string(),
+                    name: "构建".to_string(),
+                    enabled: true,
+                },
+                PipelineStageInput {
+                    stage_key: "deploy".to_string(),
+                    name: "部署".to_string(),
+                    enabled: true,
+                },
+            ],
+            vec![
+                PipelineGraphNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-a",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("gate".to_string()),
+                    node_key: Some("gate_check".to_string()),
+                    position_x: Some(120.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+                PipelineGraphNodeInput {
+                    node_type: "check_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-b",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("build".to_string()),
+                    node_key: Some("build_check".to_string()),
+                    position_x: Some(320.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+                PipelineGraphNodeInput {
+                    node_type: "trigger_pipeline".to_string(),
+                    parameters: serde_json::json!({
+                        "project": "team/service-c",
+                        "ref": "main"
+                    }),
+                    stage_key: Some("deploy".to_string()),
+                    node_key: Some("deploy_trigger".to_string()),
+                    position_x: Some(520.0),
+                    position_y: Some(80.0),
+                    enabled: Some(true),
+                },
+            ],
+            vec![
+                PipelineEdgeInput {
+                    source_node_key: "gate_check".to_string(),
+                    target_node_key: "build_check".to_string(),
+                },
+                PipelineEdgeInput {
+                    source_node_key: "build_check".to_string(),
+                    target_node_key: "deploy_trigger".to_string(),
+                },
+            ],
+            vec![],
+        )
+        .await
+        .expect("create node-retry stage-aware pipeline definition");
+
+        let source_run_id = execute_pipeline_run(&pool, pipeline.id, None, serde_json::json!({}), Some(2))
+            .await
+            .expect("execute source node-retry pipeline run");
+        let source_detail = wait_for_terminal_pipeline_run_status(&pool, source_run_id, 15_000).await;
+        assert_eq!(source_detail.status, "partial_failed");
+
+        let failed_run_node_id = source_detail.projects[0]
+            .nodes
+            .iter()
+            .find(|node| node.status == "failed")
+            .map(|node| node.id)
+            .expect("find failed run node");
+
+        let retry_run_id = super::retry_pipeline_run_with_request(
+            &pool,
+            PipelineRunRetryRequest {
+                source_pipeline_run_id: source_run_id,
+                retry_mode: Some("node".to_string()),
+                target_stage_id: None,
+                target_run_node_id: Some(failed_run_node_id),
+                selected_managed_project_ids: None,
+                max_concurrency_override: Some(2),
+                run_parameters_override: None,
+            },
+        )
+        .await
+        .expect("retry from failed node");
+
+        let retry_detail = wait_for_terminal_pipeline_run_status(&pool, retry_run_id, 15_000).await;
+        let retry_stages = &retry_detail.stages;
+        assert_eq!(retry_detail.status, "completed");
+        assert_eq!(retry_detail.source_pipeline_run_id, Some(source_run_id));
+        assert_eq!(retry_stages[0].status, "reused");
+        assert_eq!(retry_stages[1].status, "success");
+        assert_eq!(retry_stages[2].status, "success");
     }
 
     #[test]
