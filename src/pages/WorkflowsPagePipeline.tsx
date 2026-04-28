@@ -1,6 +1,14 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { PipelineDefinitionEditorShell } from "@/components/pipeline-editor/PipelineDefinitionEditorShell";
+import {
+  buildPipelineCreatePayload,
+  createEmptyPipelineDraft,
+  getPipelineDraftReadiness,
+  toDraftFromDetail,
+  type PipelineDraft,
+} from "@/components/pipeline-editor/draft-model";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -9,7 +17,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
 import {
@@ -20,14 +27,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { PipelineDraftForm } from "@/components/pipeline-editor/PipelineDraftForm";
-import {
-  buildPipelineCreatePayload,
-  createEmptyPipelineDraft,
-  getPipelineDraftReadiness,
-  toDraftFromDetail,
-  type PipelineDraft,
-} from "@/components/pipeline-editor/draft-model";
 import {
   createPipelineDefinition,
   deletePipelineDefinition,
@@ -41,11 +40,10 @@ import {
   updatePipelineDefinition,
 } from "@/lib/invoke";
 import type {
-  PipelineDefinitionDetail,
   ManagedProject,
+  PipelineDefinitionDetail,
   PipelineDefinitionListItem,
   PipelineScheduleRuntimeSnapshot,
-  ProjectGroup,
 } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 
@@ -53,25 +51,33 @@ type WorkflowsPagePipelineProps = {
   onRunStarted?: (pipelineRunId: number) => void;
 };
 
+type DefinitionEditorMode = "idle" | "creating" | "editing";
+
 export function WorkflowsPagePipeline({
   onRunStarted,
 }: WorkflowsPagePipelineProps = {}) {
   const [items, setItems] = React.useState<PipelineDefinitionListItem[]>([]);
-  const [projectGroups, setProjectGroups] = React.useState<ProjectGroup[]>([]);
   const [managedProjects, setManagedProjects] = React.useState<ManagedProject[]>([]);
   const [loading, setLoading] = React.useState(false);
   const editRequestTokenRef = React.useRef(0);
+  const createDraftSeedRef = React.useRef<PipelineDraft>(createEmptyPipelineDraft());
+  const editDraftSeedRef = React.useRef<PipelineDraft>(createEmptyPipelineDraft());
 
-  const [createOpen, setCreateOpen] = React.useState(false);
-  const [createDraft, setCreateDraft] = React.useState<PipelineDraft>(() =>
-    createEmptyPipelineDraft()
+  const [editorMode, setEditorMode] = React.useState<DefinitionEditorMode>("idle");
+  const [createBaselineDraft, setCreateBaselineDraft] = React.useState<PipelineDraft>(
+    createDraftSeedRef.current
+  );
+  const [createDraft, setCreateDraft] = React.useState<PipelineDraft>(
+    createDraftSeedRef.current
   );
   const [creating, setCreating] = React.useState(false);
   const createReadiness = getPipelineDraftReadiness(createDraft);
 
-  const [editOpen, setEditOpen] = React.useState(false);
-  const [editDraft, setEditDraft] = React.useState<PipelineDraft>(() =>
-    createEmptyPipelineDraft()
+  const [editBaselineDraft, setEditBaselineDraft] = React.useState<PipelineDraft>(
+    editDraftSeedRef.current
+  );
+  const [editDraft, setEditDraft] = React.useState<PipelineDraft>(
+    editDraftSeedRef.current
   );
   const [editingItem, setEditingItem] =
     React.useState<PipelineDefinitionListItem | null>(null);
@@ -80,6 +86,9 @@ export function WorkflowsPagePipeline({
   const [loadingEditScheduleRuntime, setLoadingEditScheduleRuntime] =
     React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const [validating, setValidating] = React.useState(false);
+  const editReadiness = getPipelineDraftReadiness(editDraft);
+
   const runRequestTokenRef = React.useRef(0);
   const [runOpen, setRunOpen] = React.useState(false);
   const [runItem, setRunItem] = React.useState<PipelineDefinitionListItem | null>(null);
@@ -95,13 +104,12 @@ export function WorkflowsPagePipeline({
       }
 
       try {
-        const [definitions, groups, projects] = await Promise.all([
+        const [definitions, , projects] = await Promise.all([
           listPipelineDefinitions(),
           listProjectGroups(),
           listManagedProjects(),
         ]);
         setItems(definitions);
-        setProjectGroups(groups);
         setManagedProjects(projects);
         return true;
       } catch (error) {
@@ -120,18 +128,40 @@ export function WorkflowsPagePipeline({
     void refresh();
   }, [refresh]);
 
-  function handleEditOpenChange(open: boolean) {
-    setEditOpen(open);
-    if (!open) {
-      setEditingItem(null);
-      setEditDraft(createEmptyPipelineDraft());
-      setEditScheduleRuntimeSnapshots([]);
-      setLoadingEditScheduleRuntime(false);
+  function resetCreateDraft() {
+    const nextDraft = createEmptyPipelineDraft();
+    setCreateBaselineDraft(nextDraft);
+    setCreateDraft(nextDraft);
+  }
+
+  function resetEditDraft() {
+    const nextDraft = createEmptyPipelineDraft();
+    setEditingItem(null);
+    setEditBaselineDraft(nextDraft);
+    setEditDraft(nextDraft);
+    setEditScheduleRuntimeSnapshots([]);
+    setLoadingEditScheduleRuntime(false);
+  }
+
+  function openCreateEditor() {
+    resetCreateDraft();
+    setEditorMode("creating");
+  }
+
+  function handleEditorBack() {
+    if (editorMode === "editing") {
+      resetEditDraft();
+    } else if (editorMode === "creating") {
+      resetCreateDraft();
     }
+    setEditorMode("idle");
   }
 
   const refreshEditScheduleRuntime = React.useCallback(
-    async (pipelineDefinitionId: number, { clearOnError = false }: { clearOnError?: boolean } = {}) => {
+    async (
+      pipelineDefinitionId: number,
+      { clearOnError = false }: { clearOnError?: boolean } = {}
+    ) => {
       setLoadingEditScheduleRuntime(true);
       try {
         const snapshots = await getPipelineScheduleRuntimeSnapshots(
@@ -151,13 +181,18 @@ export function WorkflowsPagePipeline({
   );
 
   async function onCreate() {
+    if (!createReadiness.ready) {
+      toast.error(createReadiness.message);
+      return;
+    }
+
     setCreating(true);
     try {
       const payload = buildPipelineCreatePayload(createDraft);
       await createPipelineDefinition(payload);
       toast.success("流水线已创建。");
-      setCreateOpen(false);
-      setCreateDraft(createEmptyPipelineDraft());
+      setEditorMode("idle");
+      resetCreateDraft();
       await refresh({ silent: true });
     } catch (error) {
       toast.error(readCommandErrorMessage(error, "创建流水线失败。"));
@@ -177,9 +212,11 @@ export function WorkflowsPagePipeline({
         return;
       }
 
+      const nextDraft = toDraftFromDetail(detail);
       setEditingItem(item);
-      setEditDraft(toDraftFromDetail(detail));
-      setEditOpen(true);
+      setEditBaselineDraft(nextDraft);
+      setEditDraft(nextDraft);
+      setEditorMode("editing");
       setEditScheduleRuntimeSnapshots([]);
       void refreshEditScheduleRuntime(item.id, { clearOnError: true });
     } catch (error) {
@@ -192,6 +229,10 @@ export function WorkflowsPagePipeline({
 
   async function onSaveEdit() {
     if (!editingItem) return;
+    if (!editReadiness.ready) {
+      toast.error(editReadiness.message);
+      return;
+    }
 
     setSaving(true);
     try {
@@ -201,7 +242,8 @@ export function WorkflowsPagePipeline({
         ...payload,
       });
       toast.success("流水线已保存。");
-      handleEditOpenChange(false);
+      setEditorMode("idle");
+      resetEditDraft();
       await refresh({ silent: true });
     } catch (error) {
       toast.error(readCommandErrorMessage(error, "保存流水线失败。"));
@@ -219,6 +261,32 @@ export function WorkflowsPagePipeline({
       await refresh({ silent: true });
     } catch (error) {
       toast.error(readCommandErrorMessage(error, "删除流水线失败。"));
+    }
+  }
+
+  async function handleValidate() {
+    const readiness = editorMode === "editing" ? editReadiness : createReadiness;
+
+    setValidating(true);
+    try {
+      if (readiness.ready) {
+        toast.success("流水线定义校验通过。");
+      } else {
+        toast.error(readiness.message);
+      }
+    } finally {
+      setValidating(false);
+    }
+  }
+
+  async function handleEditorSave() {
+    if (editorMode === "creating") {
+      await onCreate();
+      return;
+    }
+
+    if (editorMode === "editing") {
+      await onSaveEdit();
     }
   }
 
@@ -290,6 +358,35 @@ export function WorkflowsPagePipeline({
     return !(runParameters[variable.key] ?? "").trim();
   });
 
+  const activeDraft = editorMode === "editing" ? editDraft : createDraft;
+  const activeDirty =
+    editorMode === "editing"
+      ? editDraft !== editBaselineDraft
+      : createDraft !== createBaselineDraft;
+  const activeSaving = editorMode === "editing" ? saving : creating;
+  const activeScheduleRuntimeSnapshots =
+    editorMode === "editing" ? editScheduleRuntimeSnapshots : undefined;
+
+  if (editorMode !== "idle") {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <PipelineDefinitionEditorShell
+          mode={editorMode === "creating" ? "create" : "edit"}
+          draft={activeDraft}
+          managedProjects={managedProjects}
+          scheduleRuntimeSnapshots={activeScheduleRuntimeSnapshots}
+          dirty={activeDirty}
+          saving={activeSaving}
+          validating={validating}
+          onChange={editorMode === "editing" ? setEditDraft : setCreateDraft}
+          onBack={handleEditorBack}
+          onSave={() => void handleEditorSave()}
+          onValidate={() => void handleValidate()}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <Panel>
@@ -304,50 +401,7 @@ export function WorkflowsPagePipeline({
             <Button variant="secondary" onClick={() => void refresh()} disabled={loading}>
               刷新
             </Button>
-            <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-              <DialogTrigger asChild>
-                <Button>新建流水线</Button>
-              </DialogTrigger>
-              <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[1200px]">
-                <DialogHeader>
-                  <DialogTitle>新建流水线定义</DialogTitle>
-                  <DialogDescription>
-                    使用阶段化流程图配置变量、节点依赖和调度策略。
-                  </DialogDescription>
-                </DialogHeader>
-                <PipelineDraftForm
-                  draft={createDraft}
-                  managedProjects={managedProjects}
-                  projectGroups={projectGroups}
-                  onChange={setCreateDraft}
-                />
-                <p
-                  className={
-                    createReadiness.ready
-                      ? "text-sm text-muted-foreground"
-                      : "text-sm text-destructive"
-                  }
-                >
-                  {createReadiness.message}
-                </p>
-                <DialogFooter>
-                  <Button
-                    variant="secondary"
-                    type="button"
-                    onClick={() => setCreateDraft(createEmptyPipelineDraft())}
-                  >
-                    清空
-                  </Button>
-                  <Button
-                    type="button"
-                    onClick={() => void onCreate()}
-                    disabled={creating || !createReadiness.ready}
-                  >
-                    创建
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+            <Button onClick={openCreateEditor}>新建流水线</Button>
           </div>
         </PanelHeader>
         <PanelBody>
@@ -422,53 +476,6 @@ export function WorkflowsPagePipeline({
           </Table>
         </PanelBody>
       </Panel>
-
-      <Dialog open={editOpen} onOpenChange={handleEditOpenChange}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[1200px]">
-          <DialogHeader>
-            <DialogTitle>编辑流水线定义</DialogTitle>
-            <DialogDescription>
-              更新基础信息、流程图结构和调度规则。
-            </DialogDescription>
-          </DialogHeader>
-          <PipelineDraftForm
-            draft={editDraft}
-            managedProjects={managedProjects}
-            projectGroups={projectGroups}
-            scheduleRuntimeSnapshots={editScheduleRuntimeSnapshots}
-            loadingScheduleRuntime={loadingEditScheduleRuntime}
-            onChange={setEditDraft}
-            onRefreshScheduleRuntime={
-              editingItem
-                ? () => void refreshEditScheduleRuntime(editingItem.id)
-                : undefined
-            }
-          />
-          <DialogFooter>
-            {editingItem ? (
-              <Button
-                variant="secondary"
-                type="button"
-                onClick={() => void refreshEditScheduleRuntime(editingItem.id)}
-                disabled={loadingEditScheduleRuntime}
-                data-testid="pipeline-schedule-runtime-refresh"
-              >
-                {loadingEditScheduleRuntime ? "刷新中..." : "刷新调度状态"}
-              </Button>
-            ) : null}
-            <Button
-              variant="secondary"
-              type="button"
-              onClick={() => handleEditOpenChange(false)}
-            >
-              取消
-            </Button>
-            <Button type="button" onClick={() => void onSaveEdit()} disabled={saving}>
-              保存
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={runOpen} onOpenChange={handleRunOpenChange}>
         <DialogContent className="sm:max-w-2xl">

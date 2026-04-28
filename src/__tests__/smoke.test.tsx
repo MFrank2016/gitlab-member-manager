@@ -258,6 +258,23 @@ describe("pipeline definition upgrade smoke", () => {
     invokeMock.mockReset();
   });
 
+  it("opens the full-screen pipeline editor instead of the create dialog", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_pipeline_definitions") return [];
+      if (cmd === "list_project_groups") return [];
+      if (cmd === "list_managed_projects") return [];
+      return undefined;
+    });
+
+    render(<WorkflowsPagePipeline />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "新建流水线" }));
+
+    expect(screen.getByRole("button", { name: "返回列表" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "画布" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("shows pipeline terminology, schedules, and migrated legacy definitions in the editor", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "get_gitlab_config") return null;
@@ -323,6 +340,12 @@ describe("pipeline definition upgrade smoke", () => {
     expect(screen.getByText("变量")).toBeInTheDocument();
     expect(screen.getByText("流程图")).toBeInTheDocument();
     expect(screen.getByText("调度")).toBeInTheDocument();
+    act(() => {
+      fireEvent.mouseDown(screen.getByRole("tab", { name: "调度" }), {
+        button: 0,
+        ctrlKey: false,
+      });
+    });
     expect(screen.getByRole("button", { name: /添加调度/i })).toBeInTheDocument();
   });
 
@@ -633,6 +656,12 @@ describe("pipeline schedule runtime feedback", () => {
       });
     });
 
+    act(() => {
+      fireEvent.mouseDown(screen.getByRole("tab", { name: "调度" }), {
+        button: 0,
+        ctrlKey: false,
+      });
+    });
     const scheduleRows = await screen.findAllByTestId("pipeline-schedule-row");
     expect(within(scheduleRows[0]).getByTestId("pipeline-schedule-runtime-feedback")).toBeInTheDocument();
     expect(within(scheduleRows[0]).getByText("检测到同定义仍有活跃 run，本次触发已加入排队队列。")).toBeInTheDocument();
@@ -736,15 +765,19 @@ describe("pipeline definition structured editor guardrails", () => {
     const row = await screen.findByText(name);
     fireEvent.click(within(row.closest("tr") as HTMLElement).getByRole("button", { name: "编辑" }));
 
-    await screen.findByRole("heading", { name: "编辑流水线定义" });
-    return screen.getByRole("dialog");
+    const heading = await screen.findByRole("heading", { name: "编辑流水线定义" });
+    const editorShell = heading.closest("section");
+    if (!editorShell) {
+      throw new Error("Could not find the full-screen pipeline editor shell");
+    }
+    return editorShell as HTMLElement;
   }
 
   async function openNodeStructuredEditor(pipelineName: string, nodeLabel: string) {
-    const dialog = await openEditDialog(pipelineName);
-    fireEvent.click(within(dialog).getAllByText(nodeLabel)[0]!);
-    const editor = await within(dialog).findByTestId(/pipeline-node-structured-editor-/);
-    return { dialog, editor };
+    const editorShell = await openEditDialog(pipelineName);
+    fireEvent.click(within(editorShell).getAllByText(nodeLabel)[0]!);
+    const editor = await within(editorShell).findByTestId(/pipeline-node-structured-editor-/);
+    return { dialog: editorShell, editor };
   }
 
   it("supports structured editing for nested custom-node parameters", async () => {
@@ -847,6 +880,12 @@ describe("pipeline definition structured editor guardrails", () => {
     });
 
     const dialog = await openEditDialog("schedule-variables-structured-editor");
+    act(() => {
+      fireEvent.mouseDown(within(dialog).getByRole("tab", { name: "调度" }), {
+        button: 0,
+        ctrlKey: false,
+      });
+    });
     const scheduleEditor = within(dialog).getByTestId("pipeline-schedule-variables-editor-0");
 
     fireEvent.click(within(scheduleEditor).getByRole("button", { name: "添加字段" }));

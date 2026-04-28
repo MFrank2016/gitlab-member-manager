@@ -68,10 +68,10 @@ export function PipelineDefinitionEditorShell(
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="ghost" size="sm" onClick={onBack}>
-              返回
+              返回列表
             </Button>
             <h2 className="text-lg font-semibold">
-              {mode === "create" ? "新建流水线" : "编辑流水线"}
+              {mode === "create" ? "新建流水线定义" : "编辑流水线定义"}
             </h2>
           </div>
           <p className="text-sm text-muted-foreground">

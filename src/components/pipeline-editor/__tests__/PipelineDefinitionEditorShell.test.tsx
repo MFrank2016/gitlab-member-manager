@@ -84,7 +84,7 @@ describe("PipelineDefinitionEditorShell", () => {
   it("triggers toolbar callbacks", () => {
     const props = renderShell();
 
-    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
     fireEvent.click(screen.getByRole("button", { name: "校验" }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
