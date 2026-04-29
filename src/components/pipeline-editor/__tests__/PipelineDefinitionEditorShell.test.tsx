@@ -114,4 +114,19 @@ describe("PipelineDefinitionEditorShell", () => {
       source: "manual",
     });
   });
+
+  it("preserves draft state while switching between editor tabs", () => {
+    render(<ShellHarness />);
+
+    activateTab("基础信息");
+    fireEvent.change(screen.getByLabelText("流水线名称"), {
+      target: { value: "release-mainline" },
+    });
+
+    activateTab("变量");
+    activateTab("基础信息");
+
+    expect(screen.getByDisplayValue("release-mainline")).toBeInTheDocument();
+    expect(parseDraft().name).toBe("release-mainline");
+  });
 });

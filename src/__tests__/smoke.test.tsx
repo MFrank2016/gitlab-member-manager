@@ -304,6 +304,26 @@ describe("pipeline definition upgrade smoke", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("preserves draft edits across tab switches in full-screen editor mode", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_pipeline_definitions") return [];
+      if (cmd === "list_managed_projects") return [];
+      throw new Error(`Unexpected command: ${cmd}`);
+    });
+
+    await openCreatePipelineEditor();
+    activateEditorTab("基础信息");
+
+    fireEvent.change(screen.getByLabelText("流水线名称"), {
+      target: { value: "release-mainline" },
+    });
+
+    activateEditorTab("变量");
+    activateEditorTab("基础信息");
+
+    expect(screen.getByDisplayValue("release-mainline")).toBeInTheDocument();
+  });
+
   it("returns to the list when leaving the full-screen create editor", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "list_pipeline_definitions") return [];
@@ -325,6 +345,86 @@ describe("pipeline definition upgrade smoke", () => {
       screen.queryByRole("button", { name: "返回列表" })
     ).not.toBeInTheDocument();
     expectNoProjectGroupFetch();
+  });
+
+  it("returns to the list after canceling edit mode with no changes", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_definitions") {
+        return [
+          {
+            id: 91,
+            name: "legacy-release-pipeline",
+            description: "migrated legacy workflow",
+            enabled: true,
+            maxConcurrencyDefault: 2,
+            legacyWorkflowDefinitionId: null,
+            createdAt: "2026-03-18T00:00:00Z",
+            updatedAt: "2026-03-18T00:00:00Z",
+            variablesCount: 0,
+            nodesCount: 1,
+            schedulesCount: 0,
+          },
+        ];
+      }
+      if (cmd === "list_managed_projects") return [];
+      if (cmd === "get_pipeline_definition_detail") {
+        expect(args).toEqual({ id: 91 });
+        return {
+          id: 91,
+          name: "legacy-release-pipeline",
+          description: "migrated legacy workflow",
+          enabled: true,
+          maxConcurrencyDefault: 2,
+          legacyWorkflowDefinitionId: null,
+          createdAt: "2026-03-18T00:00:00Z",
+          updatedAt: "2026-03-18T00:00:00Z",
+          variables: [],
+          stages: [
+            {
+              id: 31,
+              stageKey: "default_stage",
+              name: "默认阶段",
+              stageOrder: 0,
+              enabled: true,
+            },
+          ],
+          nodes: [
+            {
+              nodeOrder: 0,
+              nodeType: "checkout_branch",
+              parameters: { branch: "${source_branch}" },
+              stageKey: "default_stage",
+              nodeKey: "checkout_source_branch",
+              positionX: 120,
+              positionY: 72,
+              enabled: true,
+            },
+          ],
+          edges: [],
+          schedules: [],
+        };
+      }
+      if (cmd === "get_pipeline_schedule_runtime_snapshots") return [];
+      throw new Error(`Unexpected command: ${cmd}`);
+    });
+
+    try {
+      await openEditPipelineEditor();
+      activateEditorTab("基础信息");
+      expect(screen.getByDisplayValue("legacy-release-pipeline")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
+
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(
+        await screen.findByRole("heading", { name: "流水线定义" })
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "新建流水线" })).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
   });
 
   it("warns before leaving the pipeline editor with unsaved changes", async () => {
@@ -534,6 +634,75 @@ describe("pipeline definition upgrade smoke", () => {
     expectNoProjectGroupFetch();
   });
 
+  it("enters edit mode with fetched detail loaded into the full-screen editor", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_definitions") {
+        return [
+          {
+            id: 91,
+            name: "legacy-release-pipeline",
+            description: "migrated legacy workflow",
+            enabled: true,
+            maxConcurrencyDefault: 2,
+            legacyWorkflowDefinitionId: null,
+            createdAt: "2026-03-18T00:00:00Z",
+            updatedAt: "2026-03-18T00:00:00Z",
+            variablesCount: 0,
+            nodesCount: 1,
+            schedulesCount: 0,
+          },
+        ];
+      }
+      if (cmd === "list_managed_projects") return [];
+      if (cmd === "get_pipeline_definition_detail") {
+        expect(args).toEqual({ id: 91 });
+        return {
+          id: 91,
+          name: "legacy-release-pipeline",
+          description: "migrated legacy workflow",
+          enabled: true,
+          maxConcurrencyDefault: 2,
+          legacyWorkflowDefinitionId: null,
+          createdAt: "2026-03-18T00:00:00Z",
+          updatedAt: "2026-03-18T00:00:00Z",
+          variables: [],
+          stages: [
+            {
+              id: 31,
+              stageKey: "default_stage",
+              name: "默认阶段",
+              stageOrder: 0,
+              enabled: true,
+            },
+          ],
+          nodes: [
+            {
+              nodeOrder: 0,
+              nodeType: "checkout_branch",
+              parameters: { branch: "${source_branch}" },
+              stageKey: "default_stage",
+              nodeKey: "checkout_source_branch",
+              positionX: 120,
+              positionY: 72,
+              enabled: true,
+            },
+          ],
+          edges: [],
+          schedules: [],
+        };
+      }
+      if (cmd === "get_pipeline_schedule_runtime_snapshots") return [];
+      throw new Error(`Unexpected command: ${cmd}`);
+    });
+
+    await openEditPipelineEditor();
+    activateEditorTab("基础信息");
+
+    expect(screen.getByDisplayValue("legacy-release-pipeline")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("migrated legacy workflow")).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("get_pipeline_definition_detail", { id: 91 });
+  });
+
   it("blocks edit-mode saves for invalid drafts before update_pipeline_definition", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "list_pipeline_definitions") {
@@ -610,6 +779,90 @@ describe("pipeline definition upgrade smoke", () => {
     );
     expect(screen.getByTestId("pipeline-editor-validation-list")).toBeInTheDocument();
     expect(screen.getByText("请先填写流水线名称。")).toBeInTheDocument();
+  });
+
+  it("keeps run dialog behavior intact after leaving the full-screen editor", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_definitions") {
+        return [
+          {
+            id: 91,
+            name: "legacy-release-pipeline",
+            description: "migrated legacy workflow",
+            enabled: true,
+            maxConcurrencyDefault: 2,
+            legacyWorkflowDefinitionId: null,
+            createdAt: "2026-03-18T00:00:00Z",
+            updatedAt: "2026-03-18T00:00:00Z",
+            variablesCount: 1,
+            nodesCount: 1,
+            schedulesCount: 0,
+          },
+        ];
+      }
+      if (cmd === "list_managed_projects") return [];
+      if (cmd === "get_pipeline_definition_detail") {
+        expect(args).toEqual({ id: 91 });
+        return {
+          id: 91,
+          name: "legacy-release-pipeline",
+          description: "migrated legacy workflow",
+          enabled: true,
+          maxConcurrencyDefault: 2,
+          legacyWorkflowDefinitionId: null,
+          createdAt: "2026-03-18T00:00:00Z",
+          updatedAt: "2026-03-18T00:00:00Z",
+          variables: [
+            {
+              id: 801,
+              key: "source_branch",
+              label: "Source Branch",
+              defaultValue: "main",
+              required: true,
+              description: null,
+              valueType: "string",
+            },
+          ],
+          stages: [
+            {
+              id: 31,
+              stageKey: "default_stage",
+              name: "默认阶段",
+              stageOrder: 0,
+              enabled: true,
+            },
+          ],
+          nodes: [
+            {
+              nodeOrder: 0,
+              nodeType: "checkout_branch",
+              parameters: { branch: "${source_branch}" },
+              stageKey: "default_stage",
+              nodeKey: "checkout_source_branch",
+              positionX: 120,
+              positionY: 72,
+              enabled: true,
+            },
+          ],
+          edges: [],
+          schedules: [],
+        };
+      }
+      return undefined;
+    });
+
+    await openCreatePipelineEditor();
+    fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
+
+    const row = await screen.findByText("legacy-release-pipeline");
+    fireEvent.click(
+      within(row.closest("tr") as HTMLElement).getByRole("button", { name: "立即运行" })
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "立即运行流水线" })
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("运行参数 Source Branch")).toHaveDisplayValue("main");
   });
 
   it("shows pipeline terminology, schedules, and migrated legacy definitions in the editor", async () => {
@@ -1110,82 +1363,6 @@ describe("pipeline definition structured editor guardrails", () => {
     return editorShell as HTMLElement;
   }
 
-  async function openNodeStructuredEditor(pipelineName: string, nodeLabel: string) {
-    const editorShell = await openEditDialog(pipelineName);
-    fireEvent.click(within(editorShell).getAllByText(nodeLabel)[0]!);
-    const editor = await within(editorShell).findByTestId(/pipeline-node-structured-editor-/);
-    return { dialog: editorShell, editor };
-  }
-
-  it("supports structured editing for nested custom-node parameters", async () => {
-    setupPipelineEditorMocks({
-      id: 151,
-      name: "custom-node-structured-editor",
-      description: "structured editor red phase",
-      enabled: true,
-      maxConcurrencyDefault: 2,
-      variables: [],
-      nodes: [
-        {
-          nodeOrder: 0,
-          nodeType: "custom_release_gate",
-          parameters: {},
-        },
-      ],
-      schedules: [],
-    });
-
-    const { dialog, editor } = await openNodeStructuredEditor(
-      "custom-node-structured-editor",
-      "custom_release_gate"
-    );
-
-    fireEvent.click(within(editor).getByRole("button", { name: "添加字段" }));
-    const rootField = within(editor).getAllByTestId("structured-json-field-row")[0];
-    fireEvent.change(within(rootField).getByLabelText("键名"), {
-      target: { value: "targets" },
-    });
-    fireEvent.change(within(rootField).getByLabelText("值类型"), {
-      target: { value: "array" },
-    });
-
-    const arrayEditor = within(rootField).getByTestId("structured-json-array-editor");
-    fireEvent.click(within(arrayEditor).getByRole("button", { name: "添加项" }));
-    const firstItem = within(arrayEditor).getAllByTestId("structured-json-array-item")[0];
-    fireEvent.change(within(firstItem).getByLabelText("值类型"), {
-      target: { value: "object" },
-    });
-
-    const nestedObject = within(firstItem).getByTestId("structured-json-object-editor");
-    fireEvent.click(within(nestedObject).getByRole("button", { name: "添加字段" }));
-    const nestedField = within(nestedObject).getAllByTestId("structured-json-field-row")[0];
-    fireEvent.change(within(nestedField).getByLabelText("键名"), {
-      target: { value: "project" },
-    });
-    fireEvent.change(within(nestedField).getByLabelText("字符串值"), {
-      target: { value: "team/service-a" },
-    });
-
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith(
-        "update_pipeline_definition",
-        expect.objectContaining({
-          id: 151,
-          nodes: [
-            expect.objectContaining({
-              nodeType: "custom_release_gate",
-              parameters: {
-                targets: [{ project: "team/service-a" }],
-              },
-            }),
-          ],
-        })
-      );
-    });
-  });
-
   it("edits schedule variables through the structured editor path", async () => {
     setupPipelineEditorMocks({
       id: 152,
@@ -1265,60 +1442,6 @@ describe("pipeline definition structured editor guardrails", () => {
     });
   });
 
-  it("preserves the last valid structured value across invalid advanced JSON edits", async () => {
-    setupPipelineEditorMocks({
-      id: 153,
-      name: "structured-json-fallback",
-      description: "advanced json fallback red phase",
-      enabled: true,
-      maxConcurrencyDefault: 2,
-      variables: [],
-      nodes: [
-        {
-          nodeOrder: 0,
-          nodeType: "custom_release_gate",
-          parameters: {
-            target: { project: "team/service-a" },
-            approvals: 2,
-          },
-        },
-      ],
-      schedules: [],
-    });
-
-    const { dialog, editor } = await openNodeStructuredEditor(
-      "structured-json-fallback",
-      "custom_release_gate"
-    );
-
-    expect(within(editor).getByRole("button", { name: "结构化模式" })).toBeInTheDocument();
-    fireEvent.click(within(editor).getByRole("button", { name: "JSON 模式" }));
-    fireEvent.change(within(editor).getByLabelText("高级 JSON"), {
-      target: { value: '{"target":' },
-    });
-    expect(within(editor).getByText("JSON 格式无效，已保留最近一次有效值。")).toBeInTheDocument();
-
-    fireEvent.click(within(editor).getByRole("button", { name: "结构化模式" }));
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith(
-        "update_pipeline_definition",
-        expect.objectContaining({
-          id: 153,
-          nodes: [
-            expect.objectContaining({
-              nodeType: "custom_release_gate",
-              parameters: {
-                target: { project: "team/service-a" },
-                approvals: 2,
-              },
-            }),
-          ],
-        })
-      );
-    });
-  });
 });
 
 describe("pipeline wrapper smoke", () => {

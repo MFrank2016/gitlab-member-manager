@@ -138,11 +138,13 @@ const managedProjectsFixture: ManagedProject[] = [
 ];
 
 function EditorHarness({
+  initialDraft,
   managedProjects = [],
 }: {
+  initialDraft?: PipelineDraft;
   managedProjects?: ManagedProject[];
 }) {
-  const [draft, setDraft] = React.useState(() => createEmptyPipelineDraft());
+  const [draft, setDraft] = React.useState(() => initialDraft ?? createEmptyPipelineDraft());
   const [visible, setVisible] = React.useState(true);
 
   return (
@@ -334,6 +336,11 @@ describe("PipelineGraphEditor", () => {
       expect(draft.nodes[0]?.nodeType).toBe("switch_project");
       expect(draft.nodes[0]?.parameters).toEqual({ managedProjectId: "" });
     });
+
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(screen.getByRole("button", { name: "删除选中对象" })).toBeEnabled();
   });
 
   it("shows switch_project project options and writes back the selected project", async () => {
@@ -360,6 +367,100 @@ describe("PipelineGraphEditor", () => {
     });
 
     expect(screen.getByText("team/alpha-service / D:/repos/alpha-service")).toBeInTheDocument();
+  });
+
+  it("supports structured editing for nested custom-node parameters", async () => {
+    const initialDraft: PipelineDraft = {
+      ...createEmptyPipelineDraft(),
+      nodes: [
+        {
+          id: "node_1",
+          nodeKey: "node_1",
+          stageKey: "default_stage",
+          nodeType: "custom_release_gate",
+          enabled: true,
+          position: { x: 120, y: 72 },
+          parameters: {},
+        },
+      ],
+    };
+
+    render(<EditorHarness initialDraft={initialDraft} />);
+
+    const editor = screen.getByTestId("pipeline-node-structured-editor-node_1");
+    fireEvent.click(within(editor).getByRole("button", { name: "添加字段" }));
+
+    const rootField = within(editor).getAllByTestId("structured-json-field-row")[0];
+    fireEvent.change(within(rootField).getByLabelText("键名"), {
+      target: { value: "targets" },
+    });
+    fireEvent.change(within(rootField).getByLabelText("值类型"), {
+      target: { value: "array" },
+    });
+
+    const arrayEditor = within(rootField).getByTestId("structured-json-array-editor");
+    fireEvent.click(within(arrayEditor).getByRole("button", { name: "添加项" }));
+    const firstItem = within(arrayEditor).getAllByTestId("structured-json-array-item")[0];
+    fireEvent.change(within(firstItem).getByLabelText("值类型"), {
+      target: { value: "object" },
+    });
+
+    const nestedObject = within(firstItem).getByTestId("structured-json-object-editor");
+    fireEvent.click(within(nestedObject).getByRole("button", { name: "添加字段" }));
+    const nestedField = within(nestedObject).getAllByTestId("structured-json-field-row")[0];
+    fireEvent.change(within(nestedField).getByLabelText("键名"), {
+      target: { value: "project" },
+    });
+    fireEvent.change(within(nestedField).getByLabelText("字符串值"), {
+      target: { value: "team/service-a" },
+    });
+
+    await waitFor(() => {
+      expect(parseDraft().nodes[0]?.parameters).toEqual({
+        targets: [{ project: "team/service-a" }],
+      });
+    });
+  });
+
+  it("preserves the last valid structured value across invalid advanced JSON edits", async () => {
+    const initialDraft: PipelineDraft = {
+      ...createEmptyPipelineDraft(),
+      nodes: [
+        {
+          id: "node_1",
+          nodeKey: "node_1",
+          stageKey: "default_stage",
+          nodeType: "custom_release_gate",
+          enabled: true,
+          position: { x: 120, y: 72 },
+          parameters: {
+            target: { project: "team/service-a" },
+            approvals: 2,
+          },
+        },
+      ],
+    };
+
+    render(<EditorHarness initialDraft={initialDraft} />);
+
+    const editor = screen.getByTestId("pipeline-node-structured-editor-node_1");
+    expect(within(editor).getByRole("button", { name: "结构化模式" })).toBeInTheDocument();
+
+    fireEvent.click(within(editor).getByRole("button", { name: "JSON 模式" }));
+    fireEvent.change(within(editor).getByLabelText("高级 JSON"), {
+      target: { value: '{"target":' },
+    });
+
+    expect(
+      within(editor).getByText("JSON 格式无效，已保留最近一次有效值。")
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(editor).getByRole("button", { name: "结构化模式" }));
+
+    expect(parseDraft().nodes[0]?.parameters).toEqual({
+      target: { project: "team/service-a" },
+      approvals: 2,
+    });
   });
 
   it("clears the active selection when the flow reports multiple selected nodes", () => {
