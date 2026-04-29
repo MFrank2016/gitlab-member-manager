@@ -8,6 +8,7 @@ import {
   resetPipelineDraftCountersForTest,
   type PipelineDraft,
 } from "@/components/pipeline-editor/draft-model";
+import type { ManagedProject } from "@/lib/types";
 
 const mockFitView = vi.fn();
 
@@ -121,7 +122,26 @@ function parseDraft() {
   return JSON.parse(raw) as PipelineDraft;
 }
 
-function EditorHarness() {
+const managedProjectsFixture: ManagedProject[] = [
+  {
+    id: 101,
+    gitlabProjectId: 1001,
+    name: "alpha-service",
+    pathWithNamespace: "team/alpha-service",
+    repoPath: "D:/repos/alpha-service",
+    defaultBranch: "main",
+    defaultRemote: "origin",
+    enabled: true,
+    createdAt: "2026-04-29T09:00:00Z",
+    updatedAt: "2026-04-29T09:00:00Z",
+  },
+];
+
+function EditorHarness({
+  managedProjects = [],
+}: {
+  managedProjects?: ManagedProject[];
+}) {
   const [draft, setDraft] = React.useState(() => createEmptyPipelineDraft());
   const [visible, setVisible] = React.useState(true);
 
@@ -132,7 +152,11 @@ function EditorHarness() {
       </button>
       <pre data-testid="pipeline-draft-json">{JSON.stringify(draft)}</pre>
       {visible ? (
-        <PipelineGraphEditor draft={draft} managedProjects={[]} onChange={setDraft} />
+        <PipelineGraphEditor
+          draft={draft}
+          managedProjects={managedProjects}
+          onChange={setDraft}
+        />
       ) : null}
     </div>
   );
@@ -277,6 +301,65 @@ describe("PipelineGraphEditor", () => {
       within(screen.getByTestId("graph-node-checkout_branch_node-1")).getByRole("button")
     );
     expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+  });
+
+  it("writes back stage name and enabled state changes", async () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(within(screen.getByTestId("graph-node-stage-1")).getByRole("button"));
+    fireEvent.change(screen.getByLabelText("阶段名称"), {
+      target: { value: "准备阶段" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "启用该阶段" }));
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.stages[0]?.name).toBe("准备阶段");
+      expect(draft.stages[0]?.enabled).toBe(false);
+    });
+  });
+
+  it("remaps the selected node type and resets builtin parameters", async () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(
+      within(screen.getByTestId("graph-node-checkout_branch_node-1")).getByRole("button")
+    );
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "switch_project" },
+    });
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.nodes[0]?.nodeType).toBe("switch_project");
+      expect(draft.nodes[0]?.parameters).toEqual({ managedProjectId: "" });
+    });
+  });
+
+  it("shows switch_project project options and writes back the selected project", async () => {
+    render(<EditorHarness managedProjects={managedProjectsFixture} />);
+
+    fireEvent.click(
+      within(screen.getByTestId("graph-node-checkout_branch_node-1")).getByRole("button")
+    );
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "switch_project" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("项目")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByLabelText("项目"), {
+      target: { value: "101" },
+    });
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.nodes[0]?.parameters).toEqual({ managedProjectId: "101" });
+    });
+
+    expect(screen.getByText("team/alpha-service / D:/repos/alpha-service")).toBeInTheDocument();
   });
 
   it("clears the active selection when the flow reports multiple selected nodes", () => {
