@@ -4,19 +4,41 @@ import { Toaster } from "sonner";
 import { Sidebar } from "@/components/ui/sidebar";
 import { CommandBar, CommandBarSection, CommandBarTitle } from "@/components/ui/command-bar";
 import { SettingsPage } from "@/pages/SettingsPage";
-import { ProjectsPage } from "@/pages/ProjectsPage";
-import { MembersPage } from "@/pages/MembersPage";
-import { LocalMembersPage } from "@/pages/LocalMembersPage";
-import { GroupsPage } from "@/pages/GroupsPage";
-import { ManagedProjectsPage } from "@/pages/ManagedProjectsPage";
-import { ProjectGroupsPage } from "@/pages/ProjectGroupsPage";
-import { WorkflowsPage } from "@/pages/WorkflowsPage";
-import { WorkflowRunsPage } from "@/pages/WorkflowRunsPage";
 
 type WorkflowRunFocusTarget = {
   runId: number;
   nonce: number;
 };
+
+function lazyPage<TProps>(loader: () => Promise<{ default: React.ComponentType<TProps> }>) {
+  return React.lazy(loader);
+}
+
+const loadProjectsPage = () =>
+  import("@/pages/ProjectsPage").then((module) => ({ default: module.ProjectsPage }));
+const loadMembersPage = () =>
+  import("@/pages/MembersPage").then((module) => ({ default: module.MembersPage }));
+const loadLocalMembersPage = () =>
+  import("@/pages/LocalMembersPage").then((module) => ({ default: module.LocalMembersPage }));
+const loadGroupsPage = () =>
+  import("@/pages/GroupsPage").then((module) => ({ default: module.GroupsPage }));
+const loadManagedProjectsPage = () =>
+  import("@/pages/ManagedProjectsPage").then((module) => ({ default: module.ManagedProjectsPage }));
+const loadProjectGroupsPage = () =>
+  import("@/pages/ProjectGroupsPage").then((module) => ({ default: module.ProjectGroupsPage }));
+const loadWorkflowsPage = () =>
+  import("@/pages/WorkflowsPage").then((module) => ({ default: module.WorkflowsPage }));
+const loadWorkflowRunsPage = () =>
+  import("@/pages/WorkflowRunsPage").then((module) => ({ default: module.WorkflowRunsPage }));
+
+const ProjectsPage = lazyPage(loadProjectsPage);
+const MembersPage = lazyPage(loadMembersPage);
+const LocalMembersPage = lazyPage(loadLocalMembersPage);
+const GroupsPage = lazyPage(loadGroupsPage);
+const ManagedProjectsPage = lazyPage(loadManagedProjectsPage);
+const ProjectGroupsPage = lazyPage(loadProjectGroupsPage);
+const WorkflowsPage = lazyPage(loadWorkflowsPage);
+const WorkflowRunsPage = lazyPage(loadWorkflowRunsPage);
 
 const pageTitles: Record<string, string> = {
   settings: "配置",
@@ -37,11 +59,13 @@ export default function App() {
     React.useState<WorkflowRunFocusTarget | null>(null);
 
   const handlePipelineRunStarted = React.useCallback((runId: number) => {
-    setWorkflowRunFocusTarget((current) => ({
-      runId,
-      nonce: (current?.nonce ?? 0) + 1,
-    }));
-    setActiveTab("workflowRuns");
+    void loadWorkflowRunsPage().finally(() => {
+      setWorkflowRunFocusTarget((current) => ({
+        runId,
+        nonce: (current?.nonce ?? 0) + 1,
+      }));
+      setActiveTab("workflowRuns");
+    });
   }, []);
 
   const handleWorkflowRunFocusHandled = React.useCallback(() => {
@@ -72,24 +96,32 @@ export default function App() {
         </CommandBar>
 
         <div className="flex-1 overflow-auto px-8 py-6">
-          <div className="animate-fade-up">
-            {activeTab === "settings" && <SettingsPage />}
-            {activeTab === "projects" && <ProjectsPage />}
-            {activeTab === "members" && <MembersPage />}
-            {activeTab === "managedProjects" && <ManagedProjectsPage />}
-            {activeTab === "projectGroups" && <ProjectGroupsPage />}
-            {activeTab === "workflows" && (
-              <WorkflowsPage onRunStarted={handlePipelineRunStarted} />
-            )}
-            {activeTab === "workflowRuns" && (
-              <WorkflowRunsPage
-                focusTarget={workflowRunFocusTarget}
-                onFocusHandled={handleWorkflowRunFocusHandled}
-              />
-            )}
-            {activeTab === "local" && <LocalMembersPage />}
-            {activeTab === "groups" && <GroupsPage />}
-          </div>
+          <React.Suspense
+            fallback={
+              <div className="animate-fade-up rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground shadow-sm">
+                页面加载中...
+              </div>
+            }
+          >
+            <div className="animate-fade-up">
+              {activeTab === "settings" && <SettingsPage />}
+              {activeTab === "projects" && <ProjectsPage />}
+              {activeTab === "members" && <MembersPage />}
+              {activeTab === "managedProjects" && <ManagedProjectsPage />}
+              {activeTab === "projectGroups" && <ProjectGroupsPage />}
+              {activeTab === "workflows" && (
+                <WorkflowsPage onRunStarted={handlePipelineRunStarted} />
+              )}
+              {activeTab === "workflowRuns" && (
+                <WorkflowRunsPage
+                  focusTarget={workflowRunFocusTarget}
+                  onFocusHandled={handleWorkflowRunFocusHandled}
+                />
+              )}
+              {activeTab === "local" && <LocalMembersPage />}
+              {activeTab === "groups" && <GroupsPage />}
+            </div>
+          </React.Suspense>
         </div>
       </main>
 
