@@ -145,6 +145,7 @@ function buildStageNode(stage: StageDraft, index: number): PipelineGraphNode {
   return {
     id: stage.stageKey,
     type: STAGE_GROUP_NODE_TYPE,
+    draggable: false,
     position: {
       x: STAGE_GROUP_START_X + index * STAGE_GROUP_GAP_X,
       y: STAGE_GROUP_START_Y,

@@ -103,6 +103,7 @@ describe("pipeline graph model", () => {
         expect.objectContaining({
           id: "prepare",
           type: "stage-group",
+          draggable: false,
           data: expect.objectContaining({
             stageKey: "prepare",
             name: "准备",
@@ -111,6 +112,7 @@ describe("pipeline graph model", () => {
         expect.objectContaining({
           id: "deploy",
           type: "stage-group",
+          draggable: false,
           data: expect.objectContaining({
             stageKey: "deploy",
             name: "发布",
