@@ -1442,6 +1442,63 @@ describe("pipeline definition structured editor guardrails", () => {
     });
   });
 
+  it("preserves complex custom-node parameters when saving through the page edit flow", async () => {
+    setupPipelineEditorMocks({
+      id: 154,
+      name: "custom-node-save-path",
+      description: "page-level custom node save coverage",
+      enabled: true,
+      maxConcurrencyDefault: 2,
+      variables: [],
+      nodes: [
+        {
+          nodeOrder: 0,
+          nodeKey: "custom_release_gate_node",
+          nodeType: "custom_release_gate",
+          parameters: {
+            targets: [{ project: "team/service-a", lane: "stable" }],
+            approvals: {
+              required: 2,
+              reviewers: ["alice", "bob"],
+            },
+            flags: {
+              dryRun: true,
+            },
+          },
+        },
+      ],
+      schedules: [],
+    });
+
+    const dialog = await openEditDialog("custom-node-save-path");
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "update_pipeline_definition",
+        expect.objectContaining({
+          id: 154,
+          nodes: [
+            expect.objectContaining({
+              nodeKey: "custom_release_gate_node",
+              nodeType: "custom_release_gate",
+              parameters: {
+                targets: [{ project: "team/service-a", lane: "stable" }],
+                approvals: {
+                  required: 2,
+                  reviewers: ["alice", "bob"],
+                },
+                flags: {
+                  dryRun: true,
+                },
+              },
+            }),
+          ],
+        })
+      );
+    });
+  });
+
 });
 
 describe("pipeline wrapper smoke", () => {
