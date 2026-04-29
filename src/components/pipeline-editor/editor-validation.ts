@@ -1,8 +1,9 @@
-import type {
-  EdgeDraft,
-  NodeDraft,
-  PipelineDraft,
-  StageDraft,
+import {
+  buildPipelineCreatePayload,
+  type EdgeDraft,
+  type NodeDraft,
+  type PipelineDraft,
+  type StageDraft,
 } from "@/components/pipeline-editor/draft-model";
 
 export type ValidationIssueCode =
@@ -25,6 +26,8 @@ export type ValidationSummary = {
   ok: boolean;
   issues: ValidationIssue[];
 };
+
+const FALLBACK_PAYLOAD_ERROR_MESSAGE = "请先完善流水线配置。";
 
 function createIssue(
   code: ValidationIssueCode,
@@ -230,4 +233,29 @@ export function validatePipelineEditorDraft(draft: PipelineDraft): ValidationSum
     ok: issues.length === 0,
     issues,
   };
+}
+
+export function buildPipelineEditorValidationSummary(
+  draft: PipelineDraft
+): ValidationSummary {
+  const summary = validatePipelineEditorDraft(draft);
+  if (!summary.ok) {
+    return summary;
+  }
+
+  try {
+    buildPipelineCreatePayload(draft);
+    return summary;
+  } catch (error) {
+    return {
+      ok: false,
+      issues: [
+        createIssue(
+          "payload_build_failed",
+          "pipeline:payload",
+          error instanceof Error ? error.message : FALLBACK_PAYLOAD_ERROR_MESSAGE
+        ),
+      ],
+    };
+  }
 }

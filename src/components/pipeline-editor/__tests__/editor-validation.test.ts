@@ -6,7 +6,10 @@ import {
   createNodeDraft,
   createStageDraft,
 } from "@/components/pipeline-editor/draft-model";
-import { validatePipelineEditorDraft } from "@/components/pipeline-editor/editor-validation";
+import {
+  buildPipelineEditorValidationSummary,
+  validatePipelineEditorDraft,
+} from "@/components/pipeline-editor/editor-validation";
 
 function createValidDraft() {
   const draft = createEmptyPipelineDraft();
@@ -183,6 +186,24 @@ describe("validatePipelineEditorDraft", () => {
           expect.objectContaining({
             code: "edge_backward",
             path: `edge:${nodeB.nodeKey}->${nodeA.nodeKey}`,
+          }),
+        ]),
+      })
+    );
+  });
+
+  it("falls back to payload validation errors after structural checks pass", () => {
+    const draft = createValidDraft();
+    draft.maxConcurrencyDefault = "0";
+
+    expect(buildPipelineEditorValidationSummary(draft)).toEqual(
+      expect.objectContaining({
+        ok: false,
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: "payload_build_failed",
+            path: "pipeline:payload",
+            message: "默认最大并发数必须是大于等于 1 的整数。",
           }),
         ]),
       })

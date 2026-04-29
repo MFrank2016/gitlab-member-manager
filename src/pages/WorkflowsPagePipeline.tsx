@@ -10,7 +10,7 @@ import {
   type PipelineDraft,
 } from "@/components/pipeline-editor/draft-model";
 import {
-  validatePipelineEditorDraft,
+  buildPipelineEditorValidationSummary,
   type ValidationSummary,
 } from "@/components/pipeline-editor/editor-validation";
 import { Button } from "@/components/ui/button";
@@ -55,32 +55,11 @@ type WorkflowsPagePipelineProps = {
 };
 
 type DefinitionEditorMode = "idle" | "creating" | "editing";
+type ActiveDefinitionEditorMode = Exclude<DefinitionEditorMode, "idle">;
 
 const LEAVE_EDITOR_CONFIRM_MESSAGE = "当前有未保存修改，离开后将丢失，是否继续？";
-
-function buildEditorValidationSummary(draft: PipelineDraft): ValidationSummary {
-  const summary = validatePipelineEditorDraft(draft);
-  if (!summary.ok) {
-    return summary;
-  }
-
-  try {
-    buildPipelineCreatePayload(draft);
-    return summary;
-  } catch (error) {
-    return {
-      ok: false,
-      issues: [
-        {
-          code: "payload_build_failed",
-          path: "pipeline:payload",
-          message:
-            error instanceof Error ? error.message : "请先完善流水线配置。",
-        },
-      ],
-    };
-  }
-}
+const VALIDATION_FAILURE_MESSAGE = (issueCount: number) =>
+  `请先处理 ${issueCount} 个校验问题。`;
 
 export function WorkflowsPagePipeline({
   onRunStarted,
@@ -180,6 +159,41 @@ export function WorkflowsPagePipeline({
   function openCreateEditor() {
     resetCreateDraft();
     setEditorMode("creating");
+  }
+
+  function setValidationSummaryForMode(
+    mode: ActiveDefinitionEditorMode,
+    summary: ValidationSummary | null
+  ) {
+    if (mode === "editing") {
+      setEditValidationSummary(summary);
+      return;
+    }
+    setCreateValidationSummary(summary);
+  }
+
+  function runDraftValidation(
+    mode: ActiveDefinitionEditorMode,
+    draft: PipelineDraft
+  ) {
+    const summary = buildPipelineEditorValidationSummary(draft);
+    setValidationSummaryForMode(mode, summary);
+    return summary;
+  }
+
+  function reportValidationOutcome(
+    summary: ValidationSummary,
+    { successMessage }: { successMessage?: string } = {}
+  ) {
+    if (summary.ok) {
+      if (successMessage) {
+        toast.success(successMessage);
+      }
+      return true;
+    }
+
+    toast.error(VALIDATION_FAILURE_MESSAGE(summary.issues.length));
+    return false;
   }
 
   function handleEditorBack() {
@@ -310,18 +324,10 @@ export function WorkflowsPagePipeline({
         return;
       }
 
-      const summary = buildEditorValidationSummary(activeDraft);
-      if (editorMode === "editing") {
-        setEditValidationSummary(summary);
-      } else {
-        setCreateValidationSummary(summary);
-      }
-
-      if (summary.ok) {
-        toast.success("流水线定义校验通过。");
-      } else {
-        toast.error(`请先处理 ${summary.issues.length} 个校验问题。`);
-      }
+      const summary = runDraftValidation(editorMode, activeDraft);
+      reportValidationOutcome(summary, {
+        successMessage: "流水线定义校验通过。",
+      });
     } finally {
       setValidating(false);
     }
@@ -332,15 +338,8 @@ export function WorkflowsPagePipeline({
       return;
     }
 
-    const summary = buildEditorValidationSummary(activeDraft);
-    if (editorMode === "editing") {
-      setEditValidationSummary(summary);
-    } else {
-      setCreateValidationSummary(summary);
-    }
-
-    if (!summary.ok) {
-      toast.error(`请先处理 ${summary.issues.length} 个校验问题。`);
+    const summary = runDraftValidation(editorMode, activeDraft);
+    if (!reportValidationOutcome(summary)) {
       return;
     }
 
@@ -449,11 +448,11 @@ export function WorkflowsPagePipeline({
             editorMode === "editing"
               ? (next) => {
                   setEditDraft(next);
-                  setEditValidationSummary(null);
+                  setValidationSummaryForMode("editing", null);
                 }
               : (next) => {
                   setCreateDraft(next);
-                  setCreateValidationSummary(null);
+                  setValidationSummaryForMode("creating", null);
                 }
           }
           onBack={handleEditorBack}

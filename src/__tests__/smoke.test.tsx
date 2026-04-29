@@ -272,6 +272,15 @@ describe("pipeline definition upgrade smoke", () => {
     fireEvent.click(await screen.findByRole("button", { name: "新建流水线" }));
   }
 
+  async function openEditPipelineEditor() {
+    render(<WorkflowsPagePipeline />);
+    const row = await screen.findByText("legacy-release-pipeline");
+    fireEvent.click(
+      within(row.closest("tr") as HTMLElement).getByRole("button", { name: "编辑" })
+    );
+    await screen.findByRole("heading", { name: "编辑流水线定义" });
+  }
+
   function expectNoProjectGroupFetch() {
     expect(invokeMock.mock.calls.map(([cmd]) => cmd)).not.toContain(
       "list_project_groups"
@@ -389,6 +398,50 @@ describe("pipeline definition upgrade smoke", () => {
     expectNoProjectGroupFetch();
   });
 
+  it("blocks create-mode saves for invalid drafts before create_pipeline_definition", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_pipeline_definitions") return [];
+      if (cmd === "list_managed_projects") return [];
+      throw new Error(`Unexpected command: ${cmd}`);
+    });
+
+    await openCreatePipelineEditor();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).not.toContain(
+      "create_pipeline_definition"
+    );
+    expect(screen.getByTestId("pipeline-editor-validation-list")).toBeInTheDocument();
+    expect(screen.getByText("请先填写流水线名称。")).toBeInTheDocument();
+  });
+
+  it("shows validation feedback when payload construction fails during create save", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_pipeline_definitions") return [];
+      if (cmd === "list_managed_projects") return [];
+      throw new Error(`Unexpected command: ${cmd}`);
+    });
+
+    await openCreatePipelineEditor();
+    activateEditorTab("基础信息");
+
+    fireEvent.change(screen.getByLabelText("流水线名称"), {
+      target: { value: "release-train" },
+    });
+    fireEvent.change(screen.getByLabelText("默认最大并发数"), {
+      target: { value: "0" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).not.toContain(
+      "create_pipeline_definition"
+    );
+    expect(screen.getByTestId("pipeline-editor-validation-list")).toBeInTheDocument();
+    expect(
+      screen.getByText("默认最大并发数必须是大于等于 1 的整数。")
+    ).toBeInTheDocument();
+  });
+
   it("saves edit-mode edits through update_pipeline_definition", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "list_pipeline_definitions") {
@@ -462,14 +515,7 @@ describe("pipeline definition upgrade smoke", () => {
       throw new Error(`Unexpected command: ${cmd}`);
     });
 
-    render(<WorkflowsPagePipeline />);
-
-    const row = await screen.findByText("legacy-release-pipeline");
-    fireEvent.click(
-      within(row.closest("tr") as HTMLElement).getByRole("button", { name: "编辑" })
-    );
-
-    await screen.findByRole("heading", { name: "编辑流水线定义" });
+    await openEditPipelineEditor();
     activateEditorTab("基础信息");
     fireEvent.change(screen.getByLabelText("流水线名称"), {
       target: { value: "legacy-release-pipeline-v2" },
@@ -486,6 +532,84 @@ describe("pipeline definition upgrade smoke", () => {
       );
     });
     expectNoProjectGroupFetch();
+  });
+
+  it("blocks edit-mode saves for invalid drafts before update_pipeline_definition", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "list_pipeline_definitions") {
+        return [
+          {
+            id: 91,
+            name: "legacy-release-pipeline",
+            description: "migrated legacy workflow",
+            enabled: true,
+            maxConcurrencyDefault: 2,
+            legacyWorkflowDefinitionId: null,
+            createdAt: "2026-03-18T00:00:00Z",
+            updatedAt: "2026-03-18T00:00:00Z",
+            variablesCount: 0,
+            nodesCount: 1,
+            schedulesCount: 0,
+          },
+        ];
+      }
+      if (cmd === "list_managed_projects") return [];
+      if (cmd === "get_pipeline_definition_detail") {
+        expect(args).toEqual({ id: 91 });
+        return {
+          id: 91,
+          name: "legacy-release-pipeline",
+          description: "migrated legacy workflow",
+          enabled: true,
+          maxConcurrencyDefault: 2,
+          legacyWorkflowDefinitionId: null,
+          createdAt: "2026-03-18T00:00:00Z",
+          updatedAt: "2026-03-18T00:00:00Z",
+          variables: [],
+          stages: [
+            {
+              id: 31,
+              stageKey: "default_stage",
+              name: "默认阶段",
+              stageOrder: 0,
+              enabled: true,
+            },
+          ],
+          nodes: [
+            {
+              nodeOrder: 0,
+              nodeType: "checkout_branch",
+              parameters: { branch: "${source_branch}" },
+              stageKey: "default_stage",
+              nodeKey: "checkout_source_branch",
+              positionX: 120,
+              positionY: 72,
+              enabled: true,
+            },
+          ],
+          edges: [],
+          schedules: [],
+        };
+      }
+      if (cmd === "get_pipeline_schedule_runtime_snapshots") {
+        expect(args).toEqual({ pipelineDefinitionId: 91 });
+        return [];
+      }
+      throw new Error(`Unexpected command: ${cmd}`);
+    });
+
+    await openEditPipelineEditor();
+    activateEditorTab("基础信息");
+    fireEvent.change(screen.getByLabelText("流水线名称"), {
+      target: { value: "   " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).not.toContain(
+      "update_pipeline_definition"
+    );
+    expect(screen.getByTestId("pipeline-editor-validation-list")).toBeInTheDocument();
+    expect(screen.getByText("请先填写流水线名称。")).toBeInTheDocument();
   });
 
   it("shows pipeline terminology, schedules, and migrated legacy definitions in the editor", async () => {
