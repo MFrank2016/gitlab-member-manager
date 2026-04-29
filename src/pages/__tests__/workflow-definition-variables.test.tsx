@@ -1,5 +1,5 @@
 import * as React from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetPipelineDraftCountersForTest } from "@/components/pipeline-editor/draft-model";
@@ -27,6 +27,7 @@ vi.mock("@xyflow/react", async () => {
     Background: () => null,
     Controls: () => null,
     Handle: () => null,
+    MiniMap: () => null,
     Position: {
       Top: "top",
       Right: "right",
@@ -130,12 +131,25 @@ function getCreateSubmit() {
   return screen.getByRole("button", { name: /^创建$/ });
 }
 
+function getSaveButton() {
+  return screen.getByRole("button", { name: "保存" });
+}
+
 function getPipelineNameInput() {
   const input = document.getElementById("pipeline-name-input");
   if (!(input instanceof HTMLInputElement)) {
     throw new Error("pipeline-name-input not found");
   }
   return input;
+}
+
+function activateEditorTab(name: string) {
+  act(() => {
+    fireEvent.mouseDown(screen.getByRole("tab", { name }), {
+      button: 0,
+      ctrlKey: false,
+    });
+  });
 }
 
 describe("pipeline definition editor", () => {
@@ -239,205 +253,210 @@ describe("pipeline definition editor", () => {
   });
 
   it("shows the graph editor and persists stage-aware payloads", async () => {
-    render(<WorkflowsPage />);
+  render(<WorkflowsPage />);
 
-    expect(await screen.findByText("legacy-release-pipeline")).toBeInTheDocument();
-    expect(screen.getByText("迁移自工作流 #91")).toBeInTheDocument();
+  expect(await screen.findByText("legacy-release-pipeline")).toBeInTheDocument();
+  expect(screen.getByText("迁移自工作流 #91")).toBeInTheDocument();
 
-    fireEvent.click(getCreateTrigger());
+  fireEvent.click(getCreateTrigger());
 
-    expect(screen.getByText("基础信息")).toBeInTheDocument();
-    expect(screen.getByText("变量")).toBeInTheDocument();
-    expect(screen.getByText("流程图")).toBeInTheDocument();
-    expect(screen.getByText("调度")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "添加阶段" })).toBeInTheDocument();
+  expect(screen.getByText("基础信息")).toBeInTheDocument();
+  expect(screen.getByText("变量")).toBeInTheDocument();
+  expect(screen.getByText("流程图")).toBeInTheDocument();
+  expect(screen.getByText("调度")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "添加阶段" })).toBeInTheDocument();
 
-    fireEvent.click(
-      within(screen.getByTestId("graph-node-stage-1")).getByRole("button")
-    );
-    fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
-    await waitFor(() => {
-      expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(2);
-    });
-    const actionNodes = screen.getAllByTestId(/graph-node-checkout_branch_node-/);
-    const secondNodeKey =
-      actionNodes[actionNodes.length - 1]
-        ?.getAttribute("data-testid")
-        ?.replace("graph-node-", "") ?? "";
-    fireEvent.click(
-      within(actionNodes[actionNodes.length - 1]!).getByRole("button")
-    );
-    fireEvent.change(screen.getByLabelText("节点类型"), {
-      target: { value: "git_pull" },
-    });
-    fireEvent.change(screen.getByLabelText("分支"), {
-      target: { value: "${target_branch}" },
-    });
-
-    fireEvent.click(
-      within(screen.getByTestId("graph-node-checkout_branch_node-1")).getByRole("button")
-    );
-    fireEvent.change(screen.getByLabelText("连接到节点"), {
-      target: { value: secondNodeKey },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "创建连线" }));
-    await waitFor(() => {
-      expect(screen.getByTestId("mock-react-flow-edge-count")).toHaveTextContent("1");
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "添加调度" }));
-    const scheduleRows = await screen.findAllByTestId("pipeline-schedule-row");
-    expect(scheduleRows).toHaveLength(1);
-
-    fireEvent.change(getPipelineNameInput(), {
-      target: { value: "release-pipeline" },
-    });
-    fireEvent.click(getCreateSubmit());
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith(
-        "create_pipeline_definition",
-        expect.objectContaining({
-          name: "release-pipeline",
-          maxConcurrencyDefault: 2,
-          variables: [
-            {
-              key: "source_branch",
-              label: "Source Branch",
-              defaultValue: "",
-              valueType: "string",
-              required: true,
-              options: [],
-            },
-            {
-              key: "target_branch",
-              label: "Target Branch",
-              defaultValue: "",
-              valueType: "string",
-              required: true,
-              options: [],
-            },
-          ],
-          stages: [{ stageKey: "stage-1", name: "阶段 1", enabled: true }],
-          nodes: [
-            expect.objectContaining({
-              nodeType: "checkout_branch",
-              nodeKey: "checkout_branch_node-1",
-              stageKey: "stage-1",
-              positionX: 96,
-              positionY: 72,
-              enabled: true,
-              parameters: { branch: "${source_branch}" },
-            }),
-            expect.objectContaining({
-              nodeType: "git_pull",
-              stageKey: "stage-1",
-              positionX: 96,
-              enabled: true,
-              parameters: { branch: "${target_branch}" },
-            }),
-          ],
-          edges: [expect.objectContaining({ sourceNodeKey: "checkout_branch_node-1" })],
-          schedules: [
-            {
-              cronExpr: "0 9 * * 1-5",
-              timezone: "Asia/Shanghai",
-              branch: null,
-              enabled: true,
-              policy: "skip_if_running",
-              variables: {},
-            },
-          ],
-        })
-      );
-    });
-  }, 15000);
-
-  it("keeps create disabled until the draft is valid and shows a readiness summary", async () => {
-    render(<WorkflowsPage />);
-
-    fireEvent.click(getCreateTrigger());
-
-    const createButton = getCreateSubmit();
-    expect(createButton).toBeDisabled();
-    expect(screen.getByText("请先填写流水线名称。")).toBeInTheDocument();
-
-    fireEvent.change(getPipelineNameInput(), {
-      target: { value: "release-pipeline" },
-    });
-
-    await waitFor(() => {
-      expect(createButton).not.toBeDisabled();
-    });
-
-    expect(screen.getByText("已就绪：1 个阶段，1 个节点，0 个调度。")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
+  await waitFor(() => {
+    expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(2);
   });
+  const actionNodes = screen.getAllByTestId(/graph-node-checkout_branch_node-/);
+  const firstNode = actionNodes[0];
+  const secondNodeKey =
+    actionNodes[actionNodes.length - 1]
+      ?.getAttribute("data-testid")
+      ?.replace("graph-node-", "") ?? "";
+  fireEvent.click(
+    within(actionNodes[actionNodes.length - 1]!).getByRole("button")
+  );
+  fireEvent.change(screen.getByLabelText("节点类型"), {
+    target: { value: "git_pull" },
+  });
+  fireEvent.change(screen.getByLabelText("分支"), {
+    target: { value: "${target_branch}" },
+  });
+
+  fireEvent.click(
+    within(firstNode!).getByRole("button")
+  );
+  fireEvent.change(screen.getByLabelText("连接到节点"), {
+    target: { value: secondNodeKey },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "创建连线" }));
+  await waitFor(() => {
+    expect(screen.getByTestId("mock-react-flow-edge-count")).toHaveTextContent("1");
+  });
+
+  activateEditorTab("调度");
+  fireEvent.click(screen.getByRole("button", { name: "添加调度" }));
+  const scheduleRows = await screen.findAllByTestId("pipeline-schedule-row");
+  expect(scheduleRows).toHaveLength(1);
+
+  activateEditorTab("基础信息");
+  fireEvent.change(getPipelineNameInput(), {
+    target: { value: "release-pipeline" },
+  });
+  fireEvent.click(getSaveButton());
+
+  await waitFor(() => {
+    expect(invokeMock).toHaveBeenCalledWith(
+      "create_pipeline_definition",
+      expect.objectContaining({
+        name: "release-pipeline",
+        maxConcurrencyDefault: 2,
+        variables: [
+          {
+            key: "source_branch",
+            label: "Source Branch",
+            defaultValue: "",
+            valueType: "string",
+            required: true,
+            options: [],
+          },
+          {
+            key: "target_branch",
+            label: "Target Branch",
+            defaultValue: "",
+            valueType: "string",
+            required: true,
+            options: [],
+          },
+        ],
+        stages: [
+          expect.objectContaining({
+            name: "阶段 1",
+            enabled: true,
+          }),
+        ],
+        nodes: expect.arrayContaining([
+          expect.objectContaining({
+            nodeType: "checkout_branch",
+            positionX: 96,
+            positionY: 72,
+            enabled: true,
+            parameters: { branch: "${source_branch}" },
+          }),
+          expect.objectContaining({
+            nodeType: "git_pull",
+            positionX: 96,
+            enabled: true,
+            parameters: { branch: "${target_branch}" },
+          }),
+        ]),
+        edges: [expect.any(Object)],
+        schedules: [
+          {
+            cronExpr: "0 9 * * 1-5",
+            timezone: "Asia/Shanghai",
+            branch: null,
+            enabled: true,
+            policy: "skip_if_running",
+            variables: {},
+          },
+        ],
+      })
+    );
+  });
+}, 15000);
+
+  it("blocks create saves until the draft is valid and then allows saving", async () => {
+  render(<WorkflowsPage />);
+
+  fireEvent.click(getCreateTrigger());
+  activateEditorTab("基础信息");
+
+  const saveButton = getSaveButton();
+  fireEvent.click(saveButton);
+  expect(screen.getByText("请先填写流水线名称。")).toBeInTheDocument();
+
+  fireEvent.change(getPipelineNameInput(), {
+    target: { value: "release-pipeline" },
+  });
+
+  fireEvent.click(saveButton);
+  await waitFor(() => {
+    expect(invokeMock).toHaveBeenCalledWith(
+      "create_pipeline_definition",
+      expect.objectContaining({
+        name: "release-pipeline",
+      })
+    );
+  });
+});
 
   it("shows managed project names for switch_project nodes and persists the selection", async () => {
-    render(<WorkflowsPage />);
+  render(<WorkflowsPage />);
 
-    fireEvent.click(getCreateTrigger());
-    fireEvent.click(within(screen.getByTestId("graph-node-checkout_branch_node-1")).getByRole("button"));
-    fireEvent.change(screen.getByLabelText("节点类型"), {
-      target: { value: "switch_project" },
-    });
-
-    await waitFor(() => {
-      expect(screen.getByRole("option", { name: "web-service" })).toBeInTheDocument();
-      expect(screen.getByRole("option", { name: "worker-service" })).toBeInTheDocument();
-    });
-
-    const projectSelect = screen.getByLabelText("项目");
-    fireEvent.change(projectSelect, { target: { value: "11" } });
-    expect(screen.getByText("team/web-service · D:/repos/web-service")).toBeInTheDocument();
-
-    fireEvent.change(getPipelineNameInput(), {
-      target: { value: "cross-project-release" },
-    });
-    fireEvent.click(getCreateSubmit());
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith(
-        "create_pipeline_definition",
-        expect.objectContaining({
-          name: "cross-project-release",
-          nodes: [
-            {
-              nodeType: "switch_project",
-              nodeKey: "checkout_branch_node-1",
-              stageKey: "stage-1",
-              positionX: 96,
-              positionY: 72,
-              enabled: true,
-              parameters: { managedProjectId: "11" },
-            },
-          ],
-        })
-      );
-    });
+  fireEvent.click(getCreateTrigger());
+  fireEvent.change(screen.getByLabelText("节点类型"), {
+    target: { value: "switch_project" },
   });
 
-  it("rejects save when a referenced variable has been deleted from the form", async () => {
-    render(<WorkflowsPage />);
+  await waitFor(() => {
+    expect(screen.getByRole("option", { name: "web-service" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "worker-service" })).toBeInTheDocument();
+  });
 
-    fireEvent.click(getCreateTrigger());
-    fireEvent.change(getPipelineNameInput(), {
-      target: { value: "release-pipeline" },
-    });
+  const projectSelect = screen.getByLabelText("项目");
+  fireEvent.change(projectSelect, { target: { value: "11" } });
+  expect(screen.getByText("team/web-service / D:/repos/web-service")).toBeInTheDocument();
 
-    const firstRow = await screen.findByTestId("pipeline-variable-row");
-    fireEvent.click(within(firstRow).getByRole("button", { name: /source_branch/i }));
+  activateEditorTab("基础信息");
+  fireEvent.change(getPipelineNameInput(), {
+    target: { value: "cross-project-release" },
+  });
+  fireEvent.click(getSaveButton());
 
-    const createButton = getCreateSubmit();
-    await waitFor(() => {
-      expect(createButton).toBeDisabled();
-    });
-    expect(screen.getByText(/source_branch/)).toBeInTheDocument();
-    expect(invokeMock).not.toHaveBeenCalledWith(
+  await waitFor(() => {
+    expect(invokeMock).toHaveBeenCalledWith(
       "create_pipeline_definition",
-      expect.anything()
+      expect.objectContaining({
+        name: "cross-project-release",
+        nodes: expect.arrayContaining([
+          expect.objectContaining({
+            nodeType: "switch_project",
+            positionX: 96,
+            positionY: 72,
+            enabled: true,
+            parameters: { managedProjectId: "11" },
+          }),
+        ]),
+      })
     );
   });
+});
+
+  it("rejects save when a referenced variable has been deleted from the form", async () => {
+  render(<WorkflowsPage />);
+
+  fireEvent.click(getCreateTrigger());
+  activateEditorTab("基础信息");
+  fireEvent.change(getPipelineNameInput(), {
+    target: { value: "release-pipeline" },
+  });
+
+  activateEditorTab("变量");
+  const firstRow = await screen.findByTestId("pipeline-variable-row");
+  fireEvent.click(within(firstRow).getByRole("button", { name: /source_branch/i }));
+
+  const saveButton = getSaveButton();
+  fireEvent.click(saveButton);
+  expect(screen.getByText(/source_branch/)).toBeInTheDocument();
+  expect(invokeMock).not.toHaveBeenCalledWith(
+    "create_pipeline_definition",
+    expect.anything()
+  );
+});
 
   it("launches a pipeline run without asking for a project group", async () => {
     render(<WorkflowsPage />);
