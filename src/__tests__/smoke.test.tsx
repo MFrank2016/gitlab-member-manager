@@ -427,6 +427,44 @@ describe("pipeline definition upgrade smoke", () => {
     }
   });
 
+  it("does not warn after reverting draft changes back to the baseline", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_pipeline_definitions") return [];
+      if (cmd === "list_managed_projects") return [];
+      throw new Error(`Unexpected command: ${cmd}`);
+    });
+
+    try {
+      await openCreatePipelineEditor();
+      activateEditorTab("基础信息");
+
+      const nameInput = screen.getByLabelText("流水线名称");
+      expect(screen.getByText("所有修改已保存")).toBeInTheDocument();
+
+      fireEvent.change(nameInput, {
+        target: { value: "temp-release-pipeline" },
+      });
+      expect(screen.getByText("有未保存变更")).toBeInTheDocument();
+
+      fireEvent.change(nameInput, {
+        target: { value: "" },
+      });
+      expect(screen.getByText("所有修改已保存")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
+
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(
+        await screen.findByRole("heading", { name: "流水线定义" })
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "新建流水线" })).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
   it("warns before leaving the pipeline editor with unsaved changes", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
 

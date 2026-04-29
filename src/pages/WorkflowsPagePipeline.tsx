@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { PipelineDefinitionEditorShell } from "@/components/pipeline-editor/PipelineDefinitionEditorShell";
+import { arePipelineDraftsEquivalent } from "@/components/pipeline-editor/draft-dirty";
 import {
   buildPipelineCreatePayload,
   createEmptyPipelineDraft,
@@ -424,8 +425,8 @@ export function WorkflowsPagePipeline({
   const activeDraft = editorMode === "editing" ? editDraft : createDraft;
   const activeDirty =
     editorMode === "editing"
-      ? editDraft !== editBaselineDraft
-      : createDraft !== createBaselineDraft;
+      ? !arePipelineDraftsEquivalent(editDraft, editBaselineDraft)
+      : !arePipelineDraftsEquivalent(createDraft, createBaselineDraft);
   const activeSaving = editorMode === "editing" ? saving : creating;
   const activeValidationSummary =
     editorMode === "editing" ? editValidationSummary : createValidationSummary;
