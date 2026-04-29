@@ -267,6 +267,18 @@ describe("PipelineGraphEditor", () => {
     expect(summary).toHaveTextContent("已选中节点");
   });
 
+  it("switches the inspector between stage and node attributes", async () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(within(screen.getByTestId("graph-node-stage-1")).getByRole("button"));
+    expect(screen.getByLabelText("阶段名称")).toBeInTheDocument();
+
+    fireEvent.click(
+      within(screen.getByTestId("graph-node-checkout_branch_node-1")).getByRole("button")
+    );
+    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+  });
+
   it("clears the active selection when the flow reports multiple selected nodes", () => {
     render(<EditorHarness />);
 
