@@ -318,6 +318,42 @@ describe("pipeline definition upgrade smoke", () => {
     expectNoProjectGroupFetch();
   });
 
+  it("warns before leaving the pipeline editor with unsaved changes", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_pipeline_definitions") return [];
+      if (cmd === "list_managed_projects") return [];
+      throw new Error(`Unexpected command: ${cmd}`);
+    });
+
+    try {
+      await openCreatePipelineEditor();
+      activateEditorTab("基础信息");
+
+      fireEvent.change(screen.getByLabelText("流水线名称"), {
+        target: { value: "dirty-release-pipeline" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
+
+      expect(confirmSpy).toHaveBeenCalledWith(
+        "当前有未保存修改，离开后将丢失，是否继续？"
+      );
+      expect(
+        screen.getByRole("button", { name: "返回列表" })
+      ).toBeInTheDocument();
+
+      confirmSpy.mockReturnValue(true);
+      fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
+
+      expect(
+        await screen.findByRole("heading", { name: "流水线定义" })
+      ).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
   it("saves create-mode edits through create_pipeline_definition", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "list_pipeline_definitions") return [];

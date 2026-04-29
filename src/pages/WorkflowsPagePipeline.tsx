@@ -9,6 +9,10 @@ import {
   toDraftFromDetail,
   type PipelineDraft,
 } from "@/components/pipeline-editor/draft-model";
+import {
+  validatePipelineEditorDraft,
+  type ValidationSummary,
+} from "@/components/pipeline-editor/editor-validation";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -52,6 +56,32 @@ type WorkflowsPagePipelineProps = {
 
 type DefinitionEditorMode = "idle" | "creating" | "editing";
 
+const LEAVE_EDITOR_CONFIRM_MESSAGE = "当前有未保存修改，离开后将丢失，是否继续？";
+
+function buildEditorValidationSummary(draft: PipelineDraft): ValidationSummary {
+  const summary = validatePipelineEditorDraft(draft);
+  if (!summary.ok) {
+    return summary;
+  }
+
+  try {
+    buildPipelineCreatePayload(draft);
+    return summary;
+  } catch (error) {
+    return {
+      ok: false,
+      issues: [
+        {
+          code: "payload_build_failed",
+          path: "pipeline:payload",
+          message:
+            error instanceof Error ? error.message : "请先完善流水线配置。",
+        },
+      ],
+    };
+  }
+}
+
 export function WorkflowsPagePipeline({
   onRunStarted,
 }: WorkflowsPagePipelineProps = {}) {
@@ -69,6 +99,8 @@ export function WorkflowsPagePipeline({
   const [createDraft, setCreateDraft] = React.useState<PipelineDraft>(
     createDraftSeedRef.current
   );
+  const [createValidationSummary, setCreateValidationSummary] =
+    React.useState<ValidationSummary | null>(null);
   const [creating, setCreating] = React.useState(false);
   const createReadiness = getPipelineDraftReadiness(createDraft);
 
@@ -84,6 +116,8 @@ export function WorkflowsPagePipeline({
     React.useState<PipelineScheduleRuntimeSnapshot[]>([]);
   const [loadingEditScheduleRuntime, setLoadingEditScheduleRuntime] =
     React.useState(false);
+  const [editValidationSummary, setEditValidationSummary] =
+    React.useState<ValidationSummary | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [validating, setValidating] = React.useState(false);
   const editReadiness = getPipelineDraftReadiness(editDraft);
@@ -130,6 +164,7 @@ export function WorkflowsPagePipeline({
     const nextDraft = createEmptyPipelineDraft();
     setCreateBaselineDraft(nextDraft);
     setCreateDraft(nextDraft);
+    setCreateValidationSummary(null);
   }
 
   function resetEditDraft() {
@@ -137,6 +172,7 @@ export function WorkflowsPagePipeline({
     setEditingItem(null);
     setEditBaselineDraft(nextDraft);
     setEditDraft(nextDraft);
+    setEditValidationSummary(null);
     setEditScheduleRuntimeSnapshots([]);
     setLoadingEditScheduleRuntime(false);
   }
@@ -147,6 +183,10 @@ export function WorkflowsPagePipeline({
   }
 
   function handleEditorBack() {
+    if (activeDirty && !window.confirm(LEAVE_EDITOR_CONFIRM_MESSAGE)) {
+      return;
+    }
+
     if (editorMode === "editing") {
       resetEditDraft();
     } else if (editorMode === "creating") {
@@ -214,6 +254,7 @@ export function WorkflowsPagePipeline({
       setEditingItem(item);
       setEditBaselineDraft(nextDraft);
       setEditDraft(nextDraft);
+      setEditValidationSummary(null);
       setEditorMode("editing");
       setEditScheduleRuntimeSnapshots([]);
       void refreshEditScheduleRuntime(item.id, { clearOnError: true });
@@ -263,14 +304,23 @@ export function WorkflowsPagePipeline({
   }
 
   async function handleValidate() {
-    const readiness = editorMode === "editing" ? editReadiness : createReadiness;
-
     setValidating(true);
     try {
-      if (readiness.ready) {
+      if (editorMode === "idle") {
+        return;
+      }
+
+      const summary = buildEditorValidationSummary(activeDraft);
+      if (editorMode === "editing") {
+        setEditValidationSummary(summary);
+      } else {
+        setCreateValidationSummary(summary);
+      }
+
+      if (summary.ok) {
         toast.success("流水线定义校验通过。");
       } else {
-        toast.error(readiness.message);
+        toast.error(`请先处理 ${summary.issues.length} 个校验问题。`);
       }
     } finally {
       setValidating(false);
@@ -278,6 +328,22 @@ export function WorkflowsPagePipeline({
   }
 
   async function handleEditorSave() {
+    if (editorMode === "idle") {
+      return;
+    }
+
+    const summary = buildEditorValidationSummary(activeDraft);
+    if (editorMode === "editing") {
+      setEditValidationSummary(summary);
+    } else {
+      setCreateValidationSummary(summary);
+    }
+
+    if (!summary.ok) {
+      toast.error(`请先处理 ${summary.issues.length} 个校验问题。`);
+      return;
+    }
+
     if (editorMode === "creating") {
       await onCreate();
       return;
@@ -362,6 +428,8 @@ export function WorkflowsPagePipeline({
       ? editDraft !== editBaselineDraft
       : createDraft !== createBaselineDraft;
   const activeSaving = editorMode === "editing" ? saving : creating;
+  const activeValidationSummary =
+    editorMode === "editing" ? editValidationSummary : createValidationSummary;
   const activeScheduleRuntimeSnapshots =
     editorMode === "editing" ? editScheduleRuntimeSnapshots : undefined;
 
@@ -376,7 +444,18 @@ export function WorkflowsPagePipeline({
           dirty={activeDirty}
           saving={activeSaving}
           validating={validating}
-          onChange={editorMode === "editing" ? setEditDraft : setCreateDraft}
+          validationSummary={activeValidationSummary}
+          onChange={
+            editorMode === "editing"
+              ? (next) => {
+                  setEditDraft(next);
+                  setEditValidationSummary(null);
+                }
+              : (next) => {
+                  setCreateDraft(next);
+                  setCreateValidationSummary(null);
+                }
+          }
           onBack={handleEditorBack}
           onSave={() => void handleEditorSave()}
           onValidate={() => void handleValidate()}

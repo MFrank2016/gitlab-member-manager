@@ -7,6 +7,7 @@ import {
   PipelineVariablesSection,
 } from "@/components/pipeline-editor/PipelineDraftForm";
 import type { PipelineDraft } from "@/components/pipeline-editor/draft-model";
+import type { ValidationSummary } from "@/components/pipeline-editor/editor-validation";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
@@ -24,6 +25,7 @@ export type PipelineDefinitionEditorShellProps = {
   dirty: boolean;
   saving: boolean;
   validating: boolean;
+  validationSummary?: ValidationSummary | null;
   onChange: (next: PipelineDraft) => void;
   onBack: () => void;
   onSave: () => void;
@@ -55,6 +57,7 @@ export function PipelineDefinitionEditorShell(
     dirty,
     saving,
     validating,
+    validationSummary = null,
     onChange,
     onBack,
     onSave,
@@ -92,6 +95,40 @@ export function PipelineDefinitionEditorShell(
           </Button>
         </div>
       </header>
+
+      {validationSummary ? (
+        <div
+          role={validationSummary.ok ? "status" : "alert"}
+          className={`rounded-xl border p-4 ${
+            validationSummary.ok
+              ? "border-emerald-500/40 bg-emerald-500/5"
+              : "border-destructive/40 bg-destructive/5"
+          }`}
+        >
+          <div className="space-y-1">
+            <h3 className="text-sm font-semibold">
+              {validationSummary.ok
+                ? "校验通过"
+                : `发现 ${validationSummary.issues.length} 个阻塞问题`}
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              {validationSummary.ok
+                ? "当前定义已满足最小保存条件。"
+                : "请先处理以下问题，再执行保存。"}
+            </p>
+          </div>
+          {validationSummary.ok ? null : (
+            <ul
+              data-testid="pipeline-editor-validation-list"
+              className="mt-3 list-disc space-y-1 pl-5 text-sm"
+            >
+              {validationSummary.issues.map((issue, index) => (
+                <li key={`${issue.code}:${issue.path}:${index}`}>{issue.message}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
 
       <Tabs
         value={activeTab}
