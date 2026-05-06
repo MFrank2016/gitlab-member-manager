@@ -556,22 +556,15 @@ function ensureDraftHasStageCoverage(stages: StageDraft[], nodes: NodeDraft[]) {
 
 export function createEmptyPipelineDraft(): PipelineDraft {
   const stage = buildDefaultStage();
-  const nodes = [
-    createNodeDraft({
-      stageKey: stage.stageKey,
-      nodeType: "checkout_branch",
-      parameters: undefined,
-    }),
-  ];
 
   return {
     name: "",
     description: "",
     enabled: true,
     maxConcurrencyDefault: "2",
-    variableRows: ensureVariableRows(nodes, []),
+    variableRows: [],
     stages: [stage],
-    nodes,
+    nodes: [],
     edges: [],
     schedules: [],
   };
@@ -612,18 +605,10 @@ export function toDraftFromDetail(detail: PipelineDefinitionDetail): PipelineDra
 
   const coveredStages = ensureDraftHasStageCoverage(stages, nodes);
   const stageKeySet = new Set(coveredStages.map((stage) => stage.stageKey));
-  const normalizedNodes =
-    nodes.length > 0
-      ? nodes.map((node) => ({
-          ...node,
-          stageKey: stageKeySet.has(node.stageKey) ? node.stageKey : coveredStages[0]?.stageKey ?? "",
-        }))
-      : [
-          createNodeDraft({
-            stageKey: coveredStages[0]?.stageKey ?? "",
-            nodeType: "checkout_branch",
-          }),
-        ];
+  const normalizedNodes = nodes.map((node) => ({
+    ...node,
+    stageKey: stageKeySet.has(node.stageKey) ? node.stageKey : coveredStages[0]?.stageKey ?? "",
+  }));
 
   const variableRows = [...detail.variables]
     .sort((a, b) => a.variableOrder - b.variableOrder)

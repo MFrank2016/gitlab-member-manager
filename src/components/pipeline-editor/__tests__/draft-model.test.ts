@@ -184,13 +184,13 @@ describe("pipeline draft model working path node", () => {
     expect(afterFinalEdit.map((row) => row.key)).toEqual(["release_branch"]);
   });
 
-  it("creates a default stage-aware draft instead of a stage-less linear draft", () => {
+  it("creates an empty stage-aware draft with a default stage only", () => {
     const draft = createEmptyPipelineDraft();
 
     expect(draft.stages).toHaveLength(1);
-    expect(draft.nodes).toHaveLength(1);
-    expect(draft.nodes[0]?.stageKey).toBe(draft.stages[0]?.stageKey);
+    expect(draft.nodes).toEqual([]);
     expect(draft.edges).toEqual([]);
+    expect(draft.variableRows).toEqual([]);
   });
 
   it("hydrates legacy stage-less definitions into a single default stage", () => {
@@ -223,6 +223,36 @@ describe("pipeline draft model working path node", () => {
     expect(draft.stages).toHaveLength(1);
     expect(draft.nodes[0]?.stageKey).toBe(draft.stages[0]?.stageKey);
     expect(draft.nodes[0]?.nodeKey).toBeTruthy();
+  });
+
+  it("preserves explicit stage-only detail payloads when hydrating without nodes", () => {
+    const draft = toDraftFromDetail({
+      id: 10,
+      name: "empty-release",
+      description: "",
+      enabled: true,
+      maxConcurrencyDefault: 2,
+      createdAt: "2026-04-28T00:00:00Z",
+      updatedAt: "2026-04-28T00:00:00Z",
+      variables: [],
+      stages: [
+        {
+          stageKey: "default_stage",
+          name: "阶段 1",
+          stageOrder: 0,
+          enabled: true,
+        },
+      ],
+      nodes: [],
+      edges: [],
+      schedules: [],
+    });
+
+    expect(draft.stages).toHaveLength(1);
+    expect(draft.stages[0]?.stageKey).toBe("default_stage");
+    expect(draft.nodes).toEqual([]);
+    expect(draft.edges).toEqual([]);
+    expect(draft.variableRows).toEqual([]);
   });
 
   it("serializes stages and edges together with nodes", () => {

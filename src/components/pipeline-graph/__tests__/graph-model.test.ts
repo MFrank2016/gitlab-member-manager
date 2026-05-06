@@ -152,6 +152,40 @@ describe("pipeline graph model", () => {
     ]);
   });
 
+  it("keeps the next node on the last fully visible slot inside the target stage", () => {
+    const nodes = [
+      createNodeDraft({
+        stageKey: "prepare",
+        nodeType: "checkout_branch",
+        parameters: { branch: "${source_branch}" },
+        position: { x: 96, y: 72 },
+      }),
+      createNodeDraft({
+        stageKey: "deploy",
+        nodeType: "trigger_pipeline",
+        parameters: {
+          project: "team/web-service",
+          ref: "${target_branch}",
+        },
+        position: { x: 144, y: 220 },
+      }),
+      createNodeDraft({
+        stageKey: "deploy",
+        nodeType: "wait_pipeline",
+        parameters: {
+          project: "team/web-service",
+          ref: "${target_branch}",
+          sha: "",
+        },
+        position: { x: 48, y: 360 },
+      }),
+    ];
+
+    expect(getNextNodePositionInStage(nodes, "prepare")).toEqual({ x: 96, y: 188 });
+    expect(getNextNodePositionInStage(nodes, "deploy")).toEqual({ x: 96, y: 188 });
+    expect(getNextNodePositionInStage(nodes, "verify")).toEqual({ x: 96, y: 72 });
+  });
+
   it("serializes graph edits back into the persisted stage-aware payload shape", () => {
     const draft = toDraftFromDetail(pipelineDetail);
     const graphState = buildGraphEditorState(draft);
@@ -275,39 +309,18 @@ describe("pipeline graph model", () => {
     });
   });
 
-  it("computes a safe visible position for the next node inside a stage", () => {
-    expect(getNextNodePositionInStage([])).toEqual({ x: 96, y: 72 });
-    expect(
-      getNextNodePositionInStage([
-        createNodeDraft({
-          nodeKey: "checkout_source",
-          stageKey: "prepare",
-          nodeType: "checkout_branch",
-          position: { x: 96, y: 72 },
-        }),
-      ])
-    ).toEqual({ x: 96, y: 188 });
-    expect(
-      getNextNodePositionInStage([
-        createNodeDraft({
-          nodeKey: "checkout_source",
-          stageKey: "prepare",
-          nodeType: "checkout_branch",
-          position: { x: 96, y: 188 },
-        }),
-        createNodeDraft({
-          nodeKey: "trigger_release",
-          stageKey: "prepare",
-          nodeType: "trigger_pipeline",
-          position: { x: 96, y: 72 },
-        }),
-      ])
-    ).toEqual({ x: 96, y: 304 });
-  });
-
   it("removes a stage together with its nodes, edges, and inferred variable rows", () => {
     const baseDraft = createEmptyPipelineDraft();
-    const baseNodeKey = baseDraft.nodes[0]?.nodeKey ?? "";
+    const prepareNode = createNodeDraft({
+      id: "checkout-source",
+      nodeKey: "checkout_source",
+      stageKey: "stage-1",
+      nodeType: "checkout_branch",
+      parameters: {
+        branch: "${source_branch}",
+      },
+      position: { x: 96, y: 72 },
+    });
     const deployStage = createStageDraft({
       id: "deploy",
       stageKey: "deploy",
@@ -328,11 +341,11 @@ describe("pipeline graph model", () => {
     const draft = {
       ...baseDraft,
       stages: [...baseDraft.stages, deployStage],
-      nodes: [...baseDraft.nodes, deployNode],
+      nodes: [prepareNode, deployNode],
       edges: [
         {
-          id: `${baseNodeKey}->trigger_release`,
-          sourceNodeKey: baseNodeKey,
+          id: "checkout_source->trigger_release",
+          sourceNodeKey: "checkout_source",
           targetNodeKey: "trigger_release",
         },
       ],
@@ -347,7 +360,7 @@ describe("pipeline graph model", () => {
     const nextDraft = removeSelectedGraphObject(draft, deployStageNode!);
 
     expect(nextDraft.stages.map((stage) => stage.stageKey)).toEqual(["stage-1"]);
-    expect(nextDraft.nodes.map((node) => node.nodeKey)).toEqual([baseNodeKey]);
+    expect(nextDraft.nodes.map((node) => node.nodeKey)).toEqual(["checkout_source"]);
     expect(nextDraft.edges).toEqual([]);
     expect(nextDraft.variableRows.map((row) => row.key)).toEqual(["source_branch"]);
   });

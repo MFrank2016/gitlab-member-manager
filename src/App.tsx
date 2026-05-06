@@ -4,6 +4,7 @@ import { Toaster } from "sonner";
 import { Sidebar } from "@/components/ui/sidebar";
 import { CommandBar, CommandBarSection, CommandBarTitle } from "@/components/ui/command-bar";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { WorkflowRunsPage as WorkflowRunsPageView } from "@/pages/WorkflowRunsPage";
 
 type WorkflowRunFocusTarget = {
   runId: number;
@@ -28,9 +29,6 @@ const loadProjectGroupsPage = () =>
   import("@/pages/ProjectGroupsPage").then((module) => ({ default: module.ProjectGroupsPage }));
 const loadWorkflowsPage = () =>
   import("@/pages/WorkflowsPage").then((module) => ({ default: module.WorkflowsPage }));
-const loadWorkflowRunsPage = () =>
-  import("@/pages/WorkflowRunsPage").then((module) => ({ default: module.WorkflowRunsPage }));
-
 const ProjectsPage = lazyPage(loadProjectsPage);
 const MembersPage = lazyPage(loadMembersPage);
 const LocalMembersPage = lazyPage(loadLocalMembersPage);
@@ -38,7 +36,6 @@ const GroupsPage = lazyPage(loadGroupsPage);
 const ManagedProjectsPage = lazyPage(loadManagedProjectsPage);
 const ProjectGroupsPage = lazyPage(loadProjectGroupsPage);
 const WorkflowsPage = lazyPage(loadWorkflowsPage);
-const WorkflowRunsPage = lazyPage(loadWorkflowRunsPage);
 
 const pageTitles: Record<string, string> = {
   settings: "配置",
@@ -59,13 +56,11 @@ export default function App() {
     React.useState<WorkflowRunFocusTarget | null>(null);
 
   const handlePipelineRunStarted = React.useCallback((runId: number) => {
-    void loadWorkflowRunsPage().finally(() => {
-      setWorkflowRunFocusTarget((current) => ({
-        runId,
-        nonce: (current?.nonce ?? 0) + 1,
-      }));
-      setActiveTab("workflowRuns");
-    });
+    setWorkflowRunFocusTarget((current) => ({
+      runId,
+      nonce: (current?.nonce ?? 0) + 1,
+    }));
+    setActiveTab("workflowRuns");
   }, []);
 
   const handleWorkflowRunFocusHandled = React.useCallback(() => {
@@ -113,7 +108,7 @@ export default function App() {
                 <WorkflowsPage onRunStarted={handlePipelineRunStarted} />
               )}
               {activeTab === "workflowRuns" && (
-                <WorkflowRunsPage
+                <WorkflowRunsPageView
                   focusTarget={workflowRunFocusTarget}
                   onFocusHandled={handleWorkflowRunFocusHandled}
                 />

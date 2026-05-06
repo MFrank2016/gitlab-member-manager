@@ -152,6 +152,41 @@ function activateEditorTab(name: string) {
   });
 }
 
+/*
+
+async function addNodeToSelectedStage(expectedCount: number) {
+  fireEvent.click(screen.getByTestId("pipeline-graph-add-node-button"));
+  await waitFor(() => {
+    expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(
+      expectedCount
+    );
+  });
+}
+
+*/
+
+/*
+
+async function addNodeToSelectedStage(expectedCount: number) {
+  fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
+  await waitFor(() => {
+    expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(
+      expectedCount
+    );
+  });
+}
+
+*/
+
+async function clickAddNode(expectedCount: number) {
+  fireEvent.click(screen.getByTestId("pipeline-graph-add-node-button"));
+  await waitFor(() => {
+    expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(
+      expectedCount
+    );
+  });
+}
+
 describe("pipeline definition editor", () => {
   beforeEach(() => {
     resetPipelineDraftCountersForTest();
@@ -268,8 +303,9 @@ describe("pipeline definition editor", () => {
 
   fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
   await waitFor(() => {
-    expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(2);
+    expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(1);
   });
+  await clickAddNode(2);
   const actionNodes = screen.getAllByTestId(/graph-node-checkout_branch_node-/);
   const firstNode = actionNodes[0];
   const secondNodeKey =
@@ -383,6 +419,9 @@ describe("pipeline definition editor", () => {
     target: { value: "release-pipeline" },
   });
 
+  activateEditorTab("画布");
+  await clickAddNode(1);
+
   fireEvent.click(saveButton);
   await waitFor(() => {
     expect(invokeMock).toHaveBeenCalledWith(
@@ -398,6 +437,7 @@ describe("pipeline definition editor", () => {
   render(<WorkflowsPage />);
 
   fireEvent.click(getCreateTrigger());
+  await clickAddNode(1);
   fireEvent.change(screen.getByLabelText("节点类型"), {
     target: { value: "switch_project" },
   });
@@ -445,6 +485,8 @@ describe("pipeline definition editor", () => {
     target: { value: "release-pipeline" },
   });
 
+  activateEditorTab("画布");
+  await clickAddNode(1);
   activateEditorTab("变量");
   const firstRow = await screen.findByTestId("pipeline-variable-row");
   fireEvent.click(within(firstRow).getByRole("button", { name: /source_branch/i }));

@@ -101,15 +101,16 @@ describe("PipelineDefinitionEditorShell", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加变量" }));
 
     const rows = screen.getAllByTestId("pipeline-variable-row");
+    expect(rows).toHaveLength(1);
     const newestRow = rows[rows.length - 1];
 
-    fireEvent.change(within(newestRow).getByLabelText("变量 2 键"), {
+    fireEvent.change(within(newestRow).getByLabelText("变量 1 键"), {
       target: { value: "release_branch" },
     });
 
     const nextDraft = parseDraft();
-    expect(nextDraft.variableRows).toHaveLength(2);
-    expect(nextDraft.variableRows[1]).toMatchObject({
+    expect(nextDraft.variableRows).toHaveLength(1);
+    expect(nextDraft.variableRows[0]).toMatchObject({
       key: "release_branch",
       source: "manual",
     });

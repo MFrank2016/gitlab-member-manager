@@ -20,9 +20,15 @@ const STAGE_GROUP_HEIGHT = 360;
 const STAGE_GROUP_GAP_X = 360;
 const STAGE_GROUP_START_X = 24;
 const STAGE_GROUP_START_Y = 32;
-const ACTION_NODE_START_X = 96;
-const ACTION_NODE_START_Y = 72;
-const ACTION_NODE_GAP_Y = 116;
+const STAGE_NODE_START_X = 96;
+const STAGE_NODE_START_Y = 72;
+const STAGE_NODE_GAP_Y = 116;
+const STAGE_NODE_VISIBLE_SLOT_COUNT = Math.max(
+  1,
+  Math.floor((STAGE_GROUP_HEIGHT - STAGE_NODE_START_Y) / STAGE_NODE_GAP_Y)
+);
+const STAGE_NODE_LAST_VISIBLE_Y =
+  STAGE_NODE_START_Y + (STAGE_NODE_VISIBLE_SLOT_COUNT - 1) * STAGE_NODE_GAP_Y;
 
 export type StageGraphNodeData = {
   kind: "stage";
@@ -49,10 +55,21 @@ export type PipelineGraphState = {
   edges: PipelineGraphEdge[];
 };
 
-export function getNextNodePositionInStage(nodesInStage: NodeDraft[]) {
+export function getNextNodePositionInStage(
+  nodes: Array<Pick<NodeDraft, "stageKey" | "position">>,
+  stageKey: string
+) {
+  const stageNodes = nodes.filter((node) => node.stageKey === stageKey);
+  const nextY =
+    stageNodes.reduce(
+      (currentMax, node) => Math.max(currentMax, node.position.y),
+      STAGE_NODE_START_Y - STAGE_NODE_GAP_Y
+    ) + STAGE_NODE_GAP_Y;
+
   return {
-    x: ACTION_NODE_START_X,
-    y: ACTION_NODE_START_Y + nodesInStage.length * ACTION_NODE_GAP_Y,
+    x: STAGE_NODE_START_X,
+    // 新节点沿用阶段内的默认纵向槽位，但最后一个槽位必须完整留在容器内。
+    y: Math.min(Math.max(nextY, STAGE_NODE_START_Y), STAGE_NODE_LAST_VISIBLE_Y),
   };
 }
 

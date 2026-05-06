@@ -50,6 +50,21 @@ const nodeTypes = {
   [PIPELINE_ACTION_NODE_TYPE]: PipelineActionNode,
 };
 
+const actionButtonClassName =
+  "h-auto w-full justify-start whitespace-normal px-4 py-2.5 text-left leading-5";
+
+function getDefaultSelectedId(draft: PipelineDraft) {
+  return draft.nodes[0]?.nodeKey ?? draft.stages[0]?.stageKey ?? null;
+}
+
+function getDefaultActiveStageKey(draft: PipelineDraft) {
+  return draft.nodes[0]?.stageKey ?? draft.stages[0]?.stageKey ?? null;
+}
+
+function getGraphNodeStageKey(node: PipelineGraphNode) {
+  return isActionGraphNode(node) ? node.data.stageKey : node.data.stageKey;
+}
+
 export function PipelineGraphEditor({
   draft,
   managedProjects = [],
@@ -57,7 +72,10 @@ export function PipelineGraphEditor({
 }: PipelineGraphEditorProps) {
   const reactFlowRef = React.useRef<{ fitView: () => void } | null>(null);
   const [selectedId, setSelectedId] = React.useState<string | null>(
-    () => draft.nodes[0]?.nodeKey ?? draft.stages[0]?.stageKey ?? null
+    () => getDefaultSelectedId(draft)
+  );
+  const [activeStageKey, setActiveStageKey] = React.useState<string | null>(
+    () => getDefaultActiveStageKey(draft)
   );
   const [connectionTarget, setConnectionTarget] = React.useState("");
   const [graphMessage, setGraphMessage] = React.useState<string | null>(null);
@@ -74,6 +92,17 @@ export function PipelineGraphEditor({
     }
   }, [graphNodeMap, selectedId]);
 
+  React.useEffect(() => {
+    if (activeStageKey && draft.stages.some((stage) => stage.stageKey === activeStageKey)) {
+      return;
+    }
+
+    const fallbackStageKey = getDefaultActiveStageKey(draft);
+    if (activeStageKey !== fallbackStageKey) {
+      setActiveStageKey(fallbackStageKey);
+    }
+  }, [activeStageKey, draft]);
+
   const selectedGraphNode = selectedId ? graphNodeMap.get(selectedId) ?? null : null;
   const selectedActionNode =
     selectedGraphNode && isActionGraphNode(selectedGraphNode)
@@ -85,6 +114,8 @@ export function PipelineGraphEditor({
       : selectedActionNode
         ? draft.stages.find((stage) => stage.stageKey === selectedActionNode.stageKey) ?? null
         : null;
+  const activeStage =
+    draft.stages.find((stage) => stage.stageKey === activeStageKey) ?? null;
 
   const selection = selectedActionNode
     ? { kind: "node" as const, node: selectedActionNode }
@@ -104,7 +135,9 @@ export function PipelineGraphEditor({
     ? selectedActionNode.nodeKey
     : selectedStage
       ? selectedStage.stageKey
-      : "先在画布中选择一个阶段或节点";
+      : activeStage
+        ? `当前活动阶段：${activeStage.name}`
+        : "先在画布中选择一个阶段或节点";
 
   function applyDraft(nextDraft: PipelineDraft) {
     setGraphMessage(null);
@@ -136,12 +169,11 @@ export function PipelineGraphEditor({
     });
     updateStages([...draft.stages, stage]);
     setSelectedId(stage.stageKey);
+    setActiveStageKey(stage.stageKey);
   }
 
   function resolveActiveStageKey() {
-    if (selectedActionNode) return selectedActionNode.stageKey;
-    if (selectedStage) return selectedStage.stageKey;
-    return "";
+    return activeStageKey ?? "";
   }
 
   function addNode() {
@@ -151,15 +183,15 @@ export function PipelineGraphEditor({
       return;
     }
 
-    const nodesInStage = draft.nodes.filter((node) => node.stageKey === stageKey);
     const nextNode = createNodeDraft({
       stageKey,
       nodeType: "checkout_branch",
-      position: getNextNodePositionInStage(nodesInStage),
+      position: getNextNodePositionInStage(draft.nodes, stageKey),
     });
 
     updateNodes([...draft.nodes, nextNode]);
     setSelectedId(nextNode.nodeKey);
+    setActiveStageKey(stageKey);
   }
 
   function updateStage(stageKey: string, updater: (stage: StageDraft) => StageDraft) {
@@ -189,6 +221,12 @@ export function PipelineGraphEditor({
       );
     if (nextSelected) {
       setSelectedId(nextSelected.selected ? nextSelected.id : null);
+      if (nextSelected.selected) {
+        const nextGraphNode = nextGraphNodes.find((node) => node.id === nextSelected.id);
+        if (nextGraphNode) {
+          setActiveStageKey(getGraphNodeStageKey(nextGraphNode));
+        }
+      }
     }
 
     applyDraft(nextDraft);
@@ -200,7 +238,11 @@ export function PipelineGraphEditor({
       return;
     }
 
-    setSelectedId(params.nodes[0]?.id ?? null);
+    const node = params.nodes[0] ?? null;
+    setSelectedId(node?.id ?? null);
+    if (node) {
+      setActiveStageKey(getGraphNodeStageKey(node));
+    }
   }
 
   function commitConnection(connection: Connection) {
@@ -242,9 +284,19 @@ export function PipelineGraphEditor({
       return;
     }
 
+    const nextDraft = removeSelectedGraphObject(draft, selectedGraphNode);
+    const fallbackStageKey = isActionGraphNode(selectedGraphNode)
+      ? selectedGraphNode.data.stageKey
+      : getDefaultActiveStageKey(nextDraft);
+
     setSelectedId(null);
+    setActiveStageKey(
+      nextDraft.stages.some((stage) => stage.stageKey === fallbackStageKey)
+        ? fallbackStageKey
+        : getDefaultActiveStageKey(nextDraft)
+    );
     setConnectionTarget("");
-    applyDraft(removeSelectedGraphObject(draft, selectedGraphNode));
+    applyDraft(nextDraft);
   }
 
   return (
@@ -256,20 +308,33 @@ export function PipelineGraphEditor({
         </p>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)_320px]">
-        <aside className="grid gap-3 rounded-xl border border-border bg-muted/20 p-3">
+      <div
+        data-testid="pipeline-graph-layout"
+        className="grid gap-4 xl:grid-cols-[260px_minmax(0,1fr)_300px]"
+      >
+        <aside
+          data-testid="pipeline-graph-actions-panel"
+          className="grid content-start gap-3 rounded-xl border border-border bg-muted/20 p-3"
+        >
           <div className="space-y-1">
             <h4 className="text-sm font-semibold">编辑操作</h4>
             <p className="text-xs text-muted-foreground">
               先选中阶段或节点，再执行对应操作。
             </p>
           </div>
-          <Button type="button" onClick={addStage}>
+          <Button
+            type="button"
+            data-testid="pipeline-graph-add-stage-button"
+            className={actionButtonClassName}
+            onClick={addStage}
+          >
             添加阶段
           </Button>
           <Button
             type="button"
             variant="secondary"
+            data-testid="pipeline-graph-add-node-button"
+            className={actionButtonClassName}
             onClick={addNode}
             disabled={!resolveActiveStageKey()}
           >
@@ -279,7 +344,7 @@ export function PipelineGraphEditor({
             <Label htmlFor="pipeline-graph-connect-target">连接到节点</Label>
             <select
               id="pipeline-graph-connect-target"
-              className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+              className="min-h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm leading-5"
               value={connectionTarget}
               onChange={(event) => setConnectionTarget(event.target.value)}
               disabled={!selectedActionNode}
@@ -296,17 +361,27 @@ export function PipelineGraphEditor({
           <Button
             type="button"
             variant="outline"
+            data-testid="pipeline-graph-create-connection-button"
+            className={actionButtonClassName}
             onClick={createConnectionFromPanel}
             disabled={!selectedActionNode || !connectionTarget}
           >
             创建连线
           </Button>
-          <Button type="button" variant="outline" onClick={fitCanvasToViewport}>
+          <Button
+            type="button"
+            variant="outline"
+            data-testid="pipeline-graph-fit-view-button"
+            className={actionButtonClassName}
+            onClick={fitCanvasToViewport}
+          >
             适配全貌
           </Button>
           <Button
             type="button"
             variant="outline"
+            data-testid="pipeline-graph-delete-button"
+            className={actionButtonClassName}
             onClick={deleteSelectedObject}
             disabled={!selectedGraphNode}
           >
@@ -332,7 +407,7 @@ export function PipelineGraphEditor({
         </aside>
 
         <div
-          className="h-[560px] rounded-2xl border border-border bg-slate-100/70"
+          className="min-w-0 h-[560px] rounded-2xl border border-border bg-slate-100/70"
           data-testid="pipeline-graph-editor"
         >
           <ReactFlow
@@ -342,7 +417,10 @@ export function PipelineGraphEditor({
             onInit={(instance) => {
               reactFlowRef.current = instance;
             }}
-            onNodeClick={(_, node) => setSelectedId(node.id)}
+            onNodeClick={(_, node) => {
+              setSelectedId(node.id);
+              setActiveStageKey(getGraphNodeStageKey(node));
+            }}
             onNodesChange={handleNodesChange}
             onSelectionChange={handleSelectionChange}
             onConnect={commitConnection}
