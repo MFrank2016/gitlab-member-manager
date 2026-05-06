@@ -280,6 +280,66 @@ describe("PipelineGraphEditor", () => {
     expect(within(actionCard).queryByText(nextNode.stageKey)).not.toBeInTheDocument();
   });
 
+  it("selects a stage on left click and opens stage editing state", async () => {
+    render(<EditorHarness />);
+
+    await addNodeToSelectedStage(1);
+    clickGraphObject("stage-1");
+
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中阶段"
+    );
+    expect(screen.getByLabelText("阶段名称")).toBeInTheDocument();
+  });
+
+  it("selects a node on left click and opens node editing state", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    clickGraphObject("stage-1");
+    clickGraphObject(nextNode.nodeKey);
+
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+  });
+
+  it("opens the stage context menu on right click without changing the current selection", async () => {
+    render(<EditorHarness />);
+
+    await addNodeToSelectedStage(1);
+
+    fireEvent.contextMenu(screen.getByTestId("pipeline-stage-node-card-stage-1"), {
+      clientX: 160,
+      clientY: 220,
+    });
+
+    expect(await screen.findByRole("menuitem", { name: "添加节点" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "删除阶段" })).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+  });
+
+  it("opens the node context menu on right click without changing the current selection", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    clickGraphObject("stage-1");
+
+    fireEvent.contextMenu(screen.getByTestId(`pipeline-action-node-card-${nextNode.nodeKey}`), {
+      clientX: 240,
+      clientY: 260,
+    });
+
+    expect(await screen.findByRole("menuitem", { name: "删除节点" })).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中阶段"
+    );
+    expect(screen.getByLabelText("阶段名称")).toBeInTheDocument();
+  });
   it("connects nodes and blocks duplicate connections", async () => {
     render(<EditorHarness />);
 

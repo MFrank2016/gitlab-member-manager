@@ -45,6 +45,11 @@ type PipelineGraphEditorProps = {
   onChange: (next: PipelineDraft) => void;
 };
 
+type ContextMenuState =
+  | { kind: "stage"; stageKey: string; x: number; y: number }
+  | { kind: "node"; nodeKey: string; x: number; y: number }
+  | null;
+
 const nodeTypes = {
   [STAGE_GROUP_NODE_TYPE]: StageGroupNode,
   [PIPELINE_ACTION_NODE_TYPE]: PipelineActionNode,
@@ -52,6 +57,8 @@ const nodeTypes = {
 
 const actionButtonClassName =
   "h-auto w-full justify-start whitespace-normal px-4 py-2.5 text-left leading-5";
+const contextMenuItemClassName =
+  "w-full rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-slate-100";
 
 function getDefaultSelectedId(draft: PipelineDraft) {
   return draft.nodes[0]?.nodeKey ?? draft.stages[0]?.stageKey ?? null;
@@ -79,8 +86,52 @@ export function PipelineGraphEditor({
   );
   const [connectionTarget, setConnectionTarget] = React.useState("");
   const [graphMessage, setGraphMessage] = React.useState<string | null>(null);
+  const [contextMenuState, setContextMenuState] = React.useState<ContextMenuState>(null);
 
   const graphState = React.useMemo(() => buildGraphEditorState(draft), [draft]);
+  const graphNodes = React.useMemo(
+    () =>
+      graphState.nodes.map((node) => {
+        if (isStageGraphNode(node)) {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              onContextMenu: ({
+                stageKey,
+                x,
+                y,
+              }: {
+                stageKey: string;
+                x: number;
+                y: number;
+              }) => {
+                setContextMenuState({ kind: "stage", stageKey, x, y });
+              },
+            } as PipelineGraphNode["data"],
+          };
+        }
+
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            onContextMenu: ({
+              nodeKey,
+              x,
+              y,
+            }: {
+              nodeKey: string;
+              x: number;
+              y: number;
+            }) => {
+              setContextMenuState({ kind: "node", nodeKey, x, y });
+            },
+          } as PipelineGraphNode["data"],
+        };
+      }),
+    [graphState.nodes]
+  );
   const graphNodeMap = React.useMemo(
     () => new Map(graphState.nodes.map((node) => [node.id, node])),
     [graphState.nodes]
@@ -139,9 +190,21 @@ export function PipelineGraphEditor({
         ? `当前活动阶段：${activeStage.name}`
         : "先在画布中选择一个阶段或节点";
 
+  const contextMenuTargetId =
+    contextMenuState?.kind === "stage"
+      ? contextMenuState.stageKey
+      : contextMenuState?.nodeKey ?? null;
+  const contextMenuTargetNode = contextMenuTargetId
+    ? graphNodeMap.get(contextMenuTargetId) ?? null
+    : null;
+
   function applyDraft(nextDraft: PipelineDraft) {
     setGraphMessage(null);
     onChange(nextDraft);
+  }
+
+  function closeContextMenu() {
+    setContextMenuState(null);
   }
 
   function updateNodes(nextNodes: NodeDraft[]) {
@@ -167,6 +230,7 @@ export function PipelineGraphEditor({
       name: `阶段 ${nextIndex}`,
       enabled: true,
     });
+    closeContextMenu();
     updateStages([...draft.stages, stage]);
     setSelectedId(stage.stageKey);
     setActiveStageKey(stage.stageKey);
@@ -189,6 +253,7 @@ export function PipelineGraphEditor({
       position: getNextNodePositionInStage(draft.nodes, stageKey),
     });
 
+    closeContextMenu();
     updateNodes([...draft.nodes, nextNode]);
     setSelectedId(nextNode.nodeKey);
     setActiveStageKey(stageKey);
@@ -220,6 +285,7 @@ export function PipelineGraphEditor({
           change.type === "select" && "selected" in change
       );
     if (nextSelected) {
+      closeContextMenu();
       setSelectedId(nextSelected.selected ? nextSelected.id : null);
       if (nextSelected.selected) {
         const nextGraphNode = nextGraphNodes.find((node) => node.id === nextSelected.id);
@@ -233,6 +299,7 @@ export function PipelineGraphEditor({
   }
 
   function handleSelectionChange(params: { nodes: PipelineGraphNode[] }) {
+    closeContextMenu();
     if (params.nodes.length !== 1) {
       setSelectedId(null);
       return;
@@ -276,6 +343,48 @@ export function PipelineGraphEditor({
 
   function fitCanvasToViewport() {
     reactFlowRef.current?.fitView();
+  }
+
+  function deleteContextMenuTargetNode(targetNode: PipelineGraphNode) {
+    closeContextMenu();
+
+    const nextDraft = removeSelectedGraphObject(draft, targetNode);
+    const deletesCurrentSelection = selectedGraphNode?.id === targetNode.id;
+
+    if (deletesCurrentSelection) {
+      const fallbackStageKey = isActionGraphNode(targetNode)
+        ? targetNode.data.stageKey
+        : getDefaultActiveStageKey(nextDraft);
+
+      setSelectedId(null);
+      setActiveStageKey(
+        nextDraft.stages.some((stage) => stage.stageKey === fallbackStageKey)
+          ? fallbackStageKey
+          : getDefaultActiveStageKey(nextDraft)
+      );
+      setConnectionTarget("");
+      applyDraft(nextDraft);
+      return;
+    }
+
+    if (connectionTarget && !nextDraft.nodes.some((node) => node.nodeKey === connectionTarget)) {
+      setConnectionTarget("");
+    }
+
+    applyDraft(nextDraft);
+  }
+
+  function handleStageContextAddNode() {
+    closeContextMenu();
+  }
+
+  function handleContextMenuDelete() {
+    if (!contextMenuTargetNode) {
+      closeContextMenu();
+      return;
+    }
+
+    deleteContextMenuTargetNode(contextMenuTargetNode);
   }
 
   function deleteSelectedObject() {
@@ -407,19 +516,24 @@ export function PipelineGraphEditor({
         </aside>
 
         <div
-          className="min-w-0 h-[560px] rounded-2xl border border-border bg-slate-100/70"
+          className="relative min-w-0 h-[560px] rounded-2xl border border-border bg-slate-100/70"
           data-testid="pipeline-graph-editor"
         >
           <ReactFlow
-            nodes={graphState.nodes}
+            nodes={graphNodes}
             edges={graphState.edges}
             nodeTypes={nodeTypes}
             onInit={(instance) => {
               reactFlowRef.current = instance;
             }}
             onNodeClick={(_, node) => {
+              closeContextMenu();
               setSelectedId(node.id);
               setActiveStageKey(getGraphNodeStageKey(node));
+            }}
+            onPaneClick={() => {
+              closeContextMenu();
+              setSelectedId(null);
             }}
             onNodesChange={handleNodesChange}
             onSelectionChange={handleSelectionChange}
@@ -433,6 +547,48 @@ export function PipelineGraphEditor({
             <MiniMap />
             <Controls />
           </ReactFlow>
+
+          {contextMenuState ? (
+            <div
+              role="menu"
+              aria-label={contextMenuState.kind === "stage" ? "阶段上下文菜单" : "节点上下文菜单"}
+              className="fixed z-50 min-w-[144px] rounded-lg border border-slate-200 bg-white p-1.5 shadow-lg"
+              style={{
+                left: contextMenuState.x,
+                top: contextMenuState.y,
+              }}
+            >
+              {contextMenuState.kind === "stage" ? (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className={contextMenuItemClassName}
+                    onClick={handleStageContextAddNode}
+                  >
+                    添加节点
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className={contextMenuItemClassName}
+                    onClick={handleContextMenuDelete}
+                  >
+                    删除阶段
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={contextMenuItemClassName}
+                  onClick={handleContextMenuDelete}
+                >
+                  删除节点
+                </button>
+              )}
+            </div>
+          ) : null}
         </div>
 
         <PipelineGraphSelectionPanel

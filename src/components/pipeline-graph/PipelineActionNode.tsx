@@ -1,8 +1,14 @@
+import type { MouseEventHandler } from "react";
+
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 import { cn } from "@/lib/utils";
 
 import type { PipelineActionNodeData } from "./graph-model";
+
+type PipelineActionNodeViewData = PipelineActionNodeData & {
+  onContextMenu?: (payload: { nodeKey: string; x: number; y: number }) => void;
+};
 
 function getStringParameter(
   parameters: Record<string, unknown>,
@@ -57,12 +63,22 @@ function formatNodeType(nodeType: string) {
 export function PipelineActionNode({
   data,
   selected,
-}: NodeProps<PipelineActionNodeData>) {
+}: NodeProps<PipelineActionNodeViewData>) {
   const summary = buildActionSummary(data);
+  const handleContextMenu: MouseEventHandler<HTMLDivElement> = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    data.onContextMenu?.({
+      nodeKey: data.nodeKey,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  };
 
   return (
     <div
       data-testid={`pipeline-action-node-card-${data.nodeKey}`}
+      onContextMenu={handleContextMenu}
       className={cn(
         "w-[188px] max-w-[188px] overflow-hidden rounded-xl border bg-white/95 p-3 shadow-sm transition-colors",
         selected

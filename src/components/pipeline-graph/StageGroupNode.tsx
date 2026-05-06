@@ -1,16 +1,33 @@
+import type { MouseEventHandler } from "react";
+
 import type { NodeProps } from "@xyflow/react";
 
 import { cn } from "@/lib/utils";
 
 import type { StageGraphNodeData } from "./graph-model";
 
+type StageGroupNodeData = StageGraphNodeData & {
+  onContextMenu?: (payload: { stageKey: string; x: number; y: number }) => void;
+};
+
 export function StageGroupNode({
   data,
   selected,
-}: NodeProps<StageGraphNodeData>) {
+}: NodeProps<StageGroupNodeData>) {
+  const handleContextMenu: MouseEventHandler<HTMLDivElement> = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    data.onContextMenu?.({
+      stageKey: data.stageKey,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  };
+
   return (
     <div
       data-testid={`pipeline-stage-node-card-${data.stageKey}`}
+      onContextMenu={handleContextMenu}
       className={cn(
         "flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border bg-white/95 p-3 text-slate-900 shadow-sm transition-colors",
         selected
