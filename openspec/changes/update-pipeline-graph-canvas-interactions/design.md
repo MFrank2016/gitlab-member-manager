@@ -23,11 +23,16 @@ The approved scope is narrower than a full editor rewrite. This change keeps `Pi
 - Decision: treat left-click as selection plus inspector focus, and treat right-click as context-menu opening only.
   - Why: the user-approved interaction model depends on predictable editing selection and on context actions that do not silently change persisted data.
 
+- Decision: treat blank-canvas clicks and delete flows as explicit selection-lifecycle events.
+  - Why: the editor needs stable fallback behavior. Blank-canvas left-click clears the visible selection and resets the inspector to its empty state, while deleting the selected object falls back to the most recent remaining valid selection or to the empty state if none remain.
+
 - Decision: create nodes only through a stage-scoped dialog that validates node type and required fields before mutation.
   - Why: incomplete placeholder nodes make the draft harder to reason about and create avoidable save-time failures.
+  - Interaction boundary: right-click opens a stage or node context menu without changing the current selection on its own, while successful node creation immediately selects the new node and moves the inspector into node editing.
 
 - Decision: represent stage-internal layout as deterministic grid slots with reserved whitespace and content-driven container sizing.
   - Why: arbitrary free placement makes node overlap and connection crowding harder to control, while slot-based layout supports predictable reflow after drag operations.
+  - Persistence boundary: the persisted source of truth is the `PipelineDraft` representation derived from stage order and stage-local slot positions, so reload reconstructs the same grid ordering and stage sizing instead of depending on transient DOM coordinates.
 
 - Decision: constrain drag behavior to stage-local node reordering and horizontal stage sorting.
   - Why: the approved v1 scope wants predictable reorder semantics, not a fully freeform canvas.

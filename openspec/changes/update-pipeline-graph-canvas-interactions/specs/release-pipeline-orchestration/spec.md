@@ -14,15 +14,32 @@ The system SHALL provide predictable stage and node editing interactions in the 
 #### Scenario: Open the stage context menu
 - **WHEN** the user right-clicks a stage on the pipeline graph canvas
 - **THEN** the system SHALL open a stage-scoped context menu that exposes actions to create a node in that stage or delete that stage
+- **AND THEN** the system SHALL not change the current selection or inspector target only because of that right-click
 
 #### Scenario: Open the node context menu
 - **WHEN** the user right-clicks a node on the pipeline graph canvas
 - **THEN** the system SHALL open a node-scoped context menu that exposes an action to delete that node
+- **AND THEN** the system SHALL not change the current selection or inspector target only because of that right-click
 
 #### Scenario: Create a node with strict validation
 - **WHEN** the user starts node creation from a stage context menu and submits the create-node dialog
 - **THEN** the system SHALL require a node type and that node type's required fields before creating the node
 - **AND THEN** the system SHALL keep the draft unchanged when the dialog validation fails
+
+#### Scenario: Create a node successfully
+- **WHEN** the user submits a valid create-node dialog for a stage
+- **THEN** the system SHALL create the new node inside that stage through the `PipelineDraft` update path
+- **AND THEN** the system SHALL select the new node and switch the inspector to node editing
+
+#### Scenario: Clear explicit selection from the blank canvas
+- **WHEN** the user left-clicks a blank area of the pipeline graph canvas
+- **THEN** the system SHALL clear the explicitly selected stage or node
+- **AND THEN** the system SHALL reset the inspector to its empty state
+
+#### Scenario: Fall back after deleting the selected object
+- **WHEN** the currently selected stage or node is deleted
+- **THEN** the system SHALL remove that object from the draft and its rendered graph state
+- **AND THEN** the system SHALL fall back to the most recent remaining valid selection, or to the empty inspector state when no valid selection remains
 
 ### Requirement: Structured Stage Graph Layout
 The system SHALL arrange nodes inside each stage with deterministic stage-local grid slots, preserve whitespace for connections, auto-size each stage from its occupied slots, and constrain drag behavior to stage-local node reflow and horizontal stage sorting.
@@ -41,3 +58,8 @@ The system SHALL arrange nodes inside each stage with deterministic stage-local 
 - **WHEN** the user drags a stage on the pipeline graph canvas
 - **THEN** the system SHALL interpret that drag as horizontal stage sorting only
 - **AND THEN** the system SHALL persist the resulting stage order without enabling freeform stage placement
+
+#### Scenario: Recover grid layout after reload
+- **WHEN** stage ordering or stage-local node slot positions change because of node creation, node reflow, or stage sorting
+- **THEN** the system SHALL persist the resulting stage order and stage-local grid-based node positions through the `PipelineDraft` path
+- **AND THEN** the system SHALL reconstruct the same grid ordering and stage sizing when the definition is reloaded
