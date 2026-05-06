@@ -20,6 +20,9 @@ const STAGE_GROUP_HEIGHT = 360;
 const STAGE_GROUP_GAP_X = 360;
 const STAGE_GROUP_START_X = 24;
 const STAGE_GROUP_START_Y = 32;
+const ACTION_NODE_START_X = 96;
+const ACTION_NODE_START_Y = 72;
+const ACTION_NODE_GAP_Y = 116;
 
 export type StageGraphNodeData = {
   kind: "stage";
@@ -45,6 +48,13 @@ export type PipelineGraphState = {
   nodes: PipelineGraphNode[];
   edges: PipelineGraphEdge[];
 };
+
+export function getNextNodePositionInStage(nodesInStage: NodeDraft[]) {
+  return {
+    x: ACTION_NODE_START_X,
+    y: ACTION_NODE_START_Y + nodesInStage.length * ACTION_NODE_GAP_Y,
+  };
+}
 
 function filterEdgesByRemainingNodeKeys(
   draft: PipelineDraft,

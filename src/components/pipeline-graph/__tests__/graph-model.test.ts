@@ -10,6 +10,7 @@ import {
 } from "@/components/pipeline-editor/draft-model";
 import {
   buildGraphEditorState,
+  getNextNodePositionInStage,
   removeSelectedGraphObject,
   syncDraftFromGraphState,
   validateGraphConnection,
@@ -274,8 +275,39 @@ describe("pipeline graph model", () => {
     });
   });
 
+  it("computes a safe visible position for the next node inside a stage", () => {
+    expect(getNextNodePositionInStage([])).toEqual({ x: 96, y: 72 });
+    expect(
+      getNextNodePositionInStage([
+        createNodeDraft({
+          nodeKey: "checkout_source",
+          stageKey: "prepare",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 72 },
+        }),
+      ])
+    ).toEqual({ x: 96, y: 188 });
+    expect(
+      getNextNodePositionInStage([
+        createNodeDraft({
+          nodeKey: "checkout_source",
+          stageKey: "prepare",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 188 },
+        }),
+        createNodeDraft({
+          nodeKey: "trigger_release",
+          stageKey: "prepare",
+          nodeType: "trigger_pipeline",
+          position: { x: 96, y: 72 },
+        }),
+      ])
+    ).toEqual({ x: 96, y: 304 });
+  });
+
   it("removes a stage together with its nodes, edges, and inferred variable rows", () => {
     const baseDraft = createEmptyPipelineDraft();
+    const baseNodeKey = baseDraft.nodes[0]?.nodeKey ?? "";
     const deployStage = createStageDraft({
       id: "deploy",
       stageKey: "deploy",
@@ -299,8 +331,8 @@ describe("pipeline graph model", () => {
       nodes: [...baseDraft.nodes, deployNode],
       edges: [
         {
-          id: "checkout_branch_node-1->trigger_release",
-          sourceNodeKey: "checkout_branch_node-1",
+          id: `${baseNodeKey}->trigger_release`,
+          sourceNodeKey: baseNodeKey,
           targetNodeKey: "trigger_release",
         },
       ],
@@ -315,7 +347,7 @@ describe("pipeline graph model", () => {
     const nextDraft = removeSelectedGraphObject(draft, deployStageNode!);
 
     expect(nextDraft.stages.map((stage) => stage.stageKey)).toEqual(["stage-1"]);
-    expect(nextDraft.nodes.map((node) => node.nodeKey)).toEqual(["checkout_branch_node-1"]);
+    expect(nextDraft.nodes.map((node) => node.nodeKey)).toEqual([baseNodeKey]);
     expect(nextDraft.edges).toEqual([]);
     expect(nextDraft.variableRows.map((row) => row.key)).toEqual(["source_branch"]);
   });

@@ -34,6 +34,8 @@ vi.mock("@xyflow/react", async () => {
       onNodeClick,
       onSelectionChange,
       onInit,
+      panOnDrag,
+      zoomOnScroll,
       selectionOnDrag,
       children,
     }: {
@@ -46,6 +48,8 @@ vi.mock("@xyflow/react", async () => {
         edges: Array<Record<string, unknown>>;
       }) => void;
       onInit?: (instance: { fitView: () => void }) => void;
+      panOnDrag?: boolean;
+      zoomOnScroll?: boolean;
       selectionOnDrag?: boolean;
       children?: React.ReactNode;
     }) => {
@@ -58,6 +62,12 @@ vi.mock("@xyflow/react", async () => {
       return (
         <div data-testid="mock-react-flow">
           <div data-testid="mock-react-flow-edge-count">{edges.length}</div>
+          <div data-testid="mock-react-flow-pan-on-drag">
+            {String(Boolean(panOnDrag))}
+          </div>
+          <div data-testid="mock-react-flow-zoom-on-scroll">
+            {String(Boolean(zoomOnScroll))}
+          </div>
           <div data-testid="mock-react-flow-selection-on-drag">
             {String(Boolean(selectionOnDrag))}
           </div>
@@ -258,6 +268,13 @@ describe("PipelineGraphEditor", () => {
     render(<EditorHarness />);
 
     expect(screen.getByTestId("mock-react-flow-selection-on-drag")).toHaveTextContent("false");
+  });
+
+  it("passes pan and zoom controls through to React Flow", () => {
+    render(<EditorHarness />);
+
+    expect(screen.getByTestId("mock-react-flow-pan-on-drag")).toHaveTextContent("true");
+    expect(screen.getByTestId("mock-react-flow-zoom-on-scroll")).toHaveTextContent("true");
   });
 
   it("exposes a fit-view action", () => {

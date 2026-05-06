@@ -27,6 +27,7 @@ import {
   PIPELINE_ACTION_NODE_TYPE,
   STAGE_GROUP_NODE_TYPE,
   buildGraphEditorState,
+  getNextNodePositionInStage,
   isActionGraphNode,
   isStageGraphNode,
   removeSelectedGraphObject,
@@ -154,10 +155,7 @@ export function PipelineGraphEditor({
     const nextNode = createNodeDraft({
       stageKey,
       nodeType: "checkout_branch",
-      position: {
-        x: 96,
-        y: 72 + nodesInStage.length * 116,
-      },
+      position: getNextNodePositionInStage(nodesInStage),
     });
 
     updateNodes([...draft.nodes, nextNode]);
