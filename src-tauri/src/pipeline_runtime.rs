@@ -111,10 +111,8 @@ struct RenderedPipelineGraphNodeDefinition {
     node_key: String,
     stage_key: String,
     stage_order: i64,
-    stage_name: String,
     node_type: String,
     rendered_parameters: Value,
-    enabled: bool,
     predecessors: Vec<String>,
     successors: Vec<String>,
 }
@@ -122,8 +120,6 @@ struct RenderedPipelineGraphNodeDefinition {
 #[derive(Debug, Clone)]
 struct SeededPipelineRunStage {
     run_stage_id: i64,
-    pipeline_stage_id: i64,
-    stage_key: String,
     stage_name: String,
     stage_order: i64,
 }
@@ -132,17 +128,12 @@ struct SeededPipelineRunStage {
 struct PipelineGraphExecutionNode {
     run_node_id: i64,
     run_stage_id: i64,
-    pipeline_node_id: i64,
     node_order: i64,
     node_key: String,
-    stage_key: String,
     stage_order: i64,
-    stage_name: String,
     node_type: String,
     rendered_parameters: Value,
-    enabled: bool,
     predecessors: Vec<String>,
-    successors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,7 +148,6 @@ struct PipelineGraphExecutionPlan {
 enum GraphNodeFailureKind {
     Failed,
     FailedPrecheck,
-    Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -266,14 +256,12 @@ fn render_pipeline_graph_for_run(
 
     let mut stages = Vec::new();
     let mut stage_order_by_key = HashMap::<String, i64>::new();
-    let mut stage_name_by_key = HashMap::<String, String>::new();
     let mut enabled_stage_keys = HashSet::<String>::new();
     for stage in &pipeline.stages {
         if !stage.enabled {
             continue;
         }
         stage_order_by_key.insert(stage.stage_key.clone(), stage.stage_order);
-        stage_name_by_key.insert(stage.stage_key.clone(), stage.name.clone());
         enabled_stage_keys.insert(stage.stage_key.clone());
         stages.push(RenderedPipelineStageDefinition {
             pipeline_stage_id: stage.id,
@@ -319,20 +307,14 @@ fn render_pipeline_graph_for_run(
         let stage_order = *stage_order_by_key
             .get(&stage_key)
             .ok_or_else(|| anyhow!("pipeline node stage key not found during execution: {stage_key}"))?;
-        let stage_name = stage_name_by_key
-            .get(&stage_key)
-            .cloned()
-            .ok_or_else(|| anyhow!("pipeline node stage name not found during execution: {stage_key}"))?;
         rendered_nodes.push(RenderedPipelineGraphNodeDefinition {
             pipeline_node_id: node.id,
             node_order: node.node_order,
             node_key: node_key.clone(),
             stage_key: stage_key.clone(),
             stage_order,
-            stage_name,
             node_type: node.node_type.clone(),
             rendered_parameters: render_value(&node.parameters, variable_map)?,
-            enabled: true,
             predecessors: predecessors_by_key.remove(&node_key).unwrap_or_default(),
             successors: successors_by_key.remove(&node_key).unwrap_or_default(),
         });
@@ -642,8 +624,6 @@ async fn insert_pipeline_run_stage_rows(
             stage.stage_key.clone(),
             SeededPipelineRunStage {
                 run_stage_id: result.last_insert_rowid(),
-                pipeline_stage_id: stage.pipeline_stage_id,
-                stage_key: stage.stage_key.clone(),
                 stage_name: stage.name.clone(),
                 stage_order: stage.stage_order,
             },
@@ -856,17 +836,12 @@ async fn seed_pipeline_graph_run(
                         .get(&rendered_node.stage_key)
                         .expect("seeded stage present for node")
                         .run_stage_id,
-                    pipeline_node_id: rendered_node.pipeline_node_id,
                     node_order: rendered_node.node_order,
                     node_key: rendered_node.node_key.clone(),
-                    stage_key: rendered_node.stage_key.clone(),
                     stage_order: rendered_node.stage_order,
-                    stage_name: rendered_node.stage_name.clone(),
                     node_type: rendered_node.node_type.clone(),
                     rendered_parameters: rendered_node.rendered_parameters.clone(),
-                    enabled: rendered_node.enabled,
                     predecessors: rendered_node.predecessors.clone(),
-                    successors: rendered_node.successors.clone(),
                 },
             );
             stage_node_keys
@@ -2739,7 +2714,7 @@ async fn run_pipeline_graph_in_background(
         .collect::<Vec<_>>();
     let mut plan_failed = vec![false; plans.len()];
     let mut plan_failed_precheck = vec![false; plans.len()];
-    let mut plan_cancelled = vec![false; plans.len()];
+    let plan_cancelled = vec![false; plans.len()];
     let mut run_cancelled = false;
     let mut run_failed = false;
     let mut blocked_stage_message: Option<String> = None;
@@ -2837,10 +2812,6 @@ async fn run_pipeline_graph_in_background(
                             plan_failed_precheck[plan_index] = true;
                             run_failed = true;
                         }
-                        GraphNodeFailureKind::Cancelled => {
-                            plan_cancelled[plan_index] = true;
-                            run_cancelled = true;
-                        }
                     }
                     stage_failed_kind.get_or_insert(kind);
                 }
@@ -2935,7 +2906,6 @@ async fn run_pipeline_graph_in_background(
                         "failed"
                     }
                 }
-                GraphNodeFailureKind::Cancelled => "cancelled",
             };
             mark_pipeline_stage_finished(&pool, stage.run_stage_id, stage_status, &summary).await?;
             blocked_stage_message = Some(summary);
