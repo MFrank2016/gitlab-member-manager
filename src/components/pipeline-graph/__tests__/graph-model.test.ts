@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   buildPipelineCreatePayload,
@@ -6,12 +6,15 @@ import {
   createNodeDraft,
   createStageDraft,
   ensureVariableRows,
+  resetPipelineDraftCountersForTest,
   toDraftFromDetail,
 } from "@/components/pipeline-editor/draft-model";
 import {
   buildGraphEditorState,
+  buildStageGridLayout,
   getNextNodePositionInStage,
   removeSelectedGraphObject,
+  reorderStageNodesForDrop,
   syncDraftFromGraphState,
   validateGraphConnection,
 } from "@/components/pipeline-graph/graph-model";
@@ -95,6 +98,10 @@ const pipelineDetail: PipelineDefinitionDetail = {
 };
 
 describe("pipeline graph model", () => {
+  beforeEach(() => {
+    resetPipelineDraftCountersForTest();
+  });
+
   it("converts a stage-aware pipeline detail into React Flow group nodes and edges", () => {
     const draft = toDraftFromDetail(pipelineDetail);
     const graphState = buildGraphEditorState(draft);
@@ -152,7 +159,65 @@ describe("pipeline graph model", () => {
     ]);
   });
 
-  it("keeps the next node on the last fully visible slot inside the target stage", () => {
+  it("expands stage container size when a stage needs more grid slots", () => {
+    const compactLayout = buildStageGridLayout([
+      createNodeDraft({
+        stageKey: "stage-1",
+        position: { x: 96, y: 72 },
+      }),
+    ]);
+    const expandedLayout = buildStageGridLayout([
+      createNodeDraft({
+        stageKey: "stage-1",
+        position: { x: 96, y: 72 },
+      }),
+      createNodeDraft({
+        stageKey: "stage-1",
+        position: { x: 96, y: 188 },
+      }),
+      createNodeDraft({
+        stageKey: "stage-1",
+        position: { x: 96, y: 304 },
+      }),
+      createNodeDraft({
+        stageKey: "stage-1",
+        position: { x: 96, y: 420 },
+      }),
+      createNodeDraft({
+        stageKey: "stage-1",
+        position: { x: 96, y: 536 },
+      }),
+    ]);
+
+    expect(compactLayout.width).toBe(320);
+    expect(compactLayout.height).toBe(360);
+    expect(expandedLayout.width).toBe(532);
+    expect(expandedLayout.height).toBe(476);
+  });
+
+  it("lays out stage nodes in a two-dimensional grid with fixed slot gaps", () => {
+    const nodes = [
+      createNodeDraft({
+        stageKey: "stage-1",
+        position: { x: 0, y: 0 },
+      }),
+      createNodeDraft({
+        stageKey: "stage-1",
+        position: { x: 0, y: 0 },
+      }),
+      createNodeDraft({
+        stageKey: "stage-1",
+        position: { x: 0, y: 0 },
+      }),
+    ];
+    const layout = buildStageGridLayout(nodes);
+
+    expect(layout.nodePositions[nodes[0]!.nodeKey]).toEqual({ x: 96, y: 72 });
+    expect(layout.nodePositions[nodes[1]!.nodeKey]).toEqual({ x: 308, y: 72 });
+    expect(layout.nodePositions[nodes[2]!.nodeKey]).toEqual({ x: 96, y: 188 });
+  });
+
+  it("returns the next available two-dimensional slot inside the target stage", () => {
     const nodes = [
       createNodeDraft({
         stageKey: "prepare",
@@ -181,9 +246,40 @@ describe("pipeline graph model", () => {
       }),
     ];
 
-    expect(getNextNodePositionInStage(nodes, "prepare")).toEqual({ x: 96, y: 188 });
+    expect(getNextNodePositionInStage(nodes, "prepare")).toEqual({ x: 308, y: 72 });
     expect(getNextNodePositionInStage(nodes, "deploy")).toEqual({ x: 96, y: 188 });
     expect(getNextNodePositionInStage(nodes, "verify")).toEqual({ x: 96, y: 72 });
+  });
+
+  it("reflows a dropped stage node into non-overlapping canonical grid coordinates", () => {
+    const nodes = [
+      createNodeDraft({
+        nodeKey: "node-a",
+        stageKey: "stage-1",
+        position: { x: 96, y: 72 },
+      }),
+      createNodeDraft({
+        nodeKey: "node-b",
+        stageKey: "stage-1",
+        position: { x: 96, y: 188 },
+      }),
+      createNodeDraft({
+        nodeKey: "node-c",
+        stageKey: "stage-1",
+        position: { x: 96, y: 304 },
+      }),
+    ];
+
+    const reordered = reorderStageNodesForDrop(nodes, "node-c", { col: 1, row: 0 });
+
+    expect(reordered.map((node) => [node.nodeKey, node.position])).toEqual([
+      ["node-a", { x: 96, y: 72 }],
+      ["node-c", { x: 308, y: 72 }],
+      ["node-b", { x: 96, y: 188 }],
+    ]);
+    expect(new Set(reordered.map((node) => `${node.position.x}:${node.position.y}`)).size).toBe(3);
+    expect(reordered[1]!.position.x - reordered[0]!.position.x).toBe(212);
+    expect(reordered[2]!.position.y - reordered[0]!.position.y).toBe(116);
   });
 
   it("serializes graph edits back into the persisted stage-aware payload shape", () => {
@@ -253,8 +349,8 @@ describe("pipeline graph model", () => {
         nodeKey: "wait_remote",
         stageKey: "deploy",
         nodeType: "wait_pipeline",
-        positionX: 144,
-        positionY: 220,
+        positionX: 308,
+        positionY: 72,
         parameters: {
           project: "team/web-service",
           ref: "${target_branch}",
@@ -272,6 +368,97 @@ describe("pipeline graph model", () => {
         targetNodeKey: "wait_remote",
       },
     ]);
+  });
+
+  it("recalculates stage positions after the stage order changes", () => {
+    const baseDraft = createEmptyPipelineDraft();
+    const prepareStage = createStageDraft({
+      id: "prepare",
+      stageKey: "prepare",
+      name: "准备",
+      enabled: true,
+    });
+    const deployStage = createStageDraft({
+      id: "deploy",
+      stageKey: "deploy",
+      name: "发布",
+      enabled: true,
+    });
+    const draft = {
+      ...baseDraft,
+      stages: [prepareStage, deployStage],
+      nodes: [
+        createNodeDraft({
+          nodeKey: "prepare-1",
+          stageKey: "prepare",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 72 },
+        }),
+        createNodeDraft({
+          nodeKey: "prepare-2",
+          stageKey: "prepare",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 188 },
+        }),
+        createNodeDraft({
+          nodeKey: "prepare-3",
+          stageKey: "prepare",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 304 },
+        }),
+        createNodeDraft({
+          nodeKey: "prepare-4",
+          stageKey: "prepare",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 420 },
+        }),
+        createNodeDraft({
+          nodeKey: "prepare-5",
+          stageKey: "prepare",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 536 },
+        }),
+        createNodeDraft({
+          nodeKey: "deploy-1",
+          stageKey: "deploy",
+          nodeType: "trigger_pipeline",
+          position: { x: 96, y: 72 },
+        }),
+      ],
+    };
+
+    const graphState = buildGraphEditorState(draft);
+    const prepareNode = graphState.nodes.find((node) => node.id === "prepare");
+    const deployNode = graphState.nodes.find((node) => node.id === "deploy");
+
+    expect(prepareNode?.style).toMatchObject({ width: 532, height: 476 });
+    expect(deployNode?.position.x).toBe(596);
+
+    const reorderedDraft = syncDraftFromGraphState(draft, {
+      nodes: graphState.nodes.map((node) => {
+        if (node.id === "deploy") {
+          return {
+            ...node,
+            position: { x: 0, y: 32 },
+          };
+        }
+        if (node.id === "prepare") {
+          return {
+            ...node,
+            position: { x: 800, y: 32 },
+          };
+        }
+        return node;
+      }),
+      edges: graphState.edges,
+    });
+    const reorderedGraphState = buildGraphEditorState(reorderedDraft);
+    const reorderedPrepareNode = reorderedGraphState.nodes.find((node) => node.id === "prepare");
+    const reorderedDeployNode = reorderedGraphState.nodes.find((node) => node.id === "deploy");
+
+    expect(reorderedDraft.stages.map((stage) => stage.stageKey)).toEqual(["deploy", "prepare"]);
+    expect(reorderedDeployNode?.position.x).toBe(24);
+    expect(reorderedPrepareNode?.position.x).toBe(384);
   });
 
   it("blocks duplicate, self-loop and reverse-stage connections", () => {
