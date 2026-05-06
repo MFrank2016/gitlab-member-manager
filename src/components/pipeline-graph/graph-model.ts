@@ -237,12 +237,25 @@ function buildStagePositions(stageKeys: string[], stageLayouts: Map<string, Stag
   return positions;
 }
 
+function getNextAvailableStageGridSlot(nodes: Array<Pick<NodeDraft, "position">>) {
+  const occupiedSlotIndexes = new Set(
+    nodes.map((node) => getStageGridSlotIndex(getStageGridSlotFromPosition(node.position)))
+  );
+  let nextSlotIndex = 0;
+
+  while (occupiedSlotIndexes.has(nextSlotIndex)) {
+    nextSlotIndex += 1;
+  }
+
+  return getStageGridSlotForIndex(nextSlotIndex);
+}
+
 export function getNextNodePositionInStage(
   nodes: Array<Pick<NodeDraft, "stageKey" | "position">>,
   stageKey: string
 ) {
   const stageNodes = nodes.filter((node) => node.stageKey === stageKey);
-  return getStageGridPosition(getStageGridSlotForIndex(stageNodes.length));
+  return getStageGridPosition(getNextAvailableStageGridSlot(stageNodes));
 }
 
 function filterEdgesByRemainingNodeKeys(

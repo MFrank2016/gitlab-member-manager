@@ -217,7 +217,7 @@ describe("pipeline graph model", () => {
     expect(layout.nodePositions[nodes[2]!.nodeKey]).toEqual({ x: 96, y: 188 });
   });
 
-  it("returns the next available two-dimensional slot inside the target stage", () => {
+  it("returns the first unoccupied grid slot for legacy vertical stage coordinates", () => {
     const nodes = [
       createNodeDraft({
         stageKey: "prepare",
@@ -232,7 +232,7 @@ describe("pipeline graph model", () => {
           project: "team/web-service",
           ref: "${target_branch}",
         },
-        position: { x: 144, y: 220 },
+        position: { x: 96, y: 72 },
       }),
       createNodeDraft({
         stageKey: "deploy",
@@ -242,12 +242,12 @@ describe("pipeline graph model", () => {
           ref: "${target_branch}",
           sha: "",
         },
-        position: { x: 48, y: 360 },
+        position: { x: 96, y: 188 },
       }),
     ];
 
     expect(getNextNodePositionInStage(nodes, "prepare")).toEqual({ x: 308, y: 72 });
-    expect(getNextNodePositionInStage(nodes, "deploy")).toEqual({ x: 96, y: 188 });
+    expect(getNextNodePositionInStage(nodes, "deploy")).toEqual({ x: 308, y: 72 });
     expect(getNextNodePositionInStage(nodes, "verify")).toEqual({ x: 96, y: 72 });
   });
 
