@@ -38,6 +38,7 @@ import {
   executePipelineRun,
   getPipelineDefinitionDetail,
   getPipelineScheduleRuntimeSnapshots,
+  listPipelineRuns,
   listManagedProjects,
   listPipelineDefinitions,
   readCommandErrorMessage,
@@ -61,6 +62,10 @@ type ActiveDefinitionEditorMode = Exclude<DefinitionEditorMode, "idle">;
 const LEAVE_EDITOR_CONFIRM_MESSAGE = "当前有未保存修改，离开后将丢失，是否继续？";
 const VALIDATION_FAILURE_MESSAGE = (issueCount: number) =>
   `请先处理 ${issueCount} 个校验问题。`;
+
+const RUN_MONITOR_VISIBILITY_TIMEOUT_MS = 2000;
+const RUN_MONITOR_VISIBILITY_POLL_INTERVAL_MS = 100;
+const RUN_MONITOR_VISIBILITY_PAGE_SIZE = 50;
 
 export function WorkflowsPagePipeline({
   onRunStarted,
@@ -409,11 +414,44 @@ export function WorkflowsPagePipeline({
       });
       toast.success(`已创建运行 #${result.pipelineRunId}`);
       handleRunOpenChange(false);
-      onRunStarted?.(result.pipelineRunId);
+      if (onRunStarted) {
+        await waitForRunVisibility(result.pipelineRunId, runItem.id);
+        onRunStarted(result.pipelineRunId);
+      }
     } catch (error) {
       toast.error(readCommandErrorMessage(error, "启动流水线运行失败。"));
     } finally {
       setRunning(false);
+    }
+  }
+
+  async function waitForRunVisibility(
+    pipelineRunId: number,
+    pipelineDefinitionId: number
+  ) {
+    const deadline = Date.now() + RUN_MONITOR_VISIBILITY_TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+      try {
+        const page = await listPipelineRuns({
+          page: 1,
+          pageSize: RUN_MONITOR_VISIBILITY_PAGE_SIZE,
+          status: null,
+          pipelineDefinitionId,
+          projectGroupId: null,
+          sortBy: "updatedAt",
+          sortDirection: "desc",
+        });
+        if (page.items.some((item) => item.id === pipelineRunId)) {
+          return;
+        }
+      } catch {
+        // 启动后短轮询只用于改善跳转时机，不额外打断用户流程。
+      }
+
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, RUN_MONITOR_VISIBILITY_POLL_INTERVAL_MS);
+      });
     }
   }
 

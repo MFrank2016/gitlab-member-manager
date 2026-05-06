@@ -194,6 +194,14 @@ describe("validatePipelineEditorDraft", () => {
 
   it("falls back to payload validation errors after structural checks pass", () => {
     const draft = createValidDraft();
+    const stage = createStageDraft({ stageKey: "stage-1", name: "准备" });
+    const node = createNodeDraft({
+      nodeKey: "node-a",
+      stageKey: stage.stageKey,
+      nodeType: "checkout_branch",
+    });
+    draft.stages = [stage];
+    draft.nodes = [node];
     draft.maxConcurrencyDefault = "0";
 
     expect(buildPipelineEditorValidationSummary(draft)).toEqual(

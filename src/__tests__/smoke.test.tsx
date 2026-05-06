@@ -281,6 +281,10 @@ describe("pipeline definition upgrade smoke", () => {
     await screen.findByRole("heading", { name: "编辑流水线定义" });
   }
 
+  function addMinimalNodeToCreateDraft() {
+    fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
+  }
+
   function expectNoProjectGroupFetch() {
     expect(invokeMock.mock.calls.map(([cmd]) => cmd)).not.toContain(
       "list_project_groups"
@@ -518,6 +522,7 @@ describe("pipeline definition upgrade smoke", () => {
     });
 
     await openCreatePipelineEditor();
+    addMinimalNodeToCreateDraft();
     activateEditorTab("基础信息");
 
     fireEvent.change(screen.getByLabelText("流水线名称"), {
@@ -561,6 +566,7 @@ describe("pipeline definition upgrade smoke", () => {
     });
 
     await openCreatePipelineEditor();
+    addMinimalNodeToCreateDraft();
     activateEditorTab("基础信息");
 
     fireEvent.change(screen.getByLabelText("流水线名称"), {
@@ -978,6 +984,8 @@ describe("pipeline definition upgrade smoke", () => {
   });
 
   it("jumps to the pipeline run monitor after starting a run from the definition list", async () => {
+    let pipelineRunListReads = 0;
+
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "get_gitlab_config") return null;
       if (cmd === "list_workflow_definitions") return [];
@@ -1075,6 +1083,18 @@ describe("pipeline definition upgrade smoke", () => {
         return { pipelineRunId: 451 };
       }
       if (cmd === "list_pipeline_runs") {
+        pipelineRunListReads += 1;
+
+        if (pipelineRunListReads === 1) {
+          return {
+            items: [],
+            page: 1,
+            pageSize: 20,
+            total: 0,
+            hasNextPage: false,
+          };
+        }
+
         return {
           items: [
             {
