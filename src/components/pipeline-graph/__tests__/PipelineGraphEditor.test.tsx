@@ -570,7 +570,7 @@ describe("PipelineGraphEditor", () => {
     expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
   });
 
-  it("deletes the selected node from the context menu and preserves stage fallback cleanup", async () => {
+  it("falls back to the owning stage after deleting the selected node", async () => {
     render(<EditorHarness />);
 
     const nextNode = await addNodeToSelectedStage(1);
@@ -585,12 +585,11 @@ describe("PipelineGraphEditor", () => {
 
     expect(screen.queryByTestId(`graph-node-${nextNode.nodeKey}`)).not.toBeInTheDocument();
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
-      "未选中对象"
+      "已选中阶段"
     );
-    expect(screen.getByText("当前活动阶段：阶段 1")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "在所选阶段添加节点" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "删除选中对象" })).toBeDisabled();
-    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
+    expect(screen.getByRole("button", { name: "删除选中对象" })).toBeEnabled();
+    expect(document.getElementById("pipeline-stage-name-input")).not.toBeNull();
     expect(document.getElementById("pipeline-node-type-select")).toBeNull();
   });
   it("connects nodes and blocks duplicate connections", async () => {
@@ -680,12 +679,11 @@ describe("PipelineGraphEditor", () => {
     });
 
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
-      "未选中对象"
+      "已选中阶段"
     );
-    expect(screen.getByText("当前活动阶段：阶段 2")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "在所选阶段添加节点" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "删除选中对象" })).toBeDisabled();
-    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
+    expect(screen.getByRole("button", { name: "删除选中对象" })).toBeEnabled();
+    expect(document.getElementById("pipeline-stage-name-input")).not.toBeNull();
     expect(document.getElementById("pipeline-node-type-select")).toBeNull();
   });
 
@@ -1029,7 +1027,7 @@ describe("PipelineGraphEditor", () => {
     expect(nextNode.stageKey).toBe("stage-2");
   });
 
-  it("clears the inspector but preserves fallback stage context after deleting the selected stage", async () => {
+  it("falls back to another stage after deleting the selected stage", async () => {
     render(<EditorHarness />);
 
     fireEvent.click(screen.getByTestId("pipeline-graph-add-stage-button"));
@@ -1042,9 +1040,12 @@ describe("PipelineGraphEditor", () => {
       expect(draft.stages[0]?.stageKey).toBe("stage-1");
     });
 
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中阶段"
+    );
     expect(screen.getByTestId("pipeline-graph-add-node-button")).toBeEnabled();
-    expect(screen.getByTestId("pipeline-graph-delete-button")).toBeDisabled();
-    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
+    expect(screen.getByTestId("pipeline-graph-delete-button")).toBeEnabled();
+    expect(document.getElementById("pipeline-stage-name-input")).not.toBeNull();
     expect(document.getElementById("pipeline-node-type-select")).toBeNull();
   });
 
@@ -1067,6 +1068,9 @@ describe("PipelineGraphEditor", () => {
     fireEvent.click(screen.getByTestId("pipeline-graph-add-stage-button"));
     clickGraphObject("stage-1");
     const movedNode = await addNodeToSelectedStage(1);
+    clickGraphObject("stage-2");
+    const targetStageNode = await addNodeToSelectedStage(2);
+    clickGraphObject(movedNode.nodeKey);
 
     const stageSelect = document.getElementById("pipeline-node-stage-select");
     expect(stageSelect).not.toBeNull();
@@ -1076,14 +1080,25 @@ describe("PipelineGraphEditor", () => {
 
     await waitFor(() => {
       const draft = parseDraft();
-      expect(draft.nodes.find((node) => node.nodeKey === movedNode.nodeKey)?.stageKey).toBe(
-        "stage-2"
+      const movedNodeDraft = draft.nodes.find((node) => node.nodeKey === movedNode.nodeKey);
+      const targetStageNodeDraft = draft.nodes.find(
+        (node) => node.nodeKey === targetStageNode.nodeKey
       );
+      expect(movedNodeDraft?.stageKey).toBe("stage-2");
+      expect(targetStageNodeDraft?.stageKey).toBe("stage-2");
+      expect(movedNodeDraft?.position).toEqual({ x: 308, y: 72 });
+      expect(
+        new Set(
+          draft.nodes
+            .filter((node) => node.stageKey === "stage-2")
+            .map((node) => `${node.position.x}:${node.position.y}`)
+        ).size
+      ).toBe(2);
     });
 
     clickCanvasPane();
 
-    const nextNode = await addNodeToSelectedStage(2);
+    const nextNode = await addNodeToSelectedStage(3);
     expect(nextNode.stageKey).toBe("stage-2");
   });
 });

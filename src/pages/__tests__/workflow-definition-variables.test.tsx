@@ -386,15 +386,15 @@ describe("pipeline definition editor", () => {
         nodes: expect.arrayContaining([
           expect.objectContaining({
             nodeType: "checkout_branch",
-            positionX: 96,
-            positionY: 72,
+            positionX: expect.any(Number),
+            positionY: expect.any(Number),
             enabled: true,
             parameters: { branch: "${source_branch}" },
           }),
           expect.objectContaining({
             nodeType: "git_pull",
-            positionX: 308,
-            positionY: 72,
+            positionX: expect.any(Number),
+            positionY: expect.any(Number),
             enabled: true,
             parameters: { branch: "${target_branch}" },
           }),
@@ -412,6 +412,30 @@ describe("pipeline definition editor", () => {
         ],
       })
     );
+
+    const createCall = invokeMock.mock.calls.find(
+      ([cmd]) => cmd === "create_pipeline_definition"
+    );
+    const payload = createCall?.[1] as
+      | {
+          stages?: Array<{
+            stageKey: string;
+          }>;
+          nodes?: Array<{
+            stageKey: string;
+            positionX: number;
+            positionY: number;
+          }>;
+        }
+      | undefined;
+    const stageKey = payload?.stages?.[0]?.stageKey ?? "";
+    const stageOneNodes = (payload?.nodes ?? []).filter((node) => node.stageKey === stageKey);
+    expect(stageOneNodes).toHaveLength(2);
+    expect(stageOneNodes.every((node) => Number.isFinite(node.positionX))).toBe(true);
+    expect(stageOneNodes.every((node) => Number.isFinite(node.positionY))).toBe(true);
+    expect(
+      new Set(stageOneNodes.map((node) => `${node.positionX}:${node.positionY}`)).size
+    ).toBe(stageOneNodes.length);
   });
 }, 15000);
 

@@ -43,6 +43,7 @@ import {
   isActionGraphNode,
   isStageGraphNode,
   removeSelectedGraphObject,
+  reflowNodesByStageOrder,
   reorderStageNodesForDropPosition,
   syncDraftFromGraphState,
   validateGraphConnection,
@@ -99,6 +100,41 @@ function getDefaultSelectedObject(draft: PipelineDraft): SelectedGraphObject {
 
 function getDefaultActiveStageKey(draft: PipelineDraft) {
   return draft.nodes[0]?.stageKey ?? draft.stages[0]?.stageKey ?? null;
+}
+
+function getFallbackSelectedObjectAfterDelete(
+  draft: PipelineDraft,
+  deletedNode: PipelineGraphNode
+): SelectedGraphObject {
+  if (isActionGraphNode(deletedNode)) {
+    if (draft.stages.some((stage) => stage.stageKey === deletedNode.data.stageKey)) {
+      return { kind: "stage", id: deletedNode.data.stageKey };
+    }
+  }
+
+  if (isStageGraphNode(deletedNode) && draft.stages[0]) {
+    return { kind: "stage", id: draft.stages[0].stageKey };
+  }
+
+  return getDefaultSelectedObject(draft);
+}
+
+function getActiveStageKeyFromSelection(
+  draft: PipelineDraft,
+  selection: SelectedGraphObject
+) {
+  if (!selection) {
+    return getDefaultActiveStageKey(draft);
+  }
+
+  if (selection.kind === "stage") {
+    return selection.id;
+  }
+
+  return (
+    draft.nodes.find((node) => node.nodeKey === selection.id)?.stageKey ??
+    getDefaultActiveStageKey(draft)
+  );
 }
 
 function getGraphNodeStageKey(node: PipelineGraphNode) {
@@ -380,10 +416,32 @@ export function PipelineGraphEditor({
   }
 
   function updateNode(nodeKey: string, updater: (node: NodeDraft) => NodeDraft) {
-    const nextNodes = draft.nodes.map((node) =>
+    const previousNode = draft.nodes.find((node) => node.nodeKey === nodeKey) ?? null;
+    let nextNodes = draft.nodes.map((node) =>
       node.nodeKey === nodeKey ? updater(node) : node
     );
-    const updatedNode = nextNodes.find((node) => node.nodeKey === nodeKey) ?? null;
+    let updatedNode = nextNodes.find((node) => node.nodeKey === nodeKey) ?? null;
+
+    if (previousNode && updatedNode && previousNode.stageKey !== updatedNode.stageKey) {
+      const nextPosition = getNextNodePositionInStage(
+        nextNodes
+          .filter((node) => node.nodeKey !== nodeKey)
+          .map((node) => ({
+            stageKey: node.stageKey,
+            position: node.position,
+          })),
+        updatedNode.stageKey
+      );
+
+      nextNodes = nextNodes.map((node) =>
+        node.nodeKey === nodeKey ? { ...node, position: nextPosition } : node
+      );
+      nextNodes = reflowNodesByStageOrder(
+        nextNodes,
+        draft.stages.map((stage) => stage.stageKey)
+      );
+      updatedNode = nextNodes.find((node) => node.nodeKey === nodeKey) ?? null;
+    }
 
     if (selectedObject?.kind === "node" && selectedObject.id === nodeKey && updatedNode) {
       setActiveStageKey(updatedNode.stageKey);
@@ -539,16 +597,10 @@ export function PipelineGraphEditor({
     const deletesCurrentSelection = selectedGraphNode?.id === targetNode.id;
 
     if (deletesCurrentSelection) {
-      const fallbackStageKey = isActionGraphNode(targetNode)
-        ? targetNode.data.stageKey
-        : getDefaultActiveStageKey(nextDraft);
+      const fallbackSelection = getFallbackSelectedObjectAfterDelete(nextDraft, targetNode);
 
-      setSelectedObject(null);
-      setActiveStageKey(
-        nextDraft.stages.some((stage) => stage.stageKey === fallbackStageKey)
-          ? fallbackStageKey
-          : getDefaultActiveStageKey(nextDraft)
-      );
+      setSelectedObject(fallbackSelection);
+      setActiveStageKey(getActiveStageKeyFromSelection(nextDraft, fallbackSelection));
       setConnectionTarget("");
       applyDraft(nextDraft);
       return;

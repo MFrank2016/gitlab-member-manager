@@ -164,7 +164,7 @@ function reflowStageNodes<T extends NodeDraft>(nodes: T[]) {
   }));
 }
 
-function reflowNodesByStageOrder(nodes: NodeDraft[], orderedStageKeys: string[]) {
+export function reflowNodesByStageOrder(nodes: NodeDraft[], orderedStageKeys: string[]) {
   const groupedNodes = new Map<string, NodeDraft[]>();
   for (const node of nodes) {
     const current = groupedNodes.get(node.stageKey) ?? [];
