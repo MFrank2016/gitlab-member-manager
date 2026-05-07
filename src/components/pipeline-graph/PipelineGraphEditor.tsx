@@ -380,9 +380,16 @@ export function PipelineGraphEditor({
   }
 
   function updateNode(nodeKey: string, updater: (node: NodeDraft) => NodeDraft) {
-    updateNodes(
-      draft.nodes.map((node) => (node.nodeKey === nodeKey ? updater(node) : node))
+    const nextNodes = draft.nodes.map((node) =>
+      node.nodeKey === nodeKey ? updater(node) : node
     );
+    const updatedNode = nextNodes.find((node) => node.nodeKey === nodeKey) ?? null;
+
+    if (selectedObject?.kind === "node" && selectedObject.id === nodeKey && updatedNode) {
+      setActiveStageKey(updatedNode.stageKey);
+    }
+
+    updateNodes(nextNodes);
   }
 
   function handleNodesChange(changes: NodeChange<PipelineGraphNode["data"]>[]) {

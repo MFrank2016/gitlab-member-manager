@@ -1060,4 +1060,30 @@ describe("PipelineGraphEditor", () => {
     expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
     expect(document.getElementById("pipeline-node-type-select")).toBeNull();
   });
+
+  it("keeps the toolbar active-stage context aligned after moving the selected node to another stage", async () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(screen.getByTestId("pipeline-graph-add-stage-button"));
+    clickGraphObject("stage-1");
+    const movedNode = await addNodeToSelectedStage(1);
+
+    const stageSelect = document.getElementById("pipeline-node-stage-select");
+    expect(stageSelect).not.toBeNull();
+    fireEvent.change(stageSelect as HTMLSelectElement, {
+      target: { value: "stage-2" },
+    });
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.nodes.find((node) => node.nodeKey === movedNode.nodeKey)?.stageKey).toBe(
+        "stage-2"
+      );
+    });
+
+    clickCanvasPane();
+
+    const nextNode = await addNodeToSelectedStage(2);
+    expect(nextNode.stageKey).toBe("stage-2");
+  });
 });
