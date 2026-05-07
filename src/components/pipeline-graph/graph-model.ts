@@ -209,6 +209,18 @@ export function reorderStageNodesForDrop(
   }));
 }
 
+export function reorderStageNodesForDropPosition(
+  nodes: NodeDraft[],
+  draggedNodeKey: string,
+  targetPosition: { x: number; y: number }
+) {
+  return reorderStageNodesForDrop(
+    nodes,
+    draggedNodeKey,
+    getStageGridSlotFromPosition(targetPosition)
+  );
+}
+
 function buildStageLayouts(nodes: NodeDraft[]) {
   const groupedNodes = new Map<string, NodeDraft[]>();
   for (const node of nodes) {
@@ -367,7 +379,7 @@ function buildStageNode(
   return {
     id: stage.stageKey,
     type: STAGE_GROUP_NODE_TYPE,
-    draggable: false,
+    draggable: true,
     position,
     style: {
       width: layout?.width ?? STAGE_GROUP_MIN_WIDTH,

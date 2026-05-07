@@ -43,6 +43,7 @@ import {
   isActionGraphNode,
   isStageGraphNode,
   removeSelectedGraphObject,
+  reorderStageNodesForDropPosition,
   syncDraftFromGraphState,
   validateGraphConnection,
   type PipelineGraphNode,
@@ -360,10 +361,6 @@ export function PipelineGraphEditor({
 
   function handleNodesChange(changes: NodeChange<PipelineGraphNode["data"]>[]) {
     const nextGraphNodes = applyNodeChanges(changes, graphState.nodes);
-    const nextDraft = syncDraftFromGraphState(draft, {
-      nodes: nextGraphNodes,
-      edges: graphState.edges,
-    });
 
     const nextSelected = [...changes]
       .reverse()
@@ -382,7 +379,19 @@ export function PipelineGraphEditor({
       }
     }
 
-    applyDraft(nextDraft);
+    const hasStructuralChange = changes.some(
+      (change) => change.type !== "select" && change.type !== "position"
+    );
+    if (!hasStructuralChange) {
+      return;
+    }
+
+    applyDraft(
+      syncDraftFromGraphState(draft, {
+        nodes: nextGraphNodes,
+        edges: graphState.edges,
+      })
+    );
   }
 
   function handleSelectionChange(params: { nodes: PipelineGraphNode[] }) {
@@ -430,6 +439,62 @@ export function PipelineGraphEditor({
 
   function fitCanvasToViewport() {
     reactFlowRef.current?.fitView();
+  }
+
+  function handleNodeDragStop(node: PipelineGraphNode) {
+    closeContextMenu();
+
+    if (isStageGraphNode(node)) {
+      const currentStageNode = graphNodeMap.get(node.id);
+      if (!currentStageNode || !isStageGraphNode(currentStageNode)) {
+        return;
+      }
+
+      applyDraft(
+        syncDraftFromGraphState(draft, {
+          nodes: graphState.nodes.map((graphNode) =>
+            graphNode.id === node.id
+              ? {
+                  ...graphNode,
+                  position: {
+                    x: Math.round(node.position.x),
+                    y: currentStageNode.position.y,
+                  },
+                }
+              : graphNode
+          ),
+          edges: graphState.edges,
+        })
+      );
+      return;
+    }
+
+    if (!isActionGraphNode(node)) {
+      return;
+    }
+
+    const draggedNode = draft.nodes.find((item) => item.nodeKey === node.data.nodeKey);
+    if (!draggedNode) {
+      return;
+    }
+
+    if (node.parentId !== draggedNode.stageKey || node.data.stageKey !== draggedNode.stageKey) {
+      return;
+    }
+
+    const stageNodes = draft.nodes.filter((item) => item.stageKey === draggedNode.stageKey);
+    const reorderedStageNodes = reorderStageNodesForDropPosition(
+      stageNodes,
+      draggedNode.nodeKey,
+      node.position
+    );
+    const reorderedStageNodeMap = new Map(
+      reorderedStageNodes.map((stageNode) => [stageNode.nodeKey, stageNode])
+    );
+
+    updateNodes(
+      draft.nodes.map((item) => reorderedStageNodeMap.get(item.nodeKey) ?? item)
+    );
   }
 
   function deleteGraphObject(targetNode: PipelineGraphNode) {
@@ -669,6 +734,7 @@ export function PipelineGraphEditor({
               setSelectedId(null);
             }}
             onNodesChange={handleNodesChange}
+            onNodeDragStop={(_, node) => handleNodeDragStop(node)}
             onSelectionChange={handleSelectionChange}
             onConnect={commitConnection}
             panOnDrag

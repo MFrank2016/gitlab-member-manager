@@ -1,21 +1,33 @@
 import * as React from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PipelineGraphEditor } from "@/components/pipeline-graph/PipelineGraphEditor";
+import { buildGraphEditorState } from "@/components/pipeline-graph/graph-model";
 import {
   createEmptyPipelineDraft,
+  createNodeDraft,
+  createStageDraft,
   resetPipelineDraftCountersForTest,
   type PipelineDraft,
 } from "@/components/pipeline-editor/draft-model";
 import type { ManagedProject } from "@/lib/types";
 
 const mockFitView = vi.fn();
+type MockReactFlowNode = Record<string, unknown> & {
+  id: string;
+  data?: Record<string, unknown>;
+  parentId?: string;
+  position?: { x: number; y: number };
+};
+
 let lastReactFlowProps:
   | {
       panOnDrag?: boolean;
       zoomOnScroll?: boolean;
       selectionOnDrag?: boolean;
+      nodes: MockReactFlowNode[];
+      onNodeDragStop?: (event: unknown, node: MockReactFlowNode) => void;
     }
   | null = null;
 
@@ -39,6 +51,7 @@ vi.mock("@xyflow/react", async () => {
       edges,
       nodeTypes,
       onNodeClick,
+      onNodeDragStop,
       onSelectionChange,
       onInit,
       panOnDrag,
@@ -50,6 +63,7 @@ vi.mock("@xyflow/react", async () => {
       edges: Array<Record<string, unknown>>;
       nodeTypes?: Record<string, React.ComponentType<Record<string, unknown>>>;
       onNodeClick?: (event: unknown, node: Record<string, unknown>) => void;
+      onNodeDragStop?: (event: unknown, node: MockReactFlowNode) => void;
       onSelectionChange?: (params: {
         nodes: Array<Record<string, unknown>>;
         edges: Array<Record<string, unknown>>;
@@ -64,6 +78,8 @@ vi.mock("@xyflow/react", async () => {
         panOnDrag,
         zoomOnScroll,
         selectionOnDrag,
+        nodes: nodes as MockReactFlowNode[],
+        onNodeDragStop,
       };
       const [selectedNodeId, setSelectedNodeId] = ReactModule.useState<string | null>(null);
 
@@ -137,6 +153,29 @@ function parseDraft() {
 
 function clickGraphObject(id: string) {
   fireEvent.click(within(screen.getByTestId(`graph-node-${id}`)).getByRole("button"));
+}
+
+function dragGraphNode(
+  id: string,
+  position: { x: number; y: number },
+  overrides: Partial<MockReactFlowNode> = {}
+) {
+  const node = lastReactFlowProps?.nodes.find((item) => String(item.id) === id);
+  expect(node).toBeDefined();
+
+  const nextNode: MockReactFlowNode = {
+    ...(node as MockReactFlowNode),
+    ...overrides,
+    position,
+    data: {
+      ...((node?.data ?? {}) as Record<string, unknown>),
+      ...((overrides.data ?? {}) as Record<string, unknown>),
+    },
+  };
+
+  act(() => {
+    lastReactFlowProps?.onNodeDragStop?.({}, nextNode);
+  });
 }
 
 function openStageContextMenu(stageKey: string, clientX = 160, clientY = 220) {
@@ -805,6 +844,138 @@ describe("PipelineGraphEditor", () => {
     expect(parseDraft().nodes[0]?.parameters).toEqual({
       target: { project: "team/service-a" },
       approvals: 2,
+    });
+  });
+
+  it("reorders dragged stages and keeps them on horizontal lanes", async () => {
+    const initialDraft: PipelineDraft = {
+      ...createEmptyPipelineDraft(),
+      stages: [
+        createStageDraft({
+          id: "stage-1",
+          stageKey: "stage-1",
+          name: "Stage 1",
+          enabled: true,
+        }),
+        createStageDraft({
+          id: "stage-2",
+          stageKey: "stage-2",
+          name: "Stage 2",
+          enabled: true,
+        }),
+      ],
+      nodes: [],
+    };
+
+    render(<EditorHarness initialDraft={initialDraft} />);
+
+    dragGraphNode("stage-2", { x: 0, y: 220 });
+
+    await waitFor(() => {
+      expect(parseDraft().stages.map((stage) => stage.stageKey)).toEqual(["stage-2", "stage-1"]);
+    });
+
+    const stageNodes = buildGraphEditorState(parseDraft()).nodes.filter(
+      (node) => node.type === "stage-group"
+    );
+    expect(stageNodes.map((node) => node.position)).toEqual([
+      { x: 24, y: 32 },
+      { x: 384, y: 32 },
+    ]);
+  });
+
+  it("reflows a dragged node within the same stage after dropping onto an occupied slot", async () => {
+    const initialDraft: PipelineDraft = {
+      ...createEmptyPipelineDraft(),
+      nodes: [
+        createNodeDraft({
+          id: "node-a",
+          nodeKey: "node-a",
+          stageKey: "stage-1",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 72 },
+        }),
+        createNodeDraft({
+          id: "node-b",
+          nodeKey: "node-b",
+          stageKey: "stage-1",
+          nodeType: "checkout_branch",
+          position: { x: 308, y: 72 },
+        }),
+        createNodeDraft({
+          id: "node-c",
+          nodeKey: "node-c",
+          stageKey: "stage-1",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 188 },
+        }),
+      ],
+    };
+
+    render(<EditorHarness initialDraft={initialDraft} />);
+
+    dragGraphNode("node-c", { x: 280, y: 92 });
+
+    await waitFor(() => {
+      const positions = Object.fromEntries(
+        parseDraft().nodes.map((node) => [node.nodeKey, node.position])
+      );
+      expect(positions).toEqual({
+        "node-a": { x: 96, y: 72 },
+        "node-b": { x: 96, y: 188 },
+        "node-c": { x: 308, y: 72 },
+      });
+    });
+
+    expect(
+      new Set(parseDraft().nodes.map((node) => `${node.position.x}:${node.position.y}`)).size
+    ).toBe(3);
+  });
+
+  it("rejects cross-stage drops for action nodes", async () => {
+    const initialDraft: PipelineDraft = {
+      ...createEmptyPipelineDraft(),
+      stages: [
+        createStageDraft({
+          id: "stage-1",
+          stageKey: "stage-1",
+          name: "Stage 1",
+          enabled: true,
+        }),
+        createStageDraft({
+          id: "stage-2",
+          stageKey: "stage-2",
+          name: "Stage 2",
+          enabled: true,
+        }),
+      ],
+      nodes: [
+        createNodeDraft({
+          id: "node-a",
+          nodeKey: "node-a",
+          stageKey: "stage-1",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 72 },
+        }),
+      ],
+    };
+
+    render(<EditorHarness initialDraft={initialDraft} />);
+
+    const beforeDraft = parseDraft();
+    dragGraphNode(
+      "node-a",
+      { x: 96, y: 72 },
+      {
+        parentId: "stage-2",
+        data: {
+          stageKey: "stage-2",
+        },
+      }
+    );
+
+    await waitFor(() => {
+      expect(parseDraft()).toEqual(beforeDraft);
     });
   });
 

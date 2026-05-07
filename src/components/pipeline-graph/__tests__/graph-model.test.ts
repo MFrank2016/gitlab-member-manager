@@ -15,6 +15,7 @@ import {
   getNextNodePositionInStage,
   removeSelectedGraphObject,
   reorderStageNodesForDrop,
+  reorderStageNodesForDropPosition,
   syncDraftFromGraphState,
   validateGraphConnection,
 } from "@/components/pipeline-graph/graph-model";
@@ -111,7 +112,7 @@ describe("pipeline graph model", () => {
         expect.objectContaining({
           id: "prepare",
           type: "stage-group",
-          draggable: false,
+          draggable: true,
           data: expect.objectContaining({
             stageKey: "prepare",
             name: "准备",
@@ -120,7 +121,7 @@ describe("pipeline graph model", () => {
         expect.objectContaining({
           id: "deploy",
           type: "stage-group",
-          draggable: false,
+          draggable: true,
           data: expect.objectContaining({
             stageKey: "deploy",
             name: "发布",
@@ -157,6 +158,17 @@ describe("pipeline graph model", () => {
         target: "trigger_release",
       }),
     ]);
+  });
+
+  it("marks stage containers as draggable so they can be drag-sorted", () => {
+    const graphState = buildGraphEditorState(createEmptyPipelineDraft());
+    const stageNode = graphState.nodes.find((node) => node.id === "stage-1");
+
+    expect(stageNode).toMatchObject({
+      id: "stage-1",
+      type: "stage-group",
+      draggable: true,
+    });
   });
 
   it("expands stage container size when a stage needs more grid slots", () => {
@@ -280,6 +292,38 @@ describe("pipeline graph model", () => {
     expect(new Set(reordered.map((node) => `${node.position.x}:${node.position.y}`)).size).toBe(3);
     expect(reordered[1]!.position.x - reordered[0]!.position.x).toBe(212);
     expect(reordered[2]!.position.y - reordered[0]!.position.y).toBe(116);
+  });
+
+  it("maps raw drop coordinates to stage slots before reflowing occupied drops", () => {
+    const nodes = [
+      createNodeDraft({
+        nodeKey: "node-a",
+        stageKey: "stage-1",
+        position: { x: 96, y: 72 },
+      }),
+      createNodeDraft({
+        nodeKey: "node-b",
+        stageKey: "stage-1",
+        position: { x: 308, y: 72 },
+      }),
+      createNodeDraft({
+        nodeKey: "node-c",
+        stageKey: "stage-1",
+        position: { x: 96, y: 188 },
+      }),
+    ];
+
+    const reordered = reorderStageNodesForDropPosition(nodes, "node-c", {
+      x: 280,
+      y: 92,
+    });
+
+    expect(reordered.map((node) => [node.nodeKey, node.position])).toEqual([
+      ["node-a", { x: 96, y: 72 }],
+      ["node-c", { x: 308, y: 72 }],
+      ["node-b", { x: 96, y: 188 }],
+    ]);
+    expect(new Set(reordered.map((node) => `${node.position.x}:${node.position.y}`)).size).toBe(3);
   });
 
   it("serializes graph edits back into the persisted stage-aware payload shape", () => {
