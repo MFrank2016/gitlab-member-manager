@@ -180,6 +180,11 @@ async function addNodeToSelectedStage(expectedCount: number) {
 
 async function clickAddNode(expectedCount: number) {
   fireEvent.click(screen.getByTestId("pipeline-graph-add-node-button"));
+  await screen.findByRole("button", { name: "创建节点" });
+  fireEvent.change(screen.getByLabelText("节点类型"), {
+    target: { value: "checkout_branch" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
   await waitFor(() => {
     expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(
       expectedCount
@@ -301,10 +306,7 @@ describe("pipeline definition editor", () => {
   expect(screen.getByText("调度")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "添加阶段" })).toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
-  await waitFor(() => {
-    expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(1);
-  });
+  await clickAddNode(1);
   await clickAddNode(2);
   const actionNodes = screen.getAllByTestId(/graph-node-checkout_branch_node-/);
   const firstNode = actionNodes[0];

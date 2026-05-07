@@ -159,8 +159,17 @@ async function openCreateNodeDialog(stageKey: string) {
   await screen.findByRole("button", { name: "创建节点" });
 }
 
-async function addNodeToSelectedStage(expectedCount: number) {
+async function openCreateNodeDialogFromToolbar() {
   fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
+  await screen.findByRole("button", { name: "创建节点" });
+}
+
+async function addNodeToSelectedStage(expectedCount: number) {
+  await openCreateNodeDialogFromToolbar();
+  fireEvent.change(screen.getByLabelText("节点类型"), {
+    target: { value: "checkout_branch" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
   await waitFor(() => {
     expect(parseDraft().nodes).toHaveLength(expectedCount);
   });
@@ -268,6 +277,19 @@ describe("PipelineGraphEditor", () => {
     const nextNode = await addNodeToSelectedStage(1);
 
     expect(nextNode.stageKey).toBe("stage-2");
+  });
+
+  it("opens the create-node dialog from the toolbar using the active stage context", async () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "添加阶段" }));
+    clickGraphObject("stage-2");
+
+    await openCreateNodeDialogFromToolbar();
+
+    expect(screen.getByRole("heading", { name: "创建节点" })).toBeInTheDocument();
+    expect(screen.getByText("在阶段“阶段 2”中创建一个新节点。")).toBeInTheDocument();
+    expect(parseDraft().nodes).toHaveLength(0);
   });
 
   it("selects the newly added node and opens node editing", async () => {
@@ -571,13 +593,20 @@ describe("PipelineGraphEditor", () => {
     expect(screen.getByRole("button", { name: "删除选中对象" })).toBeDisabled();
   });
 
-  it("tracks whether the selected object is a stage or a node", () => {
+  it("tracks whether the selected object is a stage or a node", async () => {
     render(<EditorHarness />);
 
     const summary = screen.getByTestId("pipeline-graph-selection-summary");
     expect(summary).toHaveTextContent("已选中阶段");
 
-    fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
+    await openCreateNodeDialogFromToolbar();
+    expect(summary).toHaveTextContent("已选中阶段");
+
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "checkout_branch" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
     expect(summary).toHaveTextContent("已选中节点");
 
     clickGraphObject("stage-1");

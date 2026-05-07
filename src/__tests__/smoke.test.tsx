@@ -281,8 +281,13 @@ describe("pipeline definition upgrade smoke", () => {
     await screen.findByRole("heading", { name: "编辑流水线定义" });
   }
 
-  function addMinimalNodeToCreateDraft() {
+  async function addMinimalNodeToCreateDraft() {
     fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
+    await screen.findByRole("button", { name: "创建节点" });
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "checkout_branch" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
   }
 
   function expectNoProjectGroupFetch() {
@@ -522,7 +527,7 @@ describe("pipeline definition upgrade smoke", () => {
     });
 
     await openCreatePipelineEditor();
-    addMinimalNodeToCreateDraft();
+    await addMinimalNodeToCreateDraft();
     activateEditorTab("基础信息");
 
     fireEvent.change(screen.getByLabelText("流水线名称"), {
@@ -566,7 +571,7 @@ describe("pipeline definition upgrade smoke", () => {
     });
 
     await openCreatePipelineEditor();
-    addMinimalNodeToCreateDraft();
+    await addMinimalNodeToCreateDraft();
     activateEditorTab("基础信息");
 
     fireEvent.change(screen.getByLabelText("流水线名称"), {

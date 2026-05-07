@@ -328,23 +328,14 @@ export function PipelineGraphEditor({
     return activeStageKey ?? "";
   }
 
-  function addNode() {
+  function startCreateNodeFromActiveStage() {
     const stageKey = resolveActiveStageKey();
     if (!stageKey) {
       setGraphMessage("请先创建一个阶段");
       return;
     }
 
-    const nextNode = createNodeDraft({
-      stageKey,
-      nodeType: "checkout_branch",
-      position: getNextNodePositionInStage(draft.nodes, stageKey),
-    });
-
-    closeContextMenu();
-    updateNodes([...draft.nodes, nextNode]);
-    setSelectedId(nextNode.nodeKey);
-    setActiveStageKey(stageKey);
+    openCreateNodeDialog(stageKey);
   }
 
   function openCreateNodeDialog(stageKey: string) {
@@ -588,7 +579,7 @@ export function PipelineGraphEditor({
             variant="secondary"
             data-testid="pipeline-graph-add-node-button"
             className={actionButtonClassName}
-            onClick={addNode}
+            onClick={startCreateNodeFromActiveStage}
             disabled={!resolveActiveStageKey()}
           >
             在所选阶段添加节点
