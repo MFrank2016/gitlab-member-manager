@@ -180,11 +180,18 @@ async function addNodeToSelectedStage(expectedCount: number) {
 
 async function clickAddNode(expectedCount: number) {
   fireEvent.click(screen.getByTestId("pipeline-graph-add-node-button"));
-  await screen.findByRole("button", { name: "创建节点" });
-  fireEvent.change(screen.getByLabelText("节点类型"), {
+  const createNodeTypeSelect = document.getElementById("pipeline-create-node-type-select");
+  if (!(createNodeTypeSelect instanceof HTMLSelectElement)) {
+    throw new Error("pipeline-create-node-type-select not found");
+  }
+  const createNodeDialog = createNodeTypeSelect.closest('[role="dialog"]');
+  if (!(createNodeDialog instanceof HTMLElement)) {
+    throw new Error("create-node dialog not found");
+  }
+  fireEvent.change(createNodeTypeSelect, {
     target: { value: "checkout_branch" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+  fireEvent.click(within(createNodeDialog).getByRole("button", { name: "创建节点" }));
   await waitFor(() => {
     expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(
       expectedCount
@@ -386,7 +393,8 @@ describe("pipeline definition editor", () => {
           }),
           expect.objectContaining({
             nodeType: "git_pull",
-            positionX: 96,
+            positionX: 308,
+            positionY: 72,
             enabled: true,
             parameters: { branch: "${target_branch}" },
           }),
