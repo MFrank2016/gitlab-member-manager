@@ -29,6 +29,7 @@ import {
   createNodeDraft,
   createStageDraft,
   ensureVariableRows,
+  getMissingBuiltinRequiredFields,
   normalizeBuiltinParameters,
   type NodeDraft,
   type PipelineDraft,
@@ -123,11 +124,8 @@ function validateCreateNodeDialogState(
   }
 
   const parameters = getBuiltinCreateParameters(nodeType, state.parameters);
-  for (const field of builtin.fields) {
-    const value = parameters[field.key];
-    if (typeof value !== "string" || value.trim().length === 0) {
-      errors.push(`${field.label}为必填项。`);
-    }
+  for (const field of getMissingBuiltinRequiredFields(nodeType, parameters)) {
+    errors.push(`${field.label}为必填项。`);
   }
 
   return errors;

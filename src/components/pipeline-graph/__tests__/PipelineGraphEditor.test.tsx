@@ -373,6 +373,38 @@ describe("PipelineGraphEditor", () => {
     expect(screen.queryByRole("menu", { name: "阶段上下文菜单" })).not.toBeInTheDocument();
   });
 
+  it("allows optional builtin fields to stay empty during creation", async () => {
+    render(<EditorHarness />);
+
+    await openCreateNodeDialog("stage-1");
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "check_pipeline" },
+    });
+    fireEvent.change(screen.getByLabelText("GitLab 项目"), {
+      target: { value: "team/service" },
+    });
+    fireEvent.change(screen.getByLabelText("引用"), {
+      target: { value: "${source_branch}" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
+    await waitFor(() => {
+      expect(parseDraft().nodes).toHaveLength(1);
+    });
+
+    expect(parseDraft().nodes[0]).toEqual(
+      expect.objectContaining({
+        nodeType: "check_pipeline",
+        parameters: {
+          project: "team/service",
+          ref: "${source_branch}",
+          sha: "",
+        },
+      })
+    );
+    expect(screen.queryByText(/提交 SHA.*必填/)).not.toBeInTheDocument();
+  });
+
   it("requires a node type and required fields before creation", async () => {
     render(<EditorHarness managedProjects={managedProjectsFixture} />);
 

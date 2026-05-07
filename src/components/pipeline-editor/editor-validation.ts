@@ -1,5 +1,6 @@
 import {
   buildPipelineCreatePayload,
+  getMissingBuiltinRequiredFields,
   type EdgeDraft,
   type NodeDraft,
   type PipelineDraft,
@@ -11,6 +12,7 @@ export type ValidationIssueCode =
   | "pipeline_has_no_stages"
   | "stage_has_no_nodes"
   | "node_type_required"
+  | "node_required_parameter_missing"
   | "edge_duplicate"
   | "edge_backward"
   | "edge_cyclic"
@@ -132,16 +134,28 @@ function collectStageIssues(draft: PipelineDraft, issues: ValidationIssue[]) {
 
 function collectNodeIssues(draft: PipelineDraft, issues: ValidationIssue[]) {
   draft.nodes.forEach((node, index) => {
-    if (node.nodeType.trim()) {
+    const nodeType = node.nodeType.trim();
+    if (!nodeType) {
+      issues.push(
+        createIssue(
+          "node_type_required",
+          createNodePath(node, index),
+          "节点类型不能为空。"
+        )
+      );
       return;
     }
-    issues.push(
-      createIssue(
-        "node_type_required",
-        createNodePath(node, index),
-        "节点类型不能为空。"
-      )
-    );
+
+    const missingRequiredFields = getMissingBuiltinRequiredFields(nodeType, node.parameters);
+    for (const field of missingRequiredFields) {
+      issues.push(
+        createIssue(
+          "node_required_parameter_missing",
+          `${createNodePath(node, index)}:parameter:${field.key}`,
+          `节点 ${node.nodeKey.trim() || node.id || index + 1} 缺少必填参数：${field.label}。`
+        )
+      );
+    }
   });
 }
 
