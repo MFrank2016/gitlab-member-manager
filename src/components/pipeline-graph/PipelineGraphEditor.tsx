@@ -345,7 +345,7 @@ export function PipelineGraphEditor({
     reactFlowRef.current?.fitView();
   }
 
-  function deleteContextMenuTargetNode(targetNode: PipelineGraphNode) {
+  function deleteGraphObject(targetNode: PipelineGraphNode) {
     closeContextMenu();
 
     const nextDraft = removeSelectedGraphObject(draft, targetNode);
@@ -374,17 +374,13 @@ export function PipelineGraphEditor({
     applyDraft(nextDraft);
   }
 
-  function handleStageContextAddNode() {
-    closeContextMenu();
-  }
-
   function handleContextMenuDelete() {
     if (!contextMenuTargetNode) {
       closeContextMenu();
       return;
     }
 
-    deleteContextMenuTargetNode(contextMenuTargetNode);
+    deleteGraphObject(contextMenuTargetNode);
   }
 
   function deleteSelectedObject() {
@@ -393,19 +389,7 @@ export function PipelineGraphEditor({
       return;
     }
 
-    const nextDraft = removeSelectedGraphObject(draft, selectedGraphNode);
-    const fallbackStageKey = isActionGraphNode(selectedGraphNode)
-      ? selectedGraphNode.data.stageKey
-      : getDefaultActiveStageKey(nextDraft);
-
-    setSelectedId(null);
-    setActiveStageKey(
-      nextDraft.stages.some((stage) => stage.stageKey === fallbackStageKey)
-        ? fallbackStageKey
-        : getDefaultActiveStageKey(nextDraft)
-    );
-    setConnectionTarget("");
-    applyDraft(nextDraft);
+    deleteGraphObject(selectedGraphNode);
   }
 
   return (
@@ -563,14 +547,16 @@ export function PipelineGraphEditor({
                   <button
                     type="button"
                     role="menuitem"
+                    data-testid="pipeline-graph-stage-context-add-node"
                     className={contextMenuItemClassName}
-                    onClick={handleStageContextAddNode}
+                    disabled
                   >
                     添加节点
                   </button>
                   <button
                     type="button"
                     role="menuitem"
+                    data-testid="pipeline-graph-stage-context-delete"
                     className={contextMenuItemClassName}
                     onClick={handleContextMenuDelete}
                   >
@@ -581,6 +567,7 @@ export function PipelineGraphEditor({
                 <button
                   type="button"
                   role="menuitem"
+                  data-testid="pipeline-graph-node-context-delete"
                   className={contextMenuItemClassName}
                   onClick={handleContextMenuDelete}
                 >

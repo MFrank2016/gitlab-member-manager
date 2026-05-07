@@ -139,6 +139,20 @@ function clickGraphObject(id: string) {
   fireEvent.click(within(screen.getByTestId(`graph-node-${id}`)).getByRole("button"));
 }
 
+function openStageContextMenu(stageKey: string, clientX = 160, clientY = 220) {
+  fireEvent.contextMenu(screen.getByTestId(`pipeline-stage-node-card-${stageKey}`), {
+    clientX,
+    clientY,
+  });
+}
+
+function openNodeContextMenu(nodeKey: string, clientX = 240, clientY = 260) {
+  fireEvent.contextMenu(screen.getByTestId(`pipeline-action-node-card-${nodeKey}`), {
+    clientX,
+    clientY,
+  });
+}
+
 async function addNodeToSelectedStage(expectedCount: number) {
   fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
   await waitFor(() => {
@@ -310,13 +324,11 @@ describe("PipelineGraphEditor", () => {
 
     await addNodeToSelectedStage(1);
 
-    fireEvent.contextMenu(screen.getByTestId("pipeline-stage-node-card-stage-1"), {
-      clientX: 160,
-      clientY: 220,
-    });
+    openStageContextMenu("stage-1");
 
     expect(await screen.findByRole("menuitem", { name: "添加节点" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "删除阶段" })).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-stage-context-add-node")).toBeDisabled();
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
       "已选中节点"
     );
@@ -329,16 +341,58 @@ describe("PipelineGraphEditor", () => {
     const nextNode = await addNodeToSelectedStage(1);
     clickGraphObject("stage-1");
 
-    fireEvent.contextMenu(screen.getByTestId(`pipeline-action-node-card-${nextNode.nodeKey}`), {
-      clientX: 240,
-      clientY: 260,
-    });
+    openNodeContextMenu(nextNode.nodeKey);
 
     expect(await screen.findByRole("menuitem", { name: "删除节点" })).toBeInTheDocument();
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
       "已选中阶段"
     );
     expect(screen.getByLabelText("阶段名称")).toBeInTheDocument();
+  });
+
+  it("deletes the right-clicked stage from the context menu without retargeting selection", async () => {
+    render(<EditorHarness />);
+
+    const firstNode = await addNodeToSelectedStage(1);
+    fireEvent.click(screen.getByRole("button", { name: "添加阶段" }));
+    clickGraphObject(firstNode.nodeKey);
+
+    openStageContextMenu("stage-2");
+    fireEvent.click(screen.getByTestId("pipeline-graph-stage-context-delete"));
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.stages).toHaveLength(1);
+      expect(draft.stages[0]?.stageKey).toBe("stage-1");
+    });
+
+    expect(screen.queryByTestId("graph-node-stage-2")).not.toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+  });
+
+  it("deletes the selected node from the context menu and preserves stage fallback cleanup", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+
+    openNodeContextMenu(nextNode.nodeKey);
+    fireEvent.click(screen.getByTestId("pipeline-graph-node-context-delete"));
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.nodes).toHaveLength(0);
+    });
+
+    expect(screen.queryByTestId(`graph-node-${nextNode.nodeKey}`)).not.toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "未选中对象"
+    );
+    expect(screen.getByText("当前活动阶段：阶段 1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "在所选阶段添加节点" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "删除选中对象" })).toBeDisabled();
   });
   it("connects nodes and blocks duplicate connections", async () => {
     render(<EditorHarness />);
