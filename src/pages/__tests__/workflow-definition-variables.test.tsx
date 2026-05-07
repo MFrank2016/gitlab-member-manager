@@ -180,6 +180,18 @@ async function addNodeToSelectedStage(expectedCount: number) {
 
 async function clickAddNode(expectedCount: number) {
   fireEvent.click(screen.getByTestId("pipeline-graph-add-node-button"));
+  const createNodeTypeSelect = document.getElementById("pipeline-create-node-type-select");
+  if (!(createNodeTypeSelect instanceof HTMLSelectElement)) {
+    throw new Error("pipeline-create-node-type-select not found");
+  }
+  const createNodeDialog = createNodeTypeSelect.closest('[role="dialog"]');
+  if (!(createNodeDialog instanceof HTMLElement)) {
+    throw new Error("create-node dialog not found");
+  }
+  fireEvent.change(createNodeTypeSelect, {
+    target: { value: "checkout_branch" },
+  });
+  fireEvent.click(within(createNodeDialog).getByRole("button", { name: "创建节点" }));
   await waitFor(() => {
     expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(
       expectedCount
@@ -301,10 +313,7 @@ describe("pipeline definition editor", () => {
   expect(screen.getByText("调度")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "添加阶段" })).toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
-  await waitFor(() => {
-    expect(screen.getAllByTestId(/graph-node-checkout_branch_node-/)).toHaveLength(1);
-  });
+  await clickAddNode(1);
   await clickAddNode(2);
   const actionNodes = screen.getAllByTestId(/graph-node-checkout_branch_node-/);
   const firstNode = actionNodes[0];
@@ -377,14 +386,15 @@ describe("pipeline definition editor", () => {
         nodes: expect.arrayContaining([
           expect.objectContaining({
             nodeType: "checkout_branch",
-            positionX: 96,
-            positionY: 72,
+            positionX: expect.any(Number),
+            positionY: expect.any(Number),
             enabled: true,
             parameters: { branch: "${source_branch}" },
           }),
           expect.objectContaining({
             nodeType: "git_pull",
-            positionX: 96,
+            positionX: expect.any(Number),
+            positionY: expect.any(Number),
             enabled: true,
             parameters: { branch: "${target_branch}" },
           }),
@@ -402,6 +412,30 @@ describe("pipeline definition editor", () => {
         ],
       })
     );
+
+    const createCall = invokeMock.mock.calls.find(
+      ([cmd]) => cmd === "create_pipeline_definition"
+    );
+    const payload = createCall?.[1] as
+      | {
+          stages?: Array<{
+            stageKey: string;
+          }>;
+          nodes?: Array<{
+            stageKey: string;
+            positionX: number;
+            positionY: number;
+          }>;
+        }
+      | undefined;
+    const stageKey = payload?.stages?.[0]?.stageKey ?? "";
+    const stageOneNodes = (payload?.nodes ?? []).filter((node) => node.stageKey === stageKey);
+    expect(stageOneNodes).toHaveLength(2);
+    expect(stageOneNodes.every((node) => Number.isFinite(node.positionX))).toBe(true);
+    expect(stageOneNodes.every((node) => Number.isFinite(node.positionY))).toBe(true);
+    expect(
+      new Set(stageOneNodes.map((node) => `${node.positionX}:${node.positionY}`)).size
+    ).toBe(stageOneNodes.length);
   });
 }, 15000);
 

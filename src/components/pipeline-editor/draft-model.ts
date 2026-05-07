@@ -16,6 +16,7 @@ type FieldDefinition = {
   key: string;
   label: string;
   placeholder: string;
+  required?: boolean;
 };
 
 type BuiltinNodeTypeDefinition = {
@@ -68,7 +69,7 @@ export const BUILTIN_NODE_TYPES: BuiltinNodeTypeDefinition[] = [
     fields: [
       { key: "project", label: "GitLab 项目", placeholder: "team/service" },
       { key: "ref", label: "引用", placeholder: "${source_branch}" },
-      { key: "sha", label: "提交 SHA", placeholder: "可选" },
+      { key: "sha", label: "提交 SHA", placeholder: "可选", required: false },
     ],
     defaults: { project: "", ref: "${source_branch}", sha: "" },
   },
@@ -87,7 +88,7 @@ export const BUILTIN_NODE_TYPES: BuiltinNodeTypeDefinition[] = [
     fields: [
       { key: "project", label: "GitLab 项目", placeholder: "team/service" },
       { key: "ref", label: "引用", placeholder: "${target_branch}" },
-      { key: "sha", label: "提交 SHA", placeholder: "可选" },
+      { key: "sha", label: "提交 SHA", placeholder: "可选", required: false },
     ],
     defaults: { project: "", ref: "${target_branch}", sha: "" },
   },
@@ -343,6 +344,26 @@ export function normalizeBuiltinParameters(nodeType: string, parameters: Record<
   }
 
   return normalized;
+}
+
+export function getMissingBuiltinRequiredFields(
+  nodeType: string,
+  parameters: Record<string, unknown>
+) {
+  const builtin = BUILTIN_NODE_MAP.get(nodeType);
+  if (!builtin) {
+    return [];
+  }
+
+  const normalized = normalizeBuiltinParameters(nodeType, parameters);
+  return builtin.fields.filter((field) => {
+    if (field.required === false) {
+      return false;
+    }
+
+    const value = normalized[field.key];
+    return typeof value !== "string" || value.trim().length === 0;
+  });
 }
 
 export function remapNodeDraftForType(node: NodeDraft, nextNodeType: string): NodeDraft {
@@ -748,6 +769,13 @@ function buildNodePayloads(nodes: NodeDraft[], stages: StageDraft[]): PipelineNo
 
     const builtin = BUILTIN_NODE_MAP.get(nodeType);
     if (builtin) {
+      const missingRequiredFields = getMissingBuiltinRequiredFields(nodeType, node.parameters);
+      if (missingRequiredFields.length > 0) {
+        throw new Error(
+          `节点 ${nodeKey} 缺少必填参数：${missingRequiredFields.map((field) => field.label).join("、")}`
+        );
+      }
+
       return {
         nodeType,
         parameters: normalizeBuiltinParameters(nodeType, node.parameters),

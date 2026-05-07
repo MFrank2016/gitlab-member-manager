@@ -1,21 +1,34 @@
 import * as React from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PipelineGraphEditor } from "@/components/pipeline-graph/PipelineGraphEditor";
+import { buildGraphEditorState } from "@/components/pipeline-graph/graph-model";
 import {
   createEmptyPipelineDraft,
+  createNodeDraft,
+  createStageDraft,
   resetPipelineDraftCountersForTest,
   type PipelineDraft,
 } from "@/components/pipeline-editor/draft-model";
 import type { ManagedProject } from "@/lib/types";
 
 const mockFitView = vi.fn();
+type MockReactFlowNode = Record<string, unknown> & {
+  id: string;
+  data?: Record<string, unknown>;
+  parentId?: string;
+  position?: { x: number; y: number };
+};
+
 let lastReactFlowProps:
   | {
       panOnDrag?: boolean;
       zoomOnScroll?: boolean;
       selectionOnDrag?: boolean;
+      nodes: MockReactFlowNode[];
+      onNodeDragStop?: (event: unknown, node: MockReactFlowNode) => void;
+      onPaneClick?: () => void;
     }
   | null = null;
 
@@ -39,6 +52,8 @@ vi.mock("@xyflow/react", async () => {
       edges,
       nodeTypes,
       onNodeClick,
+      onNodeDragStop,
+      onPaneClick,
       onSelectionChange,
       onInit,
       panOnDrag,
@@ -50,6 +65,8 @@ vi.mock("@xyflow/react", async () => {
       edges: Array<Record<string, unknown>>;
       nodeTypes?: Record<string, React.ComponentType<Record<string, unknown>>>;
       onNodeClick?: (event: unknown, node: Record<string, unknown>) => void;
+      onNodeDragStop?: (event: unknown, node: MockReactFlowNode) => void;
+      onPaneClick?: () => void;
       onSelectionChange?: (params: {
         nodes: Array<Record<string, unknown>>;
         edges: Array<Record<string, unknown>>;
@@ -64,6 +81,9 @@ vi.mock("@xyflow/react", async () => {
         panOnDrag,
         zoomOnScroll,
         selectionOnDrag,
+        nodes: nodes as MockReactFlowNode[],
+        onNodeDragStop,
+        onPaneClick,
       };
       const [selectedNodeId, setSelectedNodeId] = ReactModule.useState<string | null>(null);
 
@@ -76,12 +96,23 @@ vi.mock("@xyflow/react", async () => {
           <div data-testid="mock-react-flow-edge-count">{edges.length}</div>
           <button
             type="button"
+            data-testid="mock-react-flow-multiselect"
             onClick={() => {
               setSelectedNodeId(null);
               onSelectionChange?.({ nodes, edges: [] });
             }}
           >
             模拟多选
+          </button>
+          <button
+            type="button"
+            data-testid="mock-react-flow-pane-click"
+            onClick={() => {
+              setSelectedNodeId(null);
+              onPaneClick?.();
+            }}
+          >
+            mock pane click
           </button>
           {children}
           {nodes.map((node) => {
@@ -139,8 +170,64 @@ function clickGraphObject(id: string) {
   fireEvent.click(within(screen.getByTestId(`graph-node-${id}`)).getByRole("button"));
 }
 
-async function addNodeToSelectedStage(expectedCount: number) {
+function clickCanvasPane() {
+  fireEvent.click(screen.getByTestId("mock-react-flow-pane-click"));
+}
+
+function dragGraphNode(
+  id: string,
+  position: { x: number; y: number },
+  overrides: Partial<MockReactFlowNode> = {}
+) {
+  const node = lastReactFlowProps?.nodes.find((item) => String(item.id) === id);
+  expect(node).toBeDefined();
+
+  const nextNode: MockReactFlowNode = {
+    ...(node as MockReactFlowNode),
+    ...overrides,
+    position,
+    data: {
+      ...((node?.data ?? {}) as Record<string, unknown>),
+      ...((overrides.data ?? {}) as Record<string, unknown>),
+    },
+  };
+
+  act(() => {
+    lastReactFlowProps?.onNodeDragStop?.({}, nextNode);
+  });
+}
+
+function openStageContextMenu(stageKey: string, clientX = 160, clientY = 220) {
+  fireEvent.contextMenu(screen.getByTestId(`pipeline-stage-node-card-${stageKey}`), {
+    clientX,
+    clientY,
+  });
+}
+
+function openNodeContextMenu(nodeKey: string, clientX = 240, clientY = 260) {
+  fireEvent.contextMenu(screen.getByTestId(`pipeline-action-node-card-${nodeKey}`), {
+    clientX,
+    clientY,
+  });
+}
+
+async function openCreateNodeDialog(stageKey: string) {
+  openStageContextMenu(stageKey);
+  fireEvent.click(await screen.findByRole("menuitem", { name: "添加节点" }));
+  await screen.findByRole("button", { name: "创建节点" });
+}
+
+async function openCreateNodeDialogFromToolbar() {
   fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
+  await screen.findByRole("button", { name: "创建节点" });
+}
+
+async function addNodeToSelectedStage(expectedCount: number) {
+  await openCreateNodeDialogFromToolbar();
+  fireEvent.change(screen.getByLabelText("节点类型"), {
+    target: { value: "checkout_branch" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
   await waitFor(() => {
     expect(parseDraft().nodes).toHaveLength(expectedCount);
   });
@@ -250,6 +337,19 @@ describe("PipelineGraphEditor", () => {
     expect(nextNode.stageKey).toBe("stage-2");
   });
 
+  it("opens the create-node dialog from the toolbar using the active stage context", async () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "添加阶段" }));
+    clickGraphObject("stage-2");
+
+    await openCreateNodeDialogFromToolbar();
+
+    expect(screen.getByRole("heading", { name: "创建节点" })).toBeInTheDocument();
+    expect(screen.getByText("在阶段“阶段 2”中创建一个新节点。")).toBeInTheDocument();
+    expect(parseDraft().nodes).toHaveLength(0);
+  });
+
   it("selects the newly added node and opens node editing", async () => {
     render(<EditorHarness />);
 
@@ -280,6 +380,218 @@ describe("PipelineGraphEditor", () => {
     expect(within(actionCard).queryByText(nextNode.stageKey)).not.toBeInTheDocument();
   });
 
+  it("selects a stage on left click and opens stage editing state", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    clickGraphObject(nextNode.nodeKey);
+    clickGraphObject("stage-1");
+
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中阶段"
+    );
+    expect(document.getElementById("pipeline-stage-name-input")).not.toBeNull();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
+  });
+
+  it("selects a node on left click and opens node editing state", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    clickGraphObject(nextNode.nodeKey);
+
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(document.getElementById("pipeline-node-type-select")).not.toBeNull();
+    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
+  });
+
+  it("opens the stage context menu on right click without changing the current selection", async () => {
+    render(<EditorHarness />);
+
+    await addNodeToSelectedStage(1);
+
+    openStageContextMenu("stage-1");
+
+    expect(await screen.findByRole("menuitem", { name: "添加节点" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "删除阶段" })).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-stage-context-add-node")).toBeEnabled();
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+  });
+
+  it("opens the create-node dialog from the stage context menu", async () => {
+    render(<EditorHarness />);
+
+    await openCreateNodeDialog("stage-1");
+
+    expect(screen.getByRole("heading", { name: "创建节点" })).toBeInTheDocument();
+    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "阶段上下文菜单" })).not.toBeInTheDocument();
+  });
+
+  it("allows optional builtin fields to stay empty during creation", async () => {
+    render(<EditorHarness />);
+
+    await openCreateNodeDialog("stage-1");
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "check_pipeline" },
+    });
+    fireEvent.change(screen.getByLabelText("GitLab 项目"), {
+      target: { value: "team/service" },
+    });
+    fireEvent.change(screen.getByLabelText("引用"), {
+      target: { value: "${source_branch}" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
+    await waitFor(() => {
+      expect(parseDraft().nodes).toHaveLength(1);
+    });
+
+    expect(parseDraft().nodes[0]).toEqual(
+      expect.objectContaining({
+        nodeType: "check_pipeline",
+        parameters: {
+          project: "team/service",
+          ref: "${source_branch}",
+          sha: "",
+        },
+      })
+    );
+    expect(screen.queryByText(/提交 SHA.*必填/)).not.toBeInTheDocument();
+  });
+
+  it("requires a node type and required fields before creation", async () => {
+    render(<EditorHarness managedProjects={managedProjectsFixture} />);
+
+    await openCreateNodeDialog("stage-1");
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
+    expect(screen.getByText(/节点类型.*必填/)).toBeInTheDocument();
+    expect(parseDraft().nodes).toHaveLength(0);
+
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "switch_project" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
+    expect(screen.getByText(/项目.*必填/)).toBeInTheDocument();
+    expect(parseDraft().nodes).toHaveLength(0);
+  });
+
+  it("keeps the draft unchanged when the create-node dialog is invalid", async () => {
+    render(<EditorHarness />);
+
+    const beforeDraft = parseDraft();
+
+    await openCreateNodeDialog("stage-1");
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "set_working_path" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
+    expect(screen.getByText(/目标路径.*必填/)).toBeInTheDocument();
+    expect(parseDraft()).toEqual(beforeDraft);
+  });
+
+  it("creates a valid node from the dialog, selects it, and opens node editing", async () => {
+    render(<EditorHarness managedProjects={managedProjectsFixture} />);
+
+    await openCreateNodeDialog("stage-1");
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "switch_project" },
+    });
+    fireEvent.change(screen.getByLabelText("项目"), {
+      target: { value: "101" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.nodes).toHaveLength(1);
+      expect(draft.nodes[0]).toEqual(
+        expect.objectContaining({
+          stageKey: "stage-1",
+          nodeType: "switch_project",
+          parameters: { managedProjectId: "101" },
+        })
+      );
+    });
+
+    const createdNode = parseDraft().nodes[0];
+    expect(createdNode).toBeDefined();
+    expect(screen.queryByRole("heading", { name: "创建节点" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+    expect(screen.getByTestId(`graph-node-${createdNode?.nodeKey}`)).toBeInTheDocument();
+  });
+
+  it("opens the node context menu on right click without changing the current selection", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    clickGraphObject("stage-1");
+
+    openNodeContextMenu(nextNode.nodeKey);
+
+    expect(await screen.findByRole("menuitem", { name: "删除节点" })).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中阶段"
+    );
+    expect(screen.getByLabelText("阶段名称")).toBeInTheDocument();
+  });
+
+  it("deletes the right-clicked stage from the context menu without retargeting selection", async () => {
+    render(<EditorHarness />);
+
+    const firstNode = await addNodeToSelectedStage(1);
+    fireEvent.click(screen.getByRole("button", { name: "添加阶段" }));
+    clickGraphObject(firstNode.nodeKey);
+
+    openStageContextMenu("stage-2");
+    fireEvent.click(screen.getByTestId("pipeline-graph-stage-context-delete"));
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.stages).toHaveLength(1);
+      expect(draft.stages[0]?.stageKey).toBe("stage-1");
+    });
+
+    expect(screen.queryByTestId("graph-node-stage-2")).not.toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+  });
+
+  it("falls back to the owning stage after deleting the selected node", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+
+    openNodeContextMenu(nextNode.nodeKey);
+    fireEvent.click(screen.getByTestId("pipeline-graph-node-context-delete"));
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.nodes).toHaveLength(0);
+    });
+
+    expect(screen.queryByTestId(`graph-node-${nextNode.nodeKey}`)).not.toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中阶段"
+    );
+    expect(screen.getByRole("button", { name: "在所选阶段添加节点" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "删除选中对象" })).toBeEnabled();
+    expect(document.getElementById("pipeline-stage-name-input")).not.toBeNull();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
+  });
   it("connects nodes and blocks duplicate connections", async () => {
     render(<EditorHarness />);
 
@@ -367,20 +679,28 @@ describe("PipelineGraphEditor", () => {
     });
 
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
-      "未选中对象"
+      "已选中阶段"
     );
-    expect(screen.getByText("当前活动阶段：阶段 2")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "在所选阶段添加节点" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "删除选中对象" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "删除选中对象" })).toBeEnabled();
+    expect(document.getElementById("pipeline-stage-name-input")).not.toBeNull();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
   });
 
-  it("tracks whether the selected object is a stage or a node", () => {
+  it("tracks whether the selected object is a stage or a node", async () => {
     render(<EditorHarness />);
 
     const summary = screen.getByTestId("pipeline-graph-selection-summary");
     expect(summary).toHaveTextContent("已选中阶段");
 
-    fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
+    await openCreateNodeDialogFromToolbar();
+    expect(summary).toHaveTextContent("已选中阶段");
+
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "checkout_branch" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
     expect(summary).toHaveTextContent("已选中节点");
 
     clickGraphObject("stage-1");
@@ -550,6 +870,138 @@ describe("PipelineGraphEditor", () => {
     });
   });
 
+  it("reorders dragged stages and keeps them on horizontal lanes", async () => {
+    const initialDraft: PipelineDraft = {
+      ...createEmptyPipelineDraft(),
+      stages: [
+        createStageDraft({
+          id: "stage-1",
+          stageKey: "stage-1",
+          name: "Stage 1",
+          enabled: true,
+        }),
+        createStageDraft({
+          id: "stage-2",
+          stageKey: "stage-2",
+          name: "Stage 2",
+          enabled: true,
+        }),
+      ],
+      nodes: [],
+    };
+
+    render(<EditorHarness initialDraft={initialDraft} />);
+
+    dragGraphNode("stage-2", { x: 0, y: 220 });
+
+    await waitFor(() => {
+      expect(parseDraft().stages.map((stage) => stage.stageKey)).toEqual(["stage-2", "stage-1"]);
+    });
+
+    const stageNodes = buildGraphEditorState(parseDraft()).nodes.filter(
+      (node) => node.type === "stage-group"
+    );
+    expect(stageNodes.map((node) => node.position)).toEqual([
+      { x: 24, y: 32 },
+      { x: 384, y: 32 },
+    ]);
+  });
+
+  it("reflows a dragged node within the same stage after dropping onto an occupied slot", async () => {
+    const initialDraft: PipelineDraft = {
+      ...createEmptyPipelineDraft(),
+      nodes: [
+        createNodeDraft({
+          id: "node-a",
+          nodeKey: "node-a",
+          stageKey: "stage-1",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 72 },
+        }),
+        createNodeDraft({
+          id: "node-b",
+          nodeKey: "node-b",
+          stageKey: "stage-1",
+          nodeType: "checkout_branch",
+          position: { x: 308, y: 72 },
+        }),
+        createNodeDraft({
+          id: "node-c",
+          nodeKey: "node-c",
+          stageKey: "stage-1",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 188 },
+        }),
+      ],
+    };
+
+    render(<EditorHarness initialDraft={initialDraft} />);
+
+    dragGraphNode("node-c", { x: 280, y: 92 });
+
+    await waitFor(() => {
+      const positions = Object.fromEntries(
+        parseDraft().nodes.map((node) => [node.nodeKey, node.position])
+      );
+      expect(positions).toEqual({
+        "node-a": { x: 96, y: 72 },
+        "node-b": { x: 96, y: 188 },
+        "node-c": { x: 308, y: 72 },
+      });
+    });
+
+    expect(
+      new Set(parseDraft().nodes.map((node) => `${node.position.x}:${node.position.y}`)).size
+    ).toBe(3);
+  });
+
+  it("rejects cross-stage drops for action nodes", async () => {
+    const initialDraft: PipelineDraft = {
+      ...createEmptyPipelineDraft(),
+      stages: [
+        createStageDraft({
+          id: "stage-1",
+          stageKey: "stage-1",
+          name: "Stage 1",
+          enabled: true,
+        }),
+        createStageDraft({
+          id: "stage-2",
+          stageKey: "stage-2",
+          name: "Stage 2",
+          enabled: true,
+        }),
+      ],
+      nodes: [
+        createNodeDraft({
+          id: "node-a",
+          nodeKey: "node-a",
+          stageKey: "stage-1",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 72 },
+        }),
+      ],
+    };
+
+    render(<EditorHarness initialDraft={initialDraft} />);
+
+    const beforeDraft = parseDraft();
+    dragGraphNode(
+      "node-a",
+      { x: 96, y: 72 },
+      {
+        parentId: "stage-2",
+        data: {
+          stageKey: "stage-2",
+        },
+      }
+    );
+
+    await waitFor(() => {
+      expect(parseDraft()).toEqual(beforeDraft);
+    });
+  });
+
   it("preserves stage context but clears the explicit selection on multi-select", () => {
     render(<EditorHarness />);
 
@@ -566,12 +1018,87 @@ describe("PipelineGraphEditor", () => {
   it("keeps add-node available after selection is cleared while stages remain", async () => {
     render(<EditorHarness />);
 
-    fireEvent.click(screen.getByRole("button", { name: "添加阶段" }));
-    fireEvent.click(screen.getByRole("button", { name: "模拟多选" }));
+    fireEvent.click(screen.getByTestId("pipeline-graph-add-stage-button"));
+    fireEvent.click(screen.getByTestId("mock-react-flow-multiselect"));
 
-    expect(screen.getByRole("button", { name: "在所选阶段添加节点" })).toBeEnabled();
+    expect(screen.getByTestId("pipeline-graph-add-node-button")).toBeEnabled();
 
     const nextNode = await addNodeToSelectedStage(1);
+    expect(nextNode.stageKey).toBe("stage-2");
+  });
+
+  it("falls back to another stage after deleting the selected stage", async () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(screen.getByTestId("pipeline-graph-add-stage-button"));
+    clickGraphObject("stage-2");
+    fireEvent.click(screen.getByTestId("pipeline-graph-delete-button"));
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.stages).toHaveLength(1);
+      expect(draft.stages[0]?.stageKey).toBe("stage-1");
+    });
+
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中阶段"
+    );
+    expect(screen.getByTestId("pipeline-graph-add-node-button")).toBeEnabled();
+    expect(screen.getByTestId("pipeline-graph-delete-button")).toBeEnabled();
+    expect(document.getElementById("pipeline-stage-name-input")).not.toBeNull();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
+  });
+
+  it("resets the inspector to the empty state on blank-canvas click while keeping the active stage context", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    clickGraphObject(nextNode.nodeKey);
+    clickCanvasPane();
+
+    expect(screen.getByTestId("pipeline-graph-add-node-button")).toBeEnabled();
+    expect(screen.getByTestId("pipeline-graph-delete-button")).toBeDisabled();
+    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
+  });
+
+  it("keeps the toolbar active-stage context aligned after moving the selected node to another stage", async () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(screen.getByTestId("pipeline-graph-add-stage-button"));
+    clickGraphObject("stage-1");
+    const movedNode = await addNodeToSelectedStage(1);
+    clickGraphObject("stage-2");
+    const targetStageNode = await addNodeToSelectedStage(2);
+    clickGraphObject(movedNode.nodeKey);
+
+    const stageSelect = document.getElementById("pipeline-node-stage-select");
+    expect(stageSelect).not.toBeNull();
+    fireEvent.change(stageSelect as HTMLSelectElement, {
+      target: { value: "stage-2" },
+    });
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      const movedNodeDraft = draft.nodes.find((node) => node.nodeKey === movedNode.nodeKey);
+      const targetStageNodeDraft = draft.nodes.find(
+        (node) => node.nodeKey === targetStageNode.nodeKey
+      );
+      expect(movedNodeDraft?.stageKey).toBe("stage-2");
+      expect(targetStageNodeDraft?.stageKey).toBe("stage-2");
+      expect(movedNodeDraft?.position).toEqual({ x: 308, y: 72 });
+      expect(
+        new Set(
+          draft.nodes
+            .filter((node) => node.stageKey === "stage-2")
+            .map((node) => `${node.position.x}:${node.position.y}`)
+        ).size
+      ).toBe(2);
+    });
+
+    clickCanvasPane();
+
+    const nextNode = await addNodeToSelectedStage(3);
     expect(nextNode.stageKey).toBe("stage-2");
   });
 });

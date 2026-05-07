@@ -95,6 +95,55 @@ describe("validatePipelineEditorDraft", () => {
     );
   });
 
+  it("reports a builtin node with a missing required parameter", () => {
+    const draft = createValidDraft();
+    const stage = createStageDraft({ stageKey: "stage-1", name: "准备" });
+    const node = createNodeDraft({
+      nodeKey: "node-a",
+      stageKey: stage.stageKey,
+      nodeType: "switch_project",
+      parameters: { managedProjectId: "" },
+    });
+    draft.stages = [stage];
+    draft.nodes = [node];
+
+    expect(validatePipelineEditorDraft(draft)).toEqual(
+      expect.objectContaining({
+        ok: false,
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: "node_required_parameter_missing",
+            path: "node:node-a:parameter:managedProjectId",
+          }),
+        ]),
+      })
+    );
+  });
+
+  it("does not report an optional builtin parameter when it is empty", () => {
+    const draft = createValidDraft();
+    const stage = createStageDraft({ stageKey: "stage-1", name: "准备" });
+    const node = createNodeDraft({
+      nodeKey: "node-a",
+      stageKey: stage.stageKey,
+      nodeType: "wait_pipeline",
+      parameters: {
+        project: "team/service",
+        ref: "${target_branch}",
+        sha: "",
+      },
+    });
+    draft.stages = [stage];
+    draft.nodes = [node];
+
+    expect(validatePipelineEditorDraft(draft)).toEqual(
+      expect.objectContaining({
+        ok: true,
+        issues: [],
+      })
+    );
+  });
+
   it("reports duplicate edges", () => {
     const draft = createValidDraft();
     const stage = createStageDraft({ stageKey: "stage-1", name: "准备" });

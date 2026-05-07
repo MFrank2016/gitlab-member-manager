@@ -14,13 +14,14 @@ import {
 } from "../pipeline-editor/draft-model";
 
 type PipelineGraphSelection =
-  | { kind: "stage"; stage: StageDraft }
-  | { kind: "node"; node: NodeDraft }
+  | { kind: "stage"; stageKey: string }
+  | { kind: "node"; nodeKey: string }
   | null;
 
 export type PipelineGraphSelectionPanelProps = {
   selection: PipelineGraphSelection;
   stages: StageDraft[];
+  nodes: NodeDraft[];
   managedProjects: ManagedProject[];
   onStageChange: (stageKey: string, updater: (current: StageDraft) => StageDraft) => void;
   onNodeChange: (nodeKey: string, updater: (current: NodeDraft) => NodeDraft) => void;
@@ -63,11 +64,21 @@ function mergeBuiltinParameters(
 export function PipelineGraphSelectionPanel({
   selection,
   stages,
+  nodes,
   managedProjects,
   onStageChange,
   onNodeChange,
 }: PipelineGraphSelectionPanelProps) {
-  if (selection?.kind === "stage") {
+  const selectedStage =
+    selection?.kind === "stage"
+      ? stages.find((stage) => stage.stageKey === selection.stageKey) ?? null
+      : null;
+  const selectedNode =
+    selection?.kind === "node"
+      ? nodes.find((node) => node.nodeKey === selection.nodeKey) ?? null
+      : null;
+
+  if (selectedStage) {
     return (
       <aside className="grid gap-4 rounded-xl border border-border bg-background p-4">
         <div className="space-y-1">
@@ -79,9 +90,9 @@ export function PipelineGraphSelectionPanel({
           <Label htmlFor="pipeline-stage-name-input">阶段名称</Label>
           <Input
             id="pipeline-stage-name-input"
-            value={selection.stage.name}
+            value={selectedStage.name}
             onChange={(event) =>
-              onStageChange(selection.stage.stageKey, (current) => ({
+              onStageChange(selectedStage.stageKey, (current) => ({
                 ...current,
                 name: event.target.value,
               }))
@@ -92,9 +103,9 @@ export function PipelineGraphSelectionPanel({
 
         <label className="flex items-center gap-2 text-sm">
           <Checkbox
-            checked={selection.stage.enabled}
+            checked={selectedStage.enabled}
             onCheckedChange={(value) =>
-              onStageChange(selection.stage.stageKey, (current) => ({
+              onStageChange(selectedStage.stageKey, (current) => ({
                 ...current,
                 enabled: Boolean(value),
               }))
@@ -106,13 +117,13 @@ export function PipelineGraphSelectionPanel({
     );
   }
 
-  if (selection?.kind === "node") {
+  if (selectedNode) {
     return (
       <NodeSelectionPanel
-        node={selection.node}
+        node={selectedNode}
         stages={stages}
         managedProjects={managedProjects}
-        onChange={(updater) => onNodeChange(selection.node.nodeKey, updater)}
+        onChange={(updater) => onNodeChange(selectedNode.nodeKey, updater)}
       />
     );
   }

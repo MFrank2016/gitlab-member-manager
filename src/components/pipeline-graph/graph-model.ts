@@ -3,32 +3,32 @@ import type { Connection, Edge, Node } from "@xyflow/react";
 import {
   BUILTIN_NODE_MAP,
   createEdgeDraft,
-  createStageDraft,
   createNodeDraft,
+  createStageDraft,
   ensureVariableRows,
   normalizeBuiltinParameters,
+  type NodeDraft,
   type PipelineDraft,
   type StageDraft,
-  type NodeDraft,
 } from "@/components/pipeline-editor/draft-model";
 
 export const STAGE_GROUP_NODE_TYPE = "stage-group";
 export const PIPELINE_ACTION_NODE_TYPE = "pipeline-action";
 
-const STAGE_GROUP_WIDTH = 320;
-const STAGE_GROUP_HEIGHT = 360;
-const STAGE_GROUP_GAP_X = 360;
+const STAGE_GROUP_MIN_WIDTH = 320;
+const STAGE_GROUP_MIN_HEIGHT = 360;
+const STAGE_GROUP_GAP_X = 40;
 const STAGE_GROUP_START_X = 24;
 const STAGE_GROUP_START_Y = 32;
 const STAGE_NODE_START_X = 96;
 const STAGE_NODE_START_Y = 72;
+const STAGE_NODE_WIDTH = 188;
+const STAGE_NODE_GAP_X = 212;
 const STAGE_NODE_GAP_Y = 116;
-const STAGE_NODE_VISIBLE_SLOT_COUNT = Math.max(
-  1,
-  Math.floor((STAGE_GROUP_HEIGHT - STAGE_NODE_START_Y) / STAGE_NODE_GAP_Y)
-);
-const STAGE_NODE_LAST_VISIBLE_Y =
-  STAGE_NODE_START_Y + (STAGE_NODE_VISIBLE_SLOT_COUNT - 1) * STAGE_NODE_GAP_Y;
+const STAGE_NODE_RIGHT_PADDING = 36;
+const STAGE_NODE_BOTTOM_PADDING = 56;
+const STAGE_NODE_SLOT_HEIGHT = 116;
+const STAGE_NODE_MAX_COLUMNS = 2;
 
 export type StageGraphNodeData = {
   kind: "stage";
@@ -55,22 +55,219 @@ export type PipelineGraphState = {
   edges: PipelineGraphEdge[];
 };
 
+export type StageGridSlot = {
+  col: number;
+  row: number;
+};
+
+export type StageGridLayout = {
+  nodePositions: Record<string, { x: number; y: number }>;
+  width: number;
+  height: number;
+};
+
+type StagePositionedNode = Pick<NodeDraft, "nodeKey" | "position">;
+
+function clampStageGridColumn(col: number) {
+  return Math.min(Math.max(Math.round(col), 0), STAGE_NODE_MAX_COLUMNS - 1);
+}
+
+function getStageGridSlotIndex(slot: StageGridSlot) {
+  return Math.max(0, Math.round(slot.row)) * STAGE_NODE_MAX_COLUMNS + clampStageGridColumn(slot.col);
+}
+
+function getStageGridSlotForIndex(index: number): StageGridSlot {
+  const normalizedIndex = Math.max(0, Math.round(index));
+  return {
+    col: normalizedIndex % STAGE_NODE_MAX_COLUMNS,
+    row: Math.floor(normalizedIndex / STAGE_NODE_MAX_COLUMNS),
+  };
+}
+
+function getStageGridSlotFromPosition(position: { x: number; y: number }): StageGridSlot {
+  return {
+    col: clampStageGridColumn((position.x - STAGE_NODE_START_X) / STAGE_NODE_GAP_X),
+    row: Math.max(0, Math.round((position.y - STAGE_NODE_START_Y) / STAGE_NODE_GAP_Y)),
+  };
+}
+
+function getStageGridPosition(slot: StageGridSlot) {
+  return {
+    x: STAGE_NODE_START_X + clampStageGridColumn(slot.col) * STAGE_NODE_GAP_X,
+    y: STAGE_NODE_START_Y + Math.max(0, Math.round(slot.row)) * STAGE_NODE_GAP_Y,
+  };
+}
+
+function sortStagePositionedNodes<T extends StagePositionedNode>(nodes: T[]) {
+  return [...nodes].sort((left, right) => {
+    const leftIndex = getStageGridSlotIndex(getStageGridSlotFromPosition(left.position));
+    const rightIndex = getStageGridSlotIndex(getStageGridSlotFromPosition(right.position));
+    if (leftIndex !== rightIndex) {
+      return leftIndex - rightIndex;
+    }
+    if (left.position.y !== right.position.y) {
+      return left.position.y - right.position.y;
+    }
+    if (left.position.x !== right.position.x) {
+      return left.position.x - right.position.x;
+    }
+    return left.nodeKey.localeCompare(right.nodeKey);
+  });
+}
+
+function getStageGridDimensions(nodeCount: number) {
+  const columnCount =
+    nodeCount <= 1 ? 1 : Math.min(STAGE_NODE_MAX_COLUMNS, Math.max(nodeCount, 1));
+  const rowCount = nodeCount > 0 ? Math.ceil(nodeCount / columnCount) : 1;
+  return { columnCount, rowCount };
+}
+
+function getStageGridWidth(columnCount: number) {
+  return Math.max(
+    STAGE_GROUP_MIN_WIDTH,
+    STAGE_NODE_START_X +
+      (columnCount - 1) * STAGE_NODE_GAP_X +
+      STAGE_NODE_WIDTH +
+      STAGE_NODE_RIGHT_PADDING
+  );
+}
+
+function getStageGridHeight(rowCount: number) {
+  return Math.max(
+    STAGE_GROUP_MIN_HEIGHT,
+    STAGE_NODE_START_Y +
+      (rowCount - 1) * STAGE_NODE_GAP_Y +
+      STAGE_NODE_SLOT_HEIGHT +
+      STAGE_NODE_BOTTOM_PADDING
+  );
+}
+
+export function buildStageGridLayout(nodes: StagePositionedNode[]): StageGridLayout {
+  const orderedNodes = sortStagePositionedNodes(nodes);
+  const { columnCount, rowCount } = getStageGridDimensions(orderedNodes.length);
+  const nodePositions = Object.fromEntries(
+    orderedNodes.map((node, index) => [node.nodeKey, getStageGridPosition(getStageGridSlotForIndex(index))])
+  );
+
+  return {
+    nodePositions,
+    width: getStageGridWidth(columnCount),
+    height: getStageGridHeight(rowCount),
+  };
+}
+
+function reflowStageNodes<T extends NodeDraft>(nodes: T[]) {
+  const layout = buildStageGridLayout(nodes);
+  return sortStagePositionedNodes(nodes).map((node) => ({
+    ...node,
+    position: layout.nodePositions[node.nodeKey] ?? node.position,
+  }));
+}
+
+export function reflowNodesByStageOrder(nodes: NodeDraft[], orderedStageKeys: string[]) {
+  const groupedNodes = new Map<string, NodeDraft[]>();
+  for (const node of nodes) {
+    const current = groupedNodes.get(node.stageKey) ?? [];
+    current.push(node);
+    groupedNodes.set(node.stageKey, current);
+  }
+
+  const nextNodes = orderedStageKeys.flatMap((stageKey) => reflowStageNodes(groupedNodes.get(stageKey) ?? []));
+  const knownStageKeys = new Set(orderedStageKeys);
+  for (const [stageKey, stageNodes] of groupedNodes.entries()) {
+    if (!knownStageKeys.has(stageKey)) {
+      nextNodes.push(...reflowStageNodes(stageNodes));
+    }
+  }
+
+  return nextNodes;
+}
+
+export function reorderStageNodesForDrop(
+  nodes: NodeDraft[],
+  draggedNodeKey: string,
+  targetSlot: StageGridSlot
+) {
+  const draggedNode = nodes.find((node) => node.nodeKey === draggedNodeKey);
+  if (!draggedNode) {
+    return reflowStageNodes(nodes);
+  }
+
+  const remainingNodes = sortStagePositionedNodes(
+    nodes.filter((node) => node.nodeKey !== draggedNodeKey)
+  );
+  const targetIndex = Math.min(getStageGridSlotIndex(targetSlot), remainingNodes.length);
+  const nextOrderedNodes = [
+    ...remainingNodes.slice(0, targetIndex),
+    draggedNode,
+    ...remainingNodes.slice(targetIndex),
+  ];
+
+  return nextOrderedNodes.map((node, index) => ({
+    ...node,
+    position: getStageGridPosition(getStageGridSlotForIndex(index)),
+  }));
+}
+
+export function reorderStageNodesForDropPosition(
+  nodes: NodeDraft[],
+  draggedNodeKey: string,
+  targetPosition: { x: number; y: number }
+) {
+  return reorderStageNodesForDrop(
+    nodes,
+    draggedNodeKey,
+    getStageGridSlotFromPosition(targetPosition)
+  );
+}
+
+function buildStageLayouts(nodes: NodeDraft[]) {
+  const groupedNodes = new Map<string, NodeDraft[]>();
+  for (const node of nodes) {
+    const current = groupedNodes.get(node.stageKey) ?? [];
+    current.push(node);
+    groupedNodes.set(node.stageKey, current);
+  }
+
+  return new Map(
+    Array.from(groupedNodes.entries()).map(([stageKey, stageNodes]) => [
+      stageKey,
+      buildStageGridLayout(stageNodes),
+    ])
+  );
+}
+
+function buildStagePositions(stageKeys: string[], stageLayouts: Map<string, StageGridLayout>) {
+  const positions = new Map<string, { x: number; y: number }>();
+  let currentX = STAGE_GROUP_START_X;
+
+  for (const stageKey of stageKeys) {
+    positions.set(stageKey, { x: currentX, y: STAGE_GROUP_START_Y });
+    currentX += (stageLayouts.get(stageKey)?.width ?? STAGE_GROUP_MIN_WIDTH) + STAGE_GROUP_GAP_X;
+  }
+
+  return positions;
+}
+
+function getNextAvailableStageGridSlot(nodes: Array<Pick<NodeDraft, "position">>) {
+  const occupiedSlotIndexes = new Set(
+    nodes.map((node) => getStageGridSlotIndex(getStageGridSlotFromPosition(node.position)))
+  );
+  let nextSlotIndex = 0;
+
+  while (occupiedSlotIndexes.has(nextSlotIndex)) {
+    nextSlotIndex += 1;
+  }
+
+  return getStageGridSlotForIndex(nextSlotIndex);
+}
+
 export function getNextNodePositionInStage(
   nodes: Array<Pick<NodeDraft, "stageKey" | "position">>,
   stageKey: string
 ) {
   const stageNodes = nodes.filter((node) => node.stageKey === stageKey);
-  const nextY =
-    stageNodes.reduce(
-      (currentMax, node) => Math.max(currentMax, node.position.y),
-      STAGE_NODE_START_Y - STAGE_NODE_GAP_Y
-    ) + STAGE_NODE_GAP_Y;
-
-  return {
-    x: STAGE_NODE_START_X,
-    // 新节点沿用阶段内的默认纵向槽位，但最后一个槽位必须完整留在容器内。
-    y: Math.min(Math.max(nextY, STAGE_NODE_START_Y), STAGE_NODE_LAST_VISIBLE_Y),
-  };
+  return getStageGridPosition(getNextAvailableStageGridSlot(stageNodes));
 }
 
 function filterEdgesByRemainingNodeKeys(
@@ -122,6 +319,12 @@ function sortActionNodes(nodes: PipelineGraphNode[], orderedStageKeys: string[])
       if (leftOrder !== rightOrder) {
         return leftOrder - rightOrder;
       }
+
+      const leftIndex = getStageGridSlotIndex(getStageGridSlotFromPosition(left.position));
+      const rightIndex = getStageGridSlotIndex(getStageGridSlotFromPosition(right.position));
+      if (leftIndex !== rightIndex) {
+        return leftIndex - rightIndex;
+      }
       if (left.position.y !== right.position.y) {
         return left.position.y - right.position.y;
       }
@@ -168,18 +371,19 @@ function detectCycle(nodeKeys: string[], edges: { source: string; target: string
   return visited !== nodeKeys.length;
 }
 
-function buildStageNode(stage: StageDraft, index: number): PipelineGraphNode {
+function buildStageNode(
+  stage: StageDraft,
+  position: { x: number; y: number },
+  layout?: StageGridLayout
+): PipelineGraphNode {
   return {
     id: stage.stageKey,
     type: STAGE_GROUP_NODE_TYPE,
-    draggable: false,
-    position: {
-      x: STAGE_GROUP_START_X + index * STAGE_GROUP_GAP_X,
-      y: STAGE_GROUP_START_Y,
-    },
+    draggable: true,
+    position,
     style: {
-      width: STAGE_GROUP_WIDTH,
-      height: STAGE_GROUP_HEIGHT,
+      width: layout?.width ?? STAGE_GROUP_MIN_WIDTH,
+      height: layout?.height ?? STAGE_GROUP_MIN_HEIGHT,
     },
     data: {
       kind: "stage",
@@ -190,15 +394,15 @@ function buildStageNode(stage: StageDraft, index: number): PipelineGraphNode {
   };
 }
 
-function buildActionNode(node: NodeDraft): PipelineGraphNode {
+function buildActionNode(node: NodeDraft, layout?: StageGridLayout): PipelineGraphNode {
   return {
     id: node.nodeKey,
     type: PIPELINE_ACTION_NODE_TYPE,
     parentId: node.stageKey,
     extent: "parent",
     position: {
-      x: node.position.x,
-      y: node.position.y,
+      x: layout?.nodePositions[node.nodeKey]?.x ?? node.position.x,
+      y: layout?.nodePositions[node.nodeKey]?.y ?? node.position.y,
     },
     data: {
       kind: "node",
@@ -213,8 +417,20 @@ function buildActionNode(node: NodeDraft): PipelineGraphNode {
 }
 
 export function buildGraphEditorState(draft: PipelineDraft): PipelineGraphState {
-  const stageNodes = draft.stages.map((stage, index) => buildStageNode(stage, index));
-  const actionNodes = draft.nodes.map((node) => buildActionNode(node));
+  const stageLayouts = buildStageLayouts(draft.nodes);
+  const stagePositions = buildStagePositions(
+    draft.stages.map((stage) => stage.stageKey),
+    stageLayouts
+  );
+  const stageNodes = draft.stages.map((stage) =>
+    buildStageNode(
+      stage,
+      stagePositions.get(stage.stageKey) ?? { x: STAGE_GROUP_START_X, y: STAGE_GROUP_START_Y },
+      stageLayouts.get(stage.stageKey)
+    )
+  );
+  const actionNodes = draft.nodes.map((node) => buildActionNode(node, stageLayouts.get(node.stageKey)));
+
   return {
     nodes: [...stageNodes, ...actionNodes],
     edges: draft.edges.map((edge) => ({
@@ -258,7 +474,12 @@ export function validateGraphConnection(
   }
 
   const nextEdges = [...graphState.edges, { source, target }];
-  if (detectCycle(Array.from(nodeMap.keys()).filter((key) => isActionGraphNode(nodeMap.get(key)!)), nextEdges)) {
+  if (
+    detectCycle(
+      Array.from(nodeMap.keys()).filter((key) => isActionGraphNode(nodeMap.get(key)!)),
+      nextEdges
+    )
+  ) {
     return { valid: false, message: "该连线会形成环" };
   }
 
@@ -289,7 +510,7 @@ export function syncDraftFromGraphState(
 
   const orderedStageKeys = stages.map((stage) => stage.stageKey);
   const firstStageKey = orderedStageKeys[0] ?? "";
-  const nodes = sortActionNodes(graphState.nodes, orderedStageKeys).map((node) => {
+  const nextNodes = sortActionNodes(graphState.nodes, orderedStageKeys).map((node) => {
     const previous = existingNodeMap.get(node.data.nodeKey);
     const stageKey = orderedStageKeys.includes(node.data.stageKey)
       ? node.data.stageKey
@@ -308,6 +529,7 @@ export function syncDraftFromGraphState(
       enabled: node.data.enabled ?? previous?.enabled ?? true,
     });
   });
+  const nodes = reflowNodesByStageOrder(nextNodes, orderedStageKeys);
 
   const nodeKeySet = new Set(nodes.map((node) => node.nodeKey));
   const edges = graphState.edges
@@ -328,7 +550,11 @@ export function removeSelectedGraphObject(
   selectedNode: PipelineGraphNode
 ): PipelineDraft {
   if (isActionGraphNode(selectedNode)) {
-    const nodes = draft.nodes.filter((node) => node.nodeKey !== selectedNode.data.nodeKey);
+    const remainingNodes = draft.nodes.filter((node) => node.nodeKey !== selectedNode.data.nodeKey);
+    const nodes = reflowNodesByStageOrder(
+      remainingNodes,
+      draft.stages.map((stage) => stage.stageKey)
+    );
     const nodeKeySet = new Set(nodes.map((node) => node.nodeKey));
 
     return {
@@ -341,7 +567,11 @@ export function removeSelectedGraphObject(
 
   if (isStageGraphNode(selectedNode)) {
     const stages = draft.stages.filter((stage) => stage.stageKey !== selectedNode.data.stageKey);
-    const nodes = draft.nodes.filter((node) => node.stageKey !== selectedNode.data.stageKey);
+    const remainingNodes = draft.nodes.filter((node) => node.stageKey !== selectedNode.data.stageKey);
+    const nodes = reflowNodesByStageOrder(
+      remainingNodes,
+      stages.map((stage) => stage.stageKey)
+    );
     const nodeKeySet = new Set(nodes.map((node) => node.nodeKey));
 
     return {
