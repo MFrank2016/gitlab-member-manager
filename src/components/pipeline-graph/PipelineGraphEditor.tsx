@@ -10,15 +10,26 @@ import {
 } from "@xyflow/react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { ManagedProject } from "@/lib/types";
 
 import {
   BUILTIN_NODE_MAP,
+  BUILTIN_NODE_TYPES,
   createEdgeDraft,
   createNodeDraft,
   createStageDraft,
   ensureVariableRows,
+  normalizeBuiltinParameters,
   type NodeDraft,
   type PipelineDraft,
   type StageDraft,
@@ -50,6 +61,13 @@ type ContextMenuState =
   | { kind: "node"; nodeKey: string; x: number; y: number }
   | null;
 
+type CreateNodeDialogState = {
+  stageKey: string;
+  nodeType: string;
+  parameters: Record<string, unknown>;
+  errors: string[];
+} | null;
+
 const nodeTypes = {
   [STAGE_GROUP_NODE_TYPE]: StageGroupNode,
   [PIPELINE_ACTION_NODE_TYPE]: PipelineActionNode,
@@ -72,6 +90,49 @@ function getGraphNodeStageKey(node: PipelineGraphNode) {
   return isActionGraphNode(node) ? node.data.stageKey : node.data.stageKey;
 }
 
+function getBuiltinCreateParameters(
+  nodeType: string,
+  parameters: Record<string, unknown> = {}
+) {
+  const builtin = BUILTIN_NODE_MAP.get(nodeType);
+  if (!builtin) {
+    return {};
+  }
+
+  const normalized = normalizeBuiltinParameters(nodeType, parameters);
+  return Object.fromEntries(
+    builtin.fields.map((field) => [field.key, normalized[field.key] ?? ""])
+  );
+}
+
+function validateCreateNodeDialogState(
+  state: Exclude<CreateNodeDialogState, null>
+) {
+  const errors: string[] = [];
+  const nodeType = state.nodeType.trim();
+
+  if (!nodeType) {
+    errors.push("节点类型为必填项。");
+    return errors;
+  }
+
+  const builtin = BUILTIN_NODE_MAP.get(nodeType);
+  if (!builtin) {
+    errors.push("请选择有效的节点类型。");
+    return errors;
+  }
+
+  const parameters = getBuiltinCreateParameters(nodeType, state.parameters);
+  for (const field of builtin.fields) {
+    const value = parameters[field.key];
+    if (typeof value !== "string" || value.trim().length === 0) {
+      errors.push(`${field.label}为必填项。`);
+    }
+  }
+
+  return errors;
+}
+
 export function PipelineGraphEditor({
   draft,
   managedProjects = [],
@@ -87,6 +148,8 @@ export function PipelineGraphEditor({
   const [connectionTarget, setConnectionTarget] = React.useState("");
   const [graphMessage, setGraphMessage] = React.useState<string | null>(null);
   const [contextMenuState, setContextMenuState] = React.useState<ContextMenuState>(null);
+  const [createNodeDialogState, setCreateNodeDialogState] =
+    React.useState<CreateNodeDialogState>(null);
 
   const graphState = React.useMemo(() => buildGraphEditorState(draft), [draft]);
   const graphNodes = React.useMemo(
@@ -154,6 +217,15 @@ export function PipelineGraphEditor({
     }
   }, [activeStageKey, draft]);
 
+  React.useEffect(() => {
+    if (
+      createNodeDialogState &&
+      !draft.stages.some((stage) => stage.stageKey === createNodeDialogState.stageKey)
+    ) {
+      setCreateNodeDialogState(null);
+    }
+  }, [createNodeDialogState, draft.stages]);
+
   const selectedGraphNode = selectedId ? graphNodeMap.get(selectedId) ?? null : null;
   const selectedActionNode =
     selectedGraphNode && isActionGraphNode(selectedGraphNode)
@@ -197,6 +269,18 @@ export function PipelineGraphEditor({
   const contextMenuTargetNode = contextMenuTargetId
     ? graphNodeMap.get(contextMenuTargetId) ?? null
     : null;
+  const createNodeBuiltin = createNodeDialogState
+    ? BUILTIN_NODE_MAP.get(createNodeDialogState.nodeType) ?? null
+    : null;
+  const createNodeStage = createNodeDialogState
+    ? draft.stages.find((stage) => stage.stageKey === createNodeDialogState.stageKey) ?? null
+    : null;
+  const createNodeParameters = createNodeDialogState
+    ? getBuiltinCreateParameters(
+        createNodeDialogState.nodeType,
+        createNodeDialogState.parameters
+      )
+    : {};
 
   function applyDraft(nextDraft: PipelineDraft) {
     setGraphMessage(null);
@@ -205,6 +289,10 @@ export function PipelineGraphEditor({
 
   function closeContextMenu() {
     setContextMenuState(null);
+  }
+
+  function closeCreateNodeDialog() {
+    setCreateNodeDialogState(null);
   }
 
   function updateNodes(nextNodes: NodeDraft[]) {
@@ -257,6 +345,16 @@ export function PipelineGraphEditor({
     updateNodes([...draft.nodes, nextNode]);
     setSelectedId(nextNode.nodeKey);
     setActiveStageKey(stageKey);
+  }
+
+  function openCreateNodeDialog(stageKey: string) {
+    closeContextMenu();
+    setCreateNodeDialogState({
+      stageKey,
+      nodeType: "",
+      parameters: {},
+      errors: [],
+    });
   }
 
   function updateStage(stageKey: string, updater: (stage: StageDraft) => StageDraft) {
@@ -390,6 +488,68 @@ export function PipelineGraphEditor({
     }
 
     deleteGraphObject(selectedGraphNode);
+  }
+
+  function updateCreateNodeType(nextNodeType: string) {
+    setCreateNodeDialogState((current) =>
+      current
+        ? {
+            ...current,
+            nodeType: nextNodeType,
+            parameters: getBuiltinCreateParameters(nextNodeType, current.parameters),
+            errors: [],
+          }
+        : current
+    );
+  }
+
+  function updateCreateNodeParameter(fieldKey: string, nextValue: string) {
+    setCreateNodeDialogState((current) =>
+      current
+        ? {
+            ...current,
+            parameters: {
+              ...current.parameters,
+              [fieldKey]: nextValue,
+            },
+            errors: [],
+          }
+        : current
+    );
+  }
+
+  function submitCreateNodeDialog() {
+    if (!createNodeDialogState) {
+      return;
+    }
+
+    const errors = validateCreateNodeDialogState(createNodeDialogState);
+    if (errors.length > 0) {
+      setCreateNodeDialogState((current) =>
+        current
+          ? {
+              ...current,
+              errors,
+            }
+          : current
+      );
+      return;
+    }
+
+    const nextNode = createNodeDraft({
+      stageKey: createNodeDialogState.stageKey,
+      nodeType: createNodeDialogState.nodeType,
+      parameters: getBuiltinCreateParameters(
+        createNodeDialogState.nodeType,
+        createNodeDialogState.parameters
+      ),
+      position: getNextNodePositionInStage(draft.nodes, createNodeDialogState.stageKey),
+    });
+
+    closeCreateNodeDialog();
+    updateNodes([...draft.nodes, nextNode]);
+    setSelectedId(nextNode.nodeKey);
+    setActiveStageKey(createNodeDialogState.stageKey);
   }
 
   return (
@@ -549,7 +709,7 @@ export function PipelineGraphEditor({
                     role="menuitem"
                     data-testid="pipeline-graph-stage-context-add-node"
                     className={contextMenuItemClassName}
-                    disabled
+                    onClick={() => openCreateNodeDialog(contextMenuState.stageKey)}
                   >
                     添加节点
                   </button>
@@ -586,6 +746,120 @@ export function PipelineGraphEditor({
           onNodeChange={updateNode}
         />
       </div>
+
+      <Dialog
+        open={Boolean(createNodeDialogState)}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeCreateNodeDialog();
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>创建节点</DialogTitle>
+            <DialogDescription>
+              {createNodeStage
+                ? `在阶段“${createNodeStage.name}”中创建一个新节点。`
+                : "创建一个新节点。"}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4">
+            <div className="grid gap-1">
+              <Label htmlFor="pipeline-create-node-type-select">节点类型</Label>
+              <select
+                id="pipeline-create-node-type-select"
+                className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                value={createNodeDialogState?.nodeType ?? ""}
+                onChange={(event) => updateCreateNodeType(event.target.value)}
+                aria-label="节点类型"
+              >
+                <option value="">请选择节点类型</option>
+                {BUILTIN_NODE_TYPES.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {createNodeBuiltin ? (
+              <div className="grid gap-2">
+                {createNodeBuiltin.fields.map((field) => {
+                  const fieldValue =
+                    typeof createNodeParameters[field.key] === "string"
+                      ? String(createNodeParameters[field.key])
+                      : "";
+
+                  if (
+                    createNodeBuiltin.value === "switch_project" &&
+                    field.key === "managedProjectId"
+                  ) {
+                    return (
+                      <div key={field.key} className="grid gap-1">
+                        <Label htmlFor="pipeline-create-node-managed-project-select">
+                          {field.label}
+                        </Label>
+                        <select
+                          id="pipeline-create-node-managed-project-select"
+                          className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                          value={fieldValue}
+                          onChange={(event) =>
+                            updateCreateNodeParameter(field.key, event.target.value)
+                          }
+                          aria-label={field.label}
+                        >
+                          <option value="">{field.placeholder}</option>
+                          {managedProjects.map((project) => (
+                            <option key={project.id} value={String(project.id)}>
+                              {project.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div key={field.key} className="grid gap-1">
+                      <Label htmlFor={`pipeline-create-node-field-${field.key}`}>
+                        {field.label}
+                      </Label>
+                      <Input
+                        id={`pipeline-create-node-field-${field.key}`}
+                        value={fieldValue}
+                        onChange={(event) =>
+                          updateCreateNodeParameter(field.key, event.target.value)
+                        }
+                        placeholder={field.placeholder}
+                        aria-label={field.label}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+
+            {createNodeDialogState?.errors.length ? (
+              <div className="grid gap-1 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+                {createNodeDialogState.errors.map((error) => (
+                  <p key={error}>{error}</p>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={closeCreateNodeDialog}>
+              取消
+            </Button>
+            <Button type="button" onClick={submitCreateNodeDialog}>
+              创建节点
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

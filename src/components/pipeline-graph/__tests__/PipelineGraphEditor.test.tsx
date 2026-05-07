@@ -153,6 +153,12 @@ function openNodeContextMenu(nodeKey: string, clientX = 240, clientY = 260) {
   });
 }
 
+async function openCreateNodeDialog(stageKey: string) {
+  openStageContextMenu(stageKey);
+  fireEvent.click(await screen.findByRole("menuitem", { name: "添加节点" }));
+  await screen.findByRole("button", { name: "创建节点" });
+}
+
 async function addNodeToSelectedStage(expectedCount: number) {
   fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
   await waitFor(() => {
@@ -328,11 +334,88 @@ describe("PipelineGraphEditor", () => {
 
     expect(await screen.findByRole("menuitem", { name: "添加节点" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "删除阶段" })).toBeInTheDocument();
-    expect(screen.getByTestId("pipeline-graph-stage-context-add-node")).toBeDisabled();
+    expect(screen.getByTestId("pipeline-graph-stage-context-add-node")).toBeEnabled();
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
       "已选中节点"
     );
     expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+  });
+
+  it("opens the create-node dialog from the stage context menu", async () => {
+    render(<EditorHarness />);
+
+    await openCreateNodeDialog("stage-1");
+
+    expect(screen.getByRole("heading", { name: "创建节点" })).toBeInTheDocument();
+    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "阶段上下文菜单" })).not.toBeInTheDocument();
+  });
+
+  it("requires a node type and required fields before creation", async () => {
+    render(<EditorHarness managedProjects={managedProjectsFixture} />);
+
+    await openCreateNodeDialog("stage-1");
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
+    expect(screen.getByText(/节点类型.*必填/)).toBeInTheDocument();
+    expect(parseDraft().nodes).toHaveLength(0);
+
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "switch_project" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
+    expect(screen.getByText(/项目.*必填/)).toBeInTheDocument();
+    expect(parseDraft().nodes).toHaveLength(0);
+  });
+
+  it("keeps the draft unchanged when the create-node dialog is invalid", async () => {
+    render(<EditorHarness />);
+
+    const beforeDraft = parseDraft();
+
+    await openCreateNodeDialog("stage-1");
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "set_working_path" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
+    expect(screen.getByText(/目标路径.*必填/)).toBeInTheDocument();
+    expect(parseDraft()).toEqual(beforeDraft);
+  });
+
+  it("creates a valid node from the dialog, selects it, and opens node editing", async () => {
+    render(<EditorHarness managedProjects={managedProjectsFixture} />);
+
+    await openCreateNodeDialog("stage-1");
+    fireEvent.change(screen.getByLabelText("节点类型"), {
+      target: { value: "switch_project" },
+    });
+    fireEvent.change(screen.getByLabelText("项目"), {
+      target: { value: "101" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建节点" }));
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.nodes).toHaveLength(1);
+      expect(draft.nodes[0]).toEqual(
+        expect.objectContaining({
+          stageKey: "stage-1",
+          nodeType: "switch_project",
+          parameters: { managedProjectId: "101" },
+        })
+      );
+    });
+
+    const createdNode = parseDraft().nodes[0];
+    expect(createdNode).toBeDefined();
+    expect(screen.queryByRole("heading", { name: "创建节点" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+    expect(screen.getByTestId(`graph-node-${createdNode?.nodeKey}`)).toBeInTheDocument();
   });
 
   it("opens the node context menu on right click without changing the current selection", async () => {
