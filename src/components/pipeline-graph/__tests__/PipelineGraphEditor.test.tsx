@@ -28,6 +28,7 @@ let lastReactFlowProps:
       selectionOnDrag?: boolean;
       nodes: MockReactFlowNode[];
       onNodeDragStop?: (event: unknown, node: MockReactFlowNode) => void;
+      onPaneClick?: () => void;
     }
   | null = null;
 
@@ -52,6 +53,7 @@ vi.mock("@xyflow/react", async () => {
       nodeTypes,
       onNodeClick,
       onNodeDragStop,
+      onPaneClick,
       onSelectionChange,
       onInit,
       panOnDrag,
@@ -64,6 +66,7 @@ vi.mock("@xyflow/react", async () => {
       nodeTypes?: Record<string, React.ComponentType<Record<string, unknown>>>;
       onNodeClick?: (event: unknown, node: Record<string, unknown>) => void;
       onNodeDragStop?: (event: unknown, node: MockReactFlowNode) => void;
+      onPaneClick?: () => void;
       onSelectionChange?: (params: {
         nodes: Array<Record<string, unknown>>;
         edges: Array<Record<string, unknown>>;
@@ -80,6 +83,7 @@ vi.mock("@xyflow/react", async () => {
         selectionOnDrag,
         nodes: nodes as MockReactFlowNode[],
         onNodeDragStop,
+        onPaneClick,
       };
       const [selectedNodeId, setSelectedNodeId] = ReactModule.useState<string | null>(null);
 
@@ -92,12 +96,23 @@ vi.mock("@xyflow/react", async () => {
           <div data-testid="mock-react-flow-edge-count">{edges.length}</div>
           <button
             type="button"
+            data-testid="mock-react-flow-multiselect"
             onClick={() => {
               setSelectedNodeId(null);
               onSelectionChange?.({ nodes, edges: [] });
             }}
           >
             模拟多选
+          </button>
+          <button
+            type="button"
+            data-testid="mock-react-flow-pane-click"
+            onClick={() => {
+              setSelectedNodeId(null);
+              onPaneClick?.();
+            }}
+          >
+            mock pane click
           </button>
           {children}
           {nodes.map((node) => {
@@ -153,6 +168,10 @@ function parseDraft() {
 
 function clickGraphObject(id: string) {
   fireEvent.click(within(screen.getByTestId(`graph-node-${id}`)).getByRole("button"));
+}
+
+function clickCanvasPane() {
+  fireEvent.click(screen.getByTestId("mock-react-flow-pane-click"));
 }
 
 function dragGraphNode(
@@ -364,26 +383,28 @@ describe("PipelineGraphEditor", () => {
   it("selects a stage on left click and opens stage editing state", async () => {
     render(<EditorHarness />);
 
-    await addNodeToSelectedStage(1);
+    const nextNode = await addNodeToSelectedStage(1);
+    clickGraphObject(nextNode.nodeKey);
     clickGraphObject("stage-1");
 
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
       "已选中阶段"
     );
-    expect(screen.getByLabelText("阶段名称")).toBeInTheDocument();
+    expect(document.getElementById("pipeline-stage-name-input")).not.toBeNull();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
   });
 
   it("selects a node on left click and opens node editing state", async () => {
     render(<EditorHarness />);
 
     const nextNode = await addNodeToSelectedStage(1);
-    clickGraphObject("stage-1");
     clickGraphObject(nextNode.nodeKey);
 
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
       "已选中节点"
     );
-    expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
+    expect(document.getElementById("pipeline-node-type-select")).not.toBeNull();
+    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
   });
 
   it("opens the stage context menu on right click without changing the current selection", async () => {
@@ -569,6 +590,8 @@ describe("PipelineGraphEditor", () => {
     expect(screen.getByText("当前活动阶段：阶段 1")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "在所选阶段添加节点" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "删除选中对象" })).toBeDisabled();
+    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
   });
   it("connects nodes and blocks duplicate connections", async () => {
     render(<EditorHarness />);
@@ -662,6 +685,8 @@ describe("PipelineGraphEditor", () => {
     expect(screen.getByText("当前活动阶段：阶段 2")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "在所选阶段添加节点" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "删除选中对象" })).toBeDisabled();
+    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
   });
 
   it("tracks whether the selected object is a stage or a node", async () => {
@@ -995,12 +1020,44 @@ describe("PipelineGraphEditor", () => {
   it("keeps add-node available after selection is cleared while stages remain", async () => {
     render(<EditorHarness />);
 
-    fireEvent.click(screen.getByRole("button", { name: "添加阶段" }));
-    fireEvent.click(screen.getByRole("button", { name: "模拟多选" }));
+    fireEvent.click(screen.getByTestId("pipeline-graph-add-stage-button"));
+    fireEvent.click(screen.getByTestId("mock-react-flow-multiselect"));
 
-    expect(screen.getByRole("button", { name: "在所选阶段添加节点" })).toBeEnabled();
+    expect(screen.getByTestId("pipeline-graph-add-node-button")).toBeEnabled();
 
     const nextNode = await addNodeToSelectedStage(1);
     expect(nextNode.stageKey).toBe("stage-2");
+  });
+
+  it("clears the inspector but preserves fallback stage context after deleting the selected stage", async () => {
+    render(<EditorHarness />);
+
+    fireEvent.click(screen.getByTestId("pipeline-graph-add-stage-button"));
+    clickGraphObject("stage-2");
+    fireEvent.click(screen.getByTestId("pipeline-graph-delete-button"));
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.stages).toHaveLength(1);
+      expect(draft.stages[0]?.stageKey).toBe("stage-1");
+    });
+
+    expect(screen.getByTestId("pipeline-graph-add-node-button")).toBeEnabled();
+    expect(screen.getByTestId("pipeline-graph-delete-button")).toBeDisabled();
+    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
+  });
+
+  it("resets the inspector to the empty state on blank-canvas click while keeping the active stage context", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    clickGraphObject(nextNode.nodeKey);
+    clickCanvasPane();
+
+    expect(screen.getByTestId("pipeline-graph-add-node-button")).toBeEnabled();
+    expect(screen.getByTestId("pipeline-graph-delete-button")).toBeDisabled();
+    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
   });
 });

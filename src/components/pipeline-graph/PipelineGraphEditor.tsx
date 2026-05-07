@@ -70,6 +70,11 @@ type CreateNodeDialogState = {
   errors: string[];
 } | null;
 
+type SelectedGraphObject =
+  | { kind: "stage"; id: string }
+  | { kind: "node"; id: string }
+  | null;
+
 const nodeTypes = {
   [STAGE_GROUP_NODE_TYPE]: StageGroupNode,
   [PIPELINE_ACTION_NODE_TYPE]: PipelineActionNode,
@@ -80,8 +85,16 @@ const actionButtonClassName =
 const contextMenuItemClassName =
   "w-full rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-slate-100";
 
-function getDefaultSelectedId(draft: PipelineDraft) {
-  return draft.nodes[0]?.nodeKey ?? draft.stages[0]?.stageKey ?? null;
+function getDefaultSelectedObject(draft: PipelineDraft): SelectedGraphObject {
+  if (draft.nodes[0]) {
+    return { kind: "node", id: draft.nodes[0].nodeKey };
+  }
+
+  if (draft.stages[0]) {
+    return { kind: "stage", id: draft.stages[0].stageKey };
+  }
+
+  return null;
 }
 
 function getDefaultActiveStageKey(draft: PipelineDraft) {
@@ -90,6 +103,12 @@ function getDefaultActiveStageKey(draft: PipelineDraft) {
 
 function getGraphNodeStageKey(node: PipelineGraphNode) {
   return isActionGraphNode(node) ? node.data.stageKey : node.data.stageKey;
+}
+
+function getSelectedGraphObject(node: PipelineGraphNode): Exclude<SelectedGraphObject, null> {
+  return isActionGraphNode(node)
+    ? { kind: "node", id: node.data.nodeKey }
+    : { kind: "stage", id: node.data.stageKey };
 }
 
 function getBuiltinCreateParameters(
@@ -138,8 +157,8 @@ export function PipelineGraphEditor({
   onChange,
 }: PipelineGraphEditorProps) {
   const reactFlowRef = React.useRef<{ fitView: () => void } | null>(null);
-  const [selectedId, setSelectedId] = React.useState<string | null>(
-    () => getDefaultSelectedId(draft)
+  const [selectedObject, setSelectedObject] = React.useState<SelectedGraphObject>(
+    () => getDefaultSelectedObject(draft)
   );
   const [activeStageKey, setActiveStageKey] = React.useState<string | null>(
     () => getDefaultActiveStageKey(draft)
@@ -200,10 +219,19 @@ export function PipelineGraphEditor({
   );
 
   React.useEffect(() => {
-    if (selectedId && !graphNodeMap.has(selectedId)) {
-      setSelectedId(null);
+    if (!selectedObject) {
+      return;
     }
-  }, [graphNodeMap, selectedId]);
+
+    const selectionStillExists =
+      selectedObject.kind === "node"
+        ? draft.nodes.some((node) => node.nodeKey === selectedObject.id)
+        : draft.stages.some((stage) => stage.stageKey === selectedObject.id);
+
+    if (!selectionStillExists) {
+      setSelectedObject(null);
+    }
+  }, [draft.nodes, draft.stages, selectedObject]);
 
   React.useEffect(() => {
     if (activeStageKey && draft.stages.some((stage) => stage.stageKey === activeStageKey)) {
@@ -225,24 +253,22 @@ export function PipelineGraphEditor({
     }
   }, [createNodeDialogState, draft.stages]);
 
-  const selectedGraphNode = selectedId ? graphNodeMap.get(selectedId) ?? null : null;
+  const selectedGraphNode = selectedObject ? graphNodeMap.get(selectedObject.id) ?? null : null;
   const selectedActionNode =
-    selectedGraphNode && isActionGraphNode(selectedGraphNode)
-      ? draft.nodes.find((node) => node.nodeKey === selectedGraphNode.data.nodeKey) ?? null
+    selectedObject?.kind === "node"
+      ? draft.nodes.find((node) => node.nodeKey === selectedObject.id) ?? null
       : null;
   const selectedStage =
-    selectedGraphNode && isStageGraphNode(selectedGraphNode)
-      ? draft.stages.find((stage) => stage.stageKey === selectedGraphNode.data.stageKey) ?? null
-      : selectedActionNode
-        ? draft.stages.find((stage) => stage.stageKey === selectedActionNode.stageKey) ?? null
-        : null;
+    selectedObject?.kind === "stage"
+      ? draft.stages.find((stage) => stage.stageKey === selectedObject.id) ?? null
+      : null;
   const activeStage =
     draft.stages.find((stage) => stage.stageKey === activeStageKey) ?? null;
 
   const selection = selectedActionNode
-    ? { kind: "node" as const, node: selectedActionNode }
-    : selectedStage && selectedGraphNode && isStageGraphNode(selectedGraphNode)
-      ? { kind: "stage" as const, stage: selectedStage }
+    ? { kind: "node" as const, nodeKey: selectedActionNode.nodeKey }
+    : selectedStage
+      ? { kind: "stage" as const, stageKey: selectedStage.stageKey }
       : null;
 
   const connectionCandidates = draft.nodes.filter(
@@ -319,7 +345,7 @@ export function PipelineGraphEditor({
     });
     closeContextMenu();
     updateStages([...draft.stages, stage]);
-    setSelectedId(stage.stageKey);
+    setSelectedObject({ kind: "stage", id: stage.stageKey });
     setActiveStageKey(stage.stageKey);
   }
 
@@ -370,12 +396,14 @@ export function PipelineGraphEditor({
       );
     if (nextSelected) {
       closeContextMenu();
-      setSelectedId(nextSelected.selected ? nextSelected.id : null);
       if (nextSelected.selected) {
         const nextGraphNode = nextGraphNodes.find((node) => node.id === nextSelected.id);
         if (nextGraphNode) {
+          setSelectedObject(getSelectedGraphObject(nextGraphNode));
           setActiveStageKey(getGraphNodeStageKey(nextGraphNode));
         }
+      } else {
+        setSelectedObject(null);
       }
     }
 
@@ -397,13 +425,13 @@ export function PipelineGraphEditor({
   function handleSelectionChange(params: { nodes: PipelineGraphNode[] }) {
     closeContextMenu();
     if (params.nodes.length !== 1) {
-      setSelectedId(null);
+      setSelectedObject(null);
       return;
     }
 
     const node = params.nodes[0] ?? null;
-    setSelectedId(node?.id ?? null);
     if (node) {
+      setSelectedObject(getSelectedGraphObject(node));
       setActiveStageKey(getGraphNodeStageKey(node));
     }
   }
@@ -508,7 +536,7 @@ export function PipelineGraphEditor({
         ? targetNode.data.stageKey
         : getDefaultActiveStageKey(nextDraft);
 
-      setSelectedId(null);
+      setSelectedObject(null);
       setActiveStageKey(
         nextDraft.stages.some((stage) => stage.stageKey === fallbackStageKey)
           ? fallbackStageKey
@@ -602,7 +630,7 @@ export function PipelineGraphEditor({
 
     closeCreateNodeDialog();
     updateNodes([...draft.nodes, nextNode]);
-    setSelectedId(nextNode.nodeKey);
+    setSelectedObject({ kind: "node", id: nextNode.nodeKey });
     setActiveStageKey(createNodeDialogState.stageKey);
   }
 
@@ -726,12 +754,12 @@ export function PipelineGraphEditor({
             }}
             onNodeClick={(_, node) => {
               closeContextMenu();
-              setSelectedId(node.id);
+              setSelectedObject(getSelectedGraphObject(node));
               setActiveStageKey(getGraphNodeStageKey(node));
             }}
             onPaneClick={() => {
               closeContextMenu();
-              setSelectedId(null);
+              setSelectedObject(null);
             }}
             onNodesChange={handleNodesChange}
             onNodeDragStop={(_, node) => handleNodeDragStop(node)}
@@ -796,6 +824,7 @@ export function PipelineGraphEditor({
         <PipelineGraphSelectionPanel
           selection={selection}
           stages={draft.stages}
+          nodes={draft.nodes}
           managedProjects={managedProjects}
           onStageChange={updateStage}
           onNodeChange={updateNode}
