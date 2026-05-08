@@ -28,6 +28,10 @@ let lastReactFlowProps:
       selectionOnDrag?: boolean;
       nodes: MockReactFlowNode[];
       onNodeDragStop?: (event: unknown, node: MockReactFlowNode) => void;
+      onNodeContextMenu?: (
+        event: { preventDefault: () => void; clientX: number; clientY: number },
+        node: MockReactFlowNode
+      ) => void;
       onPaneClick?: () => void;
     }
   | null = null;
@@ -52,6 +56,7 @@ vi.mock("@xyflow/react", async () => {
       edges,
       nodeTypes,
       onNodeClick,
+      onNodeContextMenu,
       onNodeDragStop,
       onPaneClick,
       onSelectionChange,
@@ -65,6 +70,10 @@ vi.mock("@xyflow/react", async () => {
       edges: Array<Record<string, unknown>>;
       nodeTypes?: Record<string, React.ComponentType<Record<string, unknown>>>;
       onNodeClick?: (event: unknown, node: Record<string, unknown>) => void;
+      onNodeContextMenu?: (
+        event: { preventDefault: () => void; clientX: number; clientY: number },
+        node: MockReactFlowNode
+      ) => void;
       onNodeDragStop?: (event: unknown, node: MockReactFlowNode) => void;
       onPaneClick?: () => void;
       onSelectionChange?: (params: {
@@ -83,6 +92,7 @@ vi.mock("@xyflow/react", async () => {
         selectionOnDrag,
         nodes: nodes as MockReactFlowNode[],
         onNodeDragStop,
+        onNodeContextMenu,
         onPaneClick,
       };
       const [selectedNodeId, setSelectedNodeId] = ReactModule.useState<string | null>(null);
@@ -208,6 +218,22 @@ function openNodeContextMenu(nodeKey: string, clientX = 240, clientY = 260) {
   fireEvent.contextMenu(screen.getByTestId(`pipeline-action-node-card-${nodeKey}`), {
     clientX,
     clientY,
+  });
+}
+
+function openContextMenuViaReactFlow(id: string, clientX = 180, clientY = 220) {
+  const node = lastReactFlowProps?.nodes.find((item) => String(item.id) === id);
+  expect(node).toBeDefined();
+
+  act(() => {
+    lastReactFlowProps?.onNodeContextMenu?.(
+      {
+        preventDefault: () => undefined,
+        clientX,
+        clientY,
+      },
+      node as MockReactFlowNode
+    );
   });
 }
 
@@ -654,6 +680,29 @@ describe("PipelineGraphEditor", () => {
     expect(lastReactFlowProps?.zoomOnScroll).toBe(true);
   });
 
+  it("configures explicit drag handles for stage and action nodes", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    expect(screen.getByTestId("pipeline-stage-drag-handle-stage-1")).toBeInTheDocument();
+    expect(
+      screen.getByTestId(`pipeline-action-drag-handle-${nextNode.nodeKey}`)
+    ).toBeInTheDocument();
+
+    const stageNode = lastReactFlowProps?.nodes.find((node) => node.id === "stage-1");
+    const actionNode = lastReactFlowProps?.nodes.find((node) => node.id === nextNode.nodeKey);
+    expect(stageNode?.dragHandle).toBe(".pipeline-stage-drag-handle");
+    expect(actionNode?.dragHandle).toBe(".pipeline-action-drag-handle");
+  });
+
+  it("opens the stage context menu from the React Flow node contextmenu callback", async () => {
+    render(<EditorHarness />);
+
+    openContextMenuViaReactFlow("stage-1");
+
+    expect(await screen.findByTestId("pipeline-graph-stage-context-add-node")).toBeInTheDocument();
+  });
+
   it("exposes a fit-view action", () => {
     render(<EditorHarness />);
 
@@ -705,6 +754,35 @@ describe("PipelineGraphEditor", () => {
 
     clickGraphObject("stage-1");
     expect(summary).toHaveTextContent("已选中阶段");
+  });
+
+  it("selects the stage from the stage card body itself", () => {
+    render(<EditorHarness />);
+
+    clickCanvasPane();
+    expect(document.getElementById("pipeline-stage-name-input")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("pipeline-stage-node-card-stage-1"));
+
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中阶段"
+    );
+    expect(document.getElementById("pipeline-stage-name-input")).not.toBeNull();
+  });
+
+  it("selects the node from the node card body itself", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    clickCanvasPane();
+    expect(document.getElementById("pipeline-node-type-select")).toBeNull();
+
+    fireEvent.click(screen.getByTestId(`pipeline-action-node-card-${nextNode.nodeKey}`));
+
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(document.getElementById("pipeline-node-type-select")).not.toBeNull();
   });
 
   it("switches the inspector between stage and node attributes", async () => {

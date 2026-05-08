@@ -14,6 +14,8 @@ import {
 
 export const STAGE_GROUP_NODE_TYPE = "stage-group";
 export const PIPELINE_ACTION_NODE_TYPE = "pipeline-action";
+export const STAGE_DRAG_HANDLE_CLASSNAME = "pipeline-stage-drag-handle";
+export const ACTION_DRAG_HANDLE_CLASSNAME = "pipeline-action-drag-handle";
 
 const STAGE_GROUP_MIN_WIDTH = 320;
 const STAGE_GROUP_MIN_HEIGHT = 360;
@@ -380,6 +382,7 @@ function buildStageNode(
     id: stage.stageKey,
     type: STAGE_GROUP_NODE_TYPE,
     draggable: true,
+    dragHandle: `.${STAGE_DRAG_HANDLE_CLASSNAME}`,
     position,
     style: {
       width: layout?.width ?? STAGE_GROUP_MIN_WIDTH,
@@ -398,6 +401,8 @@ function buildActionNode(node: NodeDraft, layout?: StageGridLayout): PipelineGra
   return {
     id: node.nodeKey,
     type: PIPELINE_ACTION_NODE_TYPE,
+    draggable: true,
+    dragHandle: `.${ACTION_DRAG_HANDLE_CLASSNAME}`,
     parentId: node.stageKey,
     extent: "parent",
     position: {

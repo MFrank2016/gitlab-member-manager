@@ -4,16 +4,21 @@ import type { NodeProps } from "@xyflow/react";
 
 import { cn } from "@/lib/utils";
 
-import type { StageGraphNodeData } from "./graph-model";
+import {
+  STAGE_DRAG_HANDLE_CLASSNAME,
+  type StageGraphNodeData,
+} from "./graph-model";
 
 type StageGroupNodeData = StageGraphNodeData & {
   onContextMenu?: (payload: { stageKey: string; x: number; y: number }) => void;
+  onSelect?: (payload: { stageKey: string }) => void;
 };
 
 export function StageGroupNode({
-  data,
+  data: rawData,
   selected,
-}: NodeProps<StageGroupNodeData>) {
+}: NodeProps) {
+  const data = rawData as StageGroupNodeData;
   const handleContextMenu: MouseEventHandler<HTMLDivElement> = (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -23,10 +28,15 @@ export function StageGroupNode({
       y: event.clientY,
     });
   };
+  const handleClick: MouseEventHandler<HTMLDivElement> = (event) => {
+    event.stopPropagation();
+    data.onSelect?.({ stageKey: data.stageKey });
+  };
 
   return (
     <div
       data-testid={`pipeline-stage-node-card-${data.stageKey}`}
+      onClick={handleClick}
       onContextMenu={handleContextMenu}
       className={cn(
         "flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border bg-white/95 p-3 text-slate-900 shadow-sm transition-colors",
@@ -36,6 +46,17 @@ export function StageGroupNode({
         !data.enabled && "bg-slate-100/90 text-slate-600"
       )}
     >
+      <div
+        data-testid={`pipeline-stage-drag-handle-${data.stageKey}`}
+        className={cn(
+          STAGE_DRAG_HANDLE_CLASSNAME,
+          "-mx-3 -mt-3 mb-3 flex items-center justify-between rounded-t-3xl border-b border-slate-200/80 bg-slate-100/90 px-3 py-2 text-[11px] font-medium text-slate-500 cursor-grab active:cursor-grabbing"
+        )}
+      >
+        <span>拖动阶段</span>
+        <span className="font-mono tracking-[0.3em] text-slate-400">:::</span>
+      </div>
+
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 space-y-1.5">
           <div className="flex flex-wrap items-center gap-2">

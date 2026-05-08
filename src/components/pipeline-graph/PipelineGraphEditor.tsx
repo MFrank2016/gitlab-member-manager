@@ -206,6 +206,39 @@ export function PipelineGraphEditor({
     React.useState<CreateNodeDialogState>(null);
 
   const graphState = React.useMemo(() => buildGraphEditorState(draft), [draft]);
+  const handleSelectGraphNode = React.useCallback((node: PipelineGraphNode) => {
+    setContextMenuState(null);
+    setSelectedObject(getSelectedGraphObject(node));
+    setActiveStageKey(getGraphNodeStageKey(node));
+  }, []);
+  const openStageContextMenu = React.useCallback(
+    (stageKey: string, x: number, y: number) => {
+      setContextMenuState({ kind: "stage", stageKey, x, y });
+    },
+    []
+  );
+  const openNodeContextMenu = React.useCallback(
+    (nodeKey: string, x: number, y: number) => {
+      setContextMenuState({ kind: "node", nodeKey, x, y });
+    },
+    []
+  );
+  const handleNodeContextMenu = React.useCallback(
+    (
+      event: { preventDefault: () => void; clientX: number; clientY: number },
+      node: PipelineGraphNode
+    ) => {
+      event.preventDefault();
+      if (isStageGraphNode(node)) {
+        openStageContextMenu(node.data.stageKey, event.clientX, event.clientY);
+        return;
+      }
+      if (isActionGraphNode(node)) {
+        openNodeContextMenu(node.data.nodeKey, event.clientX, event.clientY);
+      }
+    },
+    [openNodeContextMenu, openStageContextMenu]
+  );
   const graphNodes = React.useMemo(
     () =>
       graphState.nodes.map((node) => {
@@ -214,6 +247,15 @@ export function PipelineGraphEditor({
             ...node,
             data: {
               ...node.data,
+              onSelect: ({ stageKey }: { stageKey: string }) => {
+                const targetNode = graphState.nodes.find(
+                  (graphNode) =>
+                    isStageGraphNode(graphNode) && graphNode.data.stageKey === stageKey
+                );
+                if (targetNode) {
+                  handleSelectGraphNode(targetNode);
+                }
+              },
               onContextMenu: ({
                 stageKey,
                 x,
@@ -223,9 +265,9 @@ export function PipelineGraphEditor({
                 x: number;
                 y: number;
               }) => {
-                setContextMenuState({ kind: "stage", stageKey, x, y });
+                openStageContextMenu(stageKey, x, y);
               },
-            } as PipelineGraphNode["data"],
+            } as unknown as PipelineGraphNode["data"],
           };
         }
 
@@ -233,6 +275,15 @@ export function PipelineGraphEditor({
           ...node,
           data: {
             ...node.data,
+            onSelect: ({ nodeKey }: { nodeKey: string }) => {
+              const targetNode = graphState.nodes.find(
+                (graphNode) =>
+                  isActionGraphNode(graphNode) && graphNode.data.nodeKey === nodeKey
+              );
+              if (targetNode) {
+                handleSelectGraphNode(targetNode);
+              }
+            },
             onContextMenu: ({
               nodeKey,
               x,
@@ -242,12 +293,12 @@ export function PipelineGraphEditor({
               x: number;
               y: number;
             }) => {
-              setContextMenuState({ kind: "node", nodeKey, x, y });
+              openNodeContextMenu(nodeKey, x, y);
             },
-          } as PipelineGraphNode["data"],
+          } as unknown as PipelineGraphNode["data"],
         };
       }),
-    [graphState.nodes]
+    [graphState.nodes, handleSelectGraphNode, openNodeContextMenu, openStageContextMenu]
   );
   const graphNodeMap = React.useMemo(
     () => new Map(graphState.nodes.map((node) => [node.id, node])),
@@ -450,15 +501,17 @@ export function PipelineGraphEditor({
     updateNodes(nextNodes);
   }
 
-  function handleNodesChange(changes: NodeChange<PipelineGraphNode["data"]>[]) {
-    const nextGraphNodes = applyNodeChanges(changes, graphState.nodes);
+  function handleNodesChange(changes: NodeChange[]) {
+    const nextGraphNodes = applyNodeChanges(
+      changes as NodeChange<PipelineGraphNode>[],
+      graphState.nodes
+    ) as PipelineGraphNode[];
 
     const nextSelected = [...changes]
       .reverse()
-      .find(
-        (change): change is NodeChange & { id: string; selected: boolean } =>
-          change.type === "select" && "selected" in change
-      );
+      .find((change) => change.type === "select" && "selected" in change) as
+      | { id: string; selected: boolean }
+      | undefined;
     if (nextSelected) {
       closeContextMenu();
       if (nextSelected.selected) {
@@ -501,7 +554,7 @@ export function PipelineGraphEditor({
     }
   }
 
-  function commitConnection(connection: Connection) {
+  function commitConnection(connection: Pick<Connection, "source" | "target">) {
     const result = validateGraphConnection(graphState, connection);
     if (!result.valid) {
       setGraphMessage(result.message ?? "连线无效");
@@ -807,14 +860,15 @@ export function PipelineGraphEditor({
           <ReactFlow
             nodes={graphNodes}
             edges={graphState.edges}
-            nodeTypes={nodeTypes}
+            nodeTypes={nodeTypes as any}
             onInit={(instance) => {
               reactFlowRef.current = instance;
             }}
             onNodeClick={(_, node) => {
-              closeContextMenu();
-              setSelectedObject(getSelectedGraphObject(node));
-              setActiveStageKey(getGraphNodeStageKey(node));
+              handleSelectGraphNode(node);
+            }}
+            onNodeContextMenu={(event, node) => {
+              handleNodeContextMenu(event, node);
             }}
             onPaneClick={() => {
               closeContextMenu();

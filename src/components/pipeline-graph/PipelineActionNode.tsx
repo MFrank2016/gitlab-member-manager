@@ -4,10 +4,14 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 import { cn } from "@/lib/utils";
 
-import type { PipelineActionNodeData } from "./graph-model";
+import {
+  ACTION_DRAG_HANDLE_CLASSNAME,
+  type PipelineActionNodeData,
+} from "./graph-model";
 
 type PipelineActionNodeViewData = PipelineActionNodeData & {
   onContextMenu?: (payload: { nodeKey: string; x: number; y: number }) => void;
+  onSelect?: (payload: { nodeKey: string }) => void;
 };
 
 function getStringParameter(
@@ -61,9 +65,10 @@ function formatNodeType(nodeType: string) {
 }
 
 export function PipelineActionNode({
-  data,
+  data: rawData,
   selected,
-}: NodeProps<PipelineActionNodeViewData>) {
+}: NodeProps) {
+  const data = rawData as PipelineActionNodeViewData;
   const summary = buildActionSummary(data);
   const handleContextMenu: MouseEventHandler<HTMLDivElement> = (event) => {
     event.preventDefault();
@@ -74,10 +79,15 @@ export function PipelineActionNode({
       y: event.clientY,
     });
   };
+  const handleClick: MouseEventHandler<HTMLDivElement> = (event) => {
+    event.stopPropagation();
+    data.onSelect?.({ nodeKey: data.nodeKey });
+  };
 
   return (
     <div
       data-testid={`pipeline-action-node-card-${data.nodeKey}`}
+      onClick={handleClick}
       onContextMenu={handleContextMenu}
       className={cn(
         "w-[188px] max-w-[188px] overflow-hidden rounded-xl border bg-white/95 p-3 shadow-sm transition-colors",
@@ -90,6 +100,17 @@ export function PipelineActionNode({
       <Handle type="target" position={Position.Left} />
 
       <div className="space-y-2.5">
+        <div
+          data-testid={`pipeline-action-drag-handle-${data.nodeKey}`}
+          className={cn(
+            ACTION_DRAG_HANDLE_CLASSNAME,
+            "-mx-3 -mt-3 mb-3 flex items-center justify-between border-b border-slate-200/80 bg-slate-100/90 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.2em] text-slate-500 cursor-grab active:cursor-grabbing"
+          )}
+        >
+          <span>拖动</span>
+          <span className="font-mono tracking-[0.3em] text-slate-400">:::</span>
+        </div>
+
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="rounded-full bg-slate-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-white">
             动作
