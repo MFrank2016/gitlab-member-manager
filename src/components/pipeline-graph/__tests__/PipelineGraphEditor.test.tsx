@@ -32,6 +32,10 @@ let lastReactFlowProps:
         event: { preventDefault: () => void; clientX: number; clientY: number },
         node: MockReactFlowNode
       ) => void;
+      onSelectionChange?: (params: {
+        nodes: Array<Record<string, unknown>>;
+        edges: Array<Record<string, unknown>>;
+      }) => void;
       onPaneClick?: () => void;
     }
   | null = null;
@@ -93,6 +97,7 @@ vi.mock("@xyflow/react", async () => {
         nodes: nodes as MockReactFlowNode[],
         onNodeDragStop,
         onNodeContextMenu,
+        onSelectionChange,
         onPaneClick,
       };
       const [selectedNodeId, setSelectedNodeId] = ReactModule.useState<string | null>(null);
@@ -136,10 +141,19 @@ vi.mock("@xyflow/react", async () => {
                   : String(node.id);
 
             return (
-              <div key={String(node.id)} data-testid={`graph-node-${String(node.id)}`}>
+              <div
+                key={String(node.id)}
+                data-testid={`graph-node-${String(node.id)}`}
+                onClick={() => {
+                  setSelectedNodeId(String(node.id));
+                  onNodeClick?.({}, node);
+                  onSelectionChange?.({ nodes: [node], edges: [] });
+                }}
+              >
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={(event) => {
+                    event.stopPropagation();
                     setSelectedNodeId(String(node.id));
                     onNodeClick?.({}, node);
                     onSelectionChange?.({ nodes: [node], edges: [] });
@@ -182,6 +196,12 @@ function clickGraphObject(id: string) {
 
 function clickCanvasPane() {
   fireEvent.click(screen.getByTestId("mock-react-flow-pane-click"));
+}
+
+function reportEmptySelectionChange() {
+  act(() => {
+    lastReactFlowProps?.onSelectionChange?.({ nodes: [], edges: [] });
+  });
 }
 
 function dragGraphNode(
@@ -239,7 +259,7 @@ function openContextMenuViaReactFlow(id: string, clientX = 180, clientY = 220) {
 
 async function openCreateNodeDialog(stageKey: string) {
   openStageContextMenu(stageKey);
-  fireEvent.click(await screen.findByRole("menuitem", { name: "添加节点" }));
+  fireEvent.click(await screen.findByTestId("pipeline-graph-stage-context-add-node"));
   await screen.findByRole("button", { name: "创建节点" });
 }
 
@@ -440,8 +460,8 @@ describe("PipelineGraphEditor", () => {
 
     openStageContextMenu("stage-1");
 
-    expect(await screen.findByRole("menuitem", { name: "添加节点" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "删除阶段" })).toBeInTheDocument();
+    expect(await screen.findByTestId("pipeline-graph-stage-context-add-node")).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-graph-stage-context-delete")).toBeInTheDocument();
     expect(screen.getByTestId("pipeline-graph-stage-context-add-node")).toBeEnabled();
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
       "已选中节点"
@@ -566,7 +586,7 @@ describe("PipelineGraphEditor", () => {
 
     openNodeContextMenu(nextNode.nodeKey);
 
-    expect(await screen.findByRole("menuitem", { name: "删除节点" })).toBeInTheDocument();
+    expect(await screen.findByTestId("pipeline-graph-node-context-delete")).toBeInTheDocument();
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
       "已选中阶段"
     );
@@ -778,6 +798,19 @@ describe("PipelineGraphEditor", () => {
     expect(document.getElementById("pipeline-node-type-select")).toBeNull();
 
     fireEvent.click(screen.getByTestId(`pipeline-action-node-card-${nextNode.nodeKey}`));
+
+    expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
+      "已选中节点"
+    );
+    expect(document.getElementById("pipeline-node-type-select")).not.toBeNull();
+  });
+
+  it("keeps the current selection when React Flow reports an empty transient selection", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    fireEvent.click(screen.getByTestId(`pipeline-action-node-card-${nextNode.nodeKey}`));
+    reportEmptySelectionChange();
 
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
       "已选中节点"

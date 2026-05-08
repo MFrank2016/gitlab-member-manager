@@ -11,7 +11,6 @@ import {
 
 type PipelineActionNodeViewData = PipelineActionNodeData & {
   onContextMenu?: (payload: { nodeKey: string; x: number; y: number }) => void;
-  onSelect?: (payload: { nodeKey: string }) => void;
 };
 
 function getStringParameter(
@@ -79,15 +78,10 @@ export function PipelineActionNode({
       y: event.clientY,
     });
   };
-  const handleClick: MouseEventHandler<HTMLDivElement> = (event) => {
-    event.stopPropagation();
-    data.onSelect?.({ nodeKey: data.nodeKey });
-  };
 
   return (
     <div
       data-testid={`pipeline-action-node-card-${data.nodeKey}`}
-      onClick={handleClick}
       onContextMenu={handleContextMenu}
       className={cn(
         "w-[188px] max-w-[188px] overflow-hidden rounded-xl border bg-white/95 p-3 shadow-sm transition-colors",

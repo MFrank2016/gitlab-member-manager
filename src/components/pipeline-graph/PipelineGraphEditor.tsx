@@ -1,4 +1,5 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 import {
   Background,
   Controls,
@@ -247,15 +248,6 @@ export function PipelineGraphEditor({
             ...node,
             data: {
               ...node.data,
-              onSelect: ({ stageKey }: { stageKey: string }) => {
-                const targetNode = graphState.nodes.find(
-                  (graphNode) =>
-                    isStageGraphNode(graphNode) && graphNode.data.stageKey === stageKey
-                );
-                if (targetNode) {
-                  handleSelectGraphNode(targetNode);
-                }
-              },
               onContextMenu: ({
                 stageKey,
                 x,
@@ -275,15 +267,6 @@ export function PipelineGraphEditor({
           ...node,
           data: {
             ...node.data,
-            onSelect: ({ nodeKey }: { nodeKey: string }) => {
-              const targetNode = graphState.nodes.find(
-                (graphNode) =>
-                  isActionGraphNode(graphNode) && graphNode.data.nodeKey === nodeKey
-              );
-              if (targetNode) {
-                handleSelectGraphNode(targetNode);
-              }
-            },
             onContextMenu: ({
               nodeKey,
               x,
@@ -298,7 +281,7 @@ export function PipelineGraphEditor({
           } as unknown as PipelineGraphNode["data"],
         };
       }),
-    [graphState.nodes, handleSelectGraphNode, openNodeContextMenu, openStageContextMenu]
+    [graphState.nodes, openNodeContextMenu, openStageContextMenu]
   );
   const graphNodeMap = React.useMemo(
     () => new Map(graphState.nodes.map((node) => [node.id, node])),
@@ -393,6 +376,54 @@ export function PipelineGraphEditor({
         createNodeDialogState.parameters
       )
     : {};
+  const contextMenuOverlay =
+    contextMenuState && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            role="menu"
+            aria-label={contextMenuState.kind === "stage" ? "闃舵涓婁笅鏂囪彍鍗?" : "鑺傜偣涓婁笅鏂囪彍鍗?"}
+            className="fixed z-50 min-w-[144px] rounded-lg border border-slate-200 bg-white p-1.5 shadow-lg"
+            style={{
+              left: contextMenuState.x,
+              top: contextMenuState.y,
+            }}
+          >
+            {contextMenuState.kind === "stage" ? (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  data-testid="pipeline-graph-stage-context-add-node"
+                  className={contextMenuItemClassName}
+                  onClick={() => openCreateNodeDialog(contextMenuState.stageKey)}
+                >
+                  娣诲姞鑺傜偣
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  data-testid="pipeline-graph-stage-context-delete"
+                  className={contextMenuItemClassName}
+                  onClick={handleContextMenuDelete}
+                >
+                  鍒犻櫎闃舵
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                role="menuitem"
+                data-testid="pipeline-graph-node-context-delete"
+                className={contextMenuItemClassName}
+                onClick={handleContextMenuDelete}
+              >
+                鍒犻櫎鑺傜偣
+              </button>
+            )}
+          </div>,
+          document.body
+        )
+      : null;
 
   function applyDraft(nextDraft: PipelineDraft) {
     setGraphMessage(null);
@@ -541,6 +572,10 @@ export function PipelineGraphEditor({
   }
 
   function handleSelectionChange(params: { nodes: PipelineGraphNode[] }) {
+    if (params.nodes.length === 0) {
+      return;
+    }
+
     if (params.nodes.length !== 1) {
       setSelectedObject(null);
       return;
@@ -891,7 +926,8 @@ export function PipelineGraphEditor({
             <Controls />
           </ReactFlow>
 
-          {contextMenuState ? (
+          {contextMenuOverlay}
+          {/*
             <div
               role="menu"
               aria-label={contextMenuState.kind === "stage" ? "阶段上下文菜单" : "节点上下文菜单"}
@@ -933,8 +969,9 @@ export function PipelineGraphEditor({
                   删除节点
                 </button>
               )}
-            </div>
-          ) : null}
+	            </div>,
+	            document.body
+		          */}
         </div>
 
         <PipelineGraphSelectionPanel

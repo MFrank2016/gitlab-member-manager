@@ -11,7 +11,6 @@ import {
 
 type StageGroupNodeData = StageGraphNodeData & {
   onContextMenu?: (payload: { stageKey: string; x: number; y: number }) => void;
-  onSelect?: (payload: { stageKey: string }) => void;
 };
 
 export function StageGroupNode({
@@ -28,15 +27,10 @@ export function StageGroupNode({
       y: event.clientY,
     });
   };
-  const handleClick: MouseEventHandler<HTMLDivElement> = (event) => {
-    event.stopPropagation();
-    data.onSelect?.({ stageKey: data.stageKey });
-  };
 
   return (
     <div
       data-testid={`pipeline-stage-node-card-${data.stageKey}`}
-      onClick={handleClick}
       onContextMenu={handleContextMenu}
       className={cn(
         "flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border bg-white/95 p-3 text-slate-900 shadow-sm transition-colors",
