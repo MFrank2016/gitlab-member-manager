@@ -23,7 +23,7 @@ type MockReactFlowNode = Record<string, unknown> & {
 
 let lastReactFlowProps:
   | {
-      panOnDrag?: boolean;
+      panOnDrag?: boolean | number[];
       zoomOnScroll?: boolean;
       selectionOnDrag?: boolean;
       nodes: MockReactFlowNode[];
@@ -81,7 +81,7 @@ vi.mock("@xyflow/react", async () => {
         edges: Array<Record<string, unknown>>;
       }) => void;
       onInit?: (instance: { fitView: () => void }) => void;
-      panOnDrag?: boolean;
+      panOnDrag?: boolean | number[];
       zoomOnScroll?: boolean;
       selectionOnDrag?: boolean;
       children?: React.ReactNode;
@@ -673,10 +673,10 @@ describe("PipelineGraphEditor", () => {
     expect(lastReactFlowProps?.selectionOnDrag).toBe(false);
   });
 
-  it("passes pan and zoom toggles through to React Flow", () => {
+  it("passes the updated pan and zoom toggles through to React Flow", () => {
     render(<EditorHarness />);
 
-    expect(lastReactFlowProps?.panOnDrag).toBe(true);
+    expect(lastReactFlowProps?.panOnDrag).toEqual([1]);
     expect(lastReactFlowProps?.zoomOnScroll).toBe(true);
   });
 

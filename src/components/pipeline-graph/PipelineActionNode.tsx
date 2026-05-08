@@ -107,8 +107,8 @@ export function PipelineActionNode({
             "-mx-3 -mt-3 mb-3 flex items-center justify-between border-b border-slate-200/80 bg-slate-100/90 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.2em] text-slate-500 cursor-grab active:cursor-grabbing"
           )}
         >
-          <span>拖动</span>
-          <span className="font-mono tracking-[0.3em] text-slate-400">:::</span>
+          <span className="pointer-events-none">拖动</span>
+          <span className="pointer-events-none font-mono tracking-[0.3em] text-slate-400">:::</span>
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">

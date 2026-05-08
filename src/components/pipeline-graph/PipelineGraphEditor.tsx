@@ -541,7 +541,6 @@ export function PipelineGraphEditor({
   }
 
   function handleSelectionChange(params: { nodes: PipelineGraphNode[] }) {
-    closeContextMenu();
     if (params.nodes.length !== 1) {
       setSelectedObject(null);
       return;
@@ -874,11 +873,15 @@ export function PipelineGraphEditor({
               closeContextMenu();
               setSelectedObject(null);
             }}
+            onPaneContextMenu={(event) => {
+              event.preventDefault();
+              closeContextMenu();
+            }}
             onNodesChange={handleNodesChange}
             onNodeDragStop={(_, node) => handleNodeDragStop(node)}
             onSelectionChange={handleSelectionChange}
             onConnect={commitConnection}
-            panOnDrag
+            panOnDrag={[1]}
             zoomOnScroll
             selectionOnDrag={false}
             fitView
