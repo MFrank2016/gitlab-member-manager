@@ -11,6 +11,7 @@ import {
   type PipelineDraft,
   type StageDraft,
 } from "@/components/pipeline-editor/draft-model";
+import { resolveDropIntent } from "@/components/pipeline-graph/connection-layout";
 
 export const STAGE_GROUP_NODE_TYPE = "stage-group";
 export const PIPELINE_ACTION_NODE_TYPE = "pipeline-action";
@@ -216,10 +217,26 @@ export function reorderStageNodesForDropPosition(
   draggedNodeKey: string,
   targetPosition: { x: number; y: number }
 ) {
+  const dropIntent = resolveDropIntent({
+    point: targetPosition,
+    stageRegions: [
+      {
+        stageKey: "__current_stage__",
+        x: 0,
+        y: 0,
+        width: Number.MAX_SAFE_INTEGER,
+        height: Number.MAX_SAFE_INTEGER,
+      },
+    ],
+    contentStart: { x: STAGE_NODE_START_X, y: STAGE_NODE_START_Y },
+    columnGap: STAGE_NODE_GAP_X,
+    rowGap: STAGE_NODE_GAP_Y,
+  });
+
   return reorderStageNodesForDrop(
     nodes,
     draggedNodeKey,
-    getStageGridSlotFromPosition(targetPosition)
+    { col: dropIntent.column, row: dropIntent.row }
   );
 }
 
