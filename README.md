@@ -197,7 +197,7 @@ sequenceDiagram
 
 ### 前置依赖
 
-- Node.js 18+（推荐 20+）
+- Node.js 20.19+、22.13+ 或更高版本（推荐 22.18+）
 - pnpm
 - Rust toolchain（stable）
 - 各平台 Tauri 依赖（Windows 需要 WebView2）

@@ -1181,9 +1181,13 @@ describe("pipeline definition upgrade smoke", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByTitle("工作流定义"));
-    expect(await screen.findByRole("heading", { name: "流水线定义" })).toBeInTheDocument();
+    const pipelineRow = await screen.findByText("switch-project-pipeline");
 
-    fireEvent.click(screen.getByRole("button", { name: "立即运行" }));
+    fireEvent.click(
+      within(pipelineRow.closest("tr") as HTMLElement).getByRole("button", {
+        name: "立即运行",
+      })
+    );
     const variableInput = await screen.findByLabelText("运行参数 Source Branch");
     fireEvent.change(variableInput, {
       target: { value: "release/1.3" },
