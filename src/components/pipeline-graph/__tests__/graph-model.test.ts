@@ -230,6 +230,58 @@ describe("pipeline graph model", () => {
     expect(layout.nodePositions[nodes[2]!.nodeKey]).toEqual({ x: 96, y: 188 });
   });
 
+  it("renders same-stage direct successors as a centered vertical branch layout", () => {
+    const draft = {
+      ...createEmptyPipelineDraft(),
+      stages: [
+        createStageDraft({
+          id: "stage-1",
+          stageKey: "stage-1",
+          name: "阶段 1",
+          enabled: true,
+        }),
+      ],
+      nodes: [
+        createNodeDraft({
+          id: "node-a",
+          nodeKey: "node-a",
+          stageKey: "stage-1",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 72 },
+        }),
+        createNodeDraft({
+          id: "node-b",
+          nodeKey: "node-b",
+          stageKey: "stage-1",
+          nodeType: "trigger_pipeline",
+          position: { x: 308, y: 72 },
+        }),
+        createNodeDraft({
+          id: "node-c",
+          nodeKey: "node-c",
+          stageKey: "stage-1",
+          nodeType: "wait_pipeline",
+          position: { x: 308, y: 188 },
+        }),
+      ],
+      edges: [
+        { id: "node-a->node-b", sourceNodeKey: "node-a", targetNodeKey: "node-b" },
+        { id: "node-a->node-c", sourceNodeKey: "node-a", targetNodeKey: "node-c" },
+      ],
+    };
+
+    const graphState = buildGraphEditorState(draft);
+    const stageNode = graphState.nodes.find((node) => node.id === "stage-1");
+    const nodeA = graphState.nodes.find((node) => node.id === "node-a");
+    const nodeB = graphState.nodes.find((node) => node.id === "node-b");
+    const nodeC = graphState.nodes.find((node) => node.id === "node-c");
+
+    expect(stageNode?.style).toMatchObject({ width: 532, height: 392 });
+    expect(nodeA?.position).toEqual({ x: 66, y: 138 });
+    expect(nodeB?.position).toEqual({ x: 278, y: 64 });
+    expect(nodeC?.position).toEqual({ x: 278, y: 212 });
+  });
+
   it("returns the first unoccupied grid slot for legacy vertical stage coordinates", () => {
     const nodes = [
       createNodeDraft({

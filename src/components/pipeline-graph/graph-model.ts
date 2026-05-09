@@ -11,7 +11,11 @@ import {
   type PipelineDraft,
   type StageDraft,
 } from "@/components/pipeline-editor/draft-model";
-import { resolveDropIntent } from "@/components/pipeline-graph/connection-layout";
+import {
+  buildConnectionDrivenStageLayout,
+  centerStageContent,
+  resolveDropIntent,
+} from "@/components/pipeline-graph/connection-layout";
 
 export const STAGE_GROUP_NODE_TYPE = "stage-group";
 export const PIPELINE_ACTION_NODE_TYPE = "pipeline-action";
@@ -241,7 +245,7 @@ export function reorderStageNodesForDropPosition(
   );
 }
 
-function buildStageLayouts(nodes: NodeDraft[]) {
+function buildStageLayouts(nodes: NodeDraft[], edges: PipelineDraft["edges"]) {
   const groupedNodes = new Map<string, NodeDraft[]>();
   for (const node of nodes) {
     const current = groupedNodes.get(node.stageKey) ?? [];
@@ -252,9 +256,59 @@ function buildStageLayouts(nodes: NodeDraft[]) {
   return new Map(
     Array.from(groupedNodes.entries()).map(([stageKey, stageNodes]) => [
       stageKey,
-      buildStageGridLayout(stageNodes),
+      buildStageLayout(stageNodes, edges),
     ])
   );
+}
+
+function buildStageLayout(
+  stageNodes: NodeDraft[],
+  edges: PipelineDraft["edges"]
+): StageGridLayout {
+  const stageNodeKeySet = new Set(stageNodes.map((node) => node.nodeKey));
+  const stageEdges = edges.filter(
+    (edge) =>
+      stageNodeKeySet.has(edge.sourceNodeKey) && stageNodeKeySet.has(edge.targetNodeKey)
+  );
+
+  if (stageEdges.length === 0) {
+    return buildStageGridLayout(stageNodes);
+  }
+
+  const layout = buildConnectionDrivenStageLayout({
+    nodes: stageNodes.map((node) => ({ nodeKey: node.nodeKey })),
+    edges: stageEdges.map((edge) => ({
+      sourceNodeKey: edge.sourceNodeKey,
+      targetNodeKey: edge.targetNodeKey,
+    })),
+  });
+  const width = Math.max(
+    STAGE_GROUP_MIN_WIDTH,
+    Math.round(layout.contentBounds.width + STAGE_NODE_START_X + STAGE_NODE_RIGHT_PADDING)
+  );
+  const height = Math.max(
+    STAGE_GROUP_MIN_HEIGHT,
+    Math.round(layout.contentBounds.height + STAGE_NODE_START_Y + STAGE_NODE_BOTTOM_PADDING)
+  );
+  const { offsetX, offsetY } = centerStageContent({
+    stageWidth: width,
+    stageHeight: height,
+    contentBounds: layout.contentBounds,
+  });
+
+  return {
+    nodePositions: Object.fromEntries(
+      Object.entries(layout.nodeBoxes).map(([nodeKey, box]) => [
+        nodeKey,
+        {
+          x: Math.round(box.x + offsetX),
+          y: Math.round(box.y + offsetY),
+        },
+      ])
+    ),
+    width,
+    height,
+  };
 }
 
 function buildStagePositions(stageKeys: string[], stageLayouts: Map<string, StageGridLayout>) {
@@ -442,7 +496,7 @@ function buildActionNode(node: NodeDraft, layout?: StageGridLayout): PipelineGra
 }
 
 export function buildGraphEditorState(draft: PipelineDraft): PipelineGraphState {
-  const stageLayouts = buildStageLayouts(draft.nodes);
+  const stageLayouts = buildStageLayouts(draft.nodes, draft.edges);
   const stageNodeCounts = new Map<string, number>();
   for (const node of draft.nodes) {
     stageNodeCounts.set(node.stageKey, (stageNodeCounts.get(node.stageKey) ?? 0) + 1);
