@@ -284,6 +284,16 @@ async function openCreateNodeDialogFromToolbar() {
   await screen.findByRole("button", { name: "创建节点" });
 }
 
+async function openCreateNodeDialogFromStageStartAnchor(stageKey: string) {
+  fireEvent.click(screen.getByTestId(`pipeline-stage-start-anchor-trigger-${stageKey}`));
+  await screen.findByRole("button", { name: "创建节点" });
+}
+
+async function openCreateNodeDialogFromNodeOutput(nodeKey: string) {
+  fireEvent.click(screen.getByTestId(`pipeline-node-output-anchor-${nodeKey}`));
+  await screen.findByRole("button", { name: "创建节点" });
+}
+
 async function addNodeToSelectedStage(expectedCount: number) {
   await openCreateNodeDialogFromToolbar();
   fireEvent.change(screen.getByLabelText("节点类型"), {
@@ -495,6 +505,70 @@ describe("PipelineGraphEditor", () => {
     expect(screen.getByRole("heading", { name: "创建节点" })).toBeInTheDocument();
     expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
     expect(screen.queryByRole("menu", { name: "阶段上下文菜单" })).not.toBeInTheDocument();
+  });
+
+  it("opens the create-node dialog from an empty-stage start anchor", async () => {
+    render(<EditorHarness />);
+
+    await openCreateNodeDialogFromStageStartAnchor("stage-1");
+
+    expect(screen.getByRole("heading", { name: "创建节点" })).toBeInTheDocument();
+    expect(screen.getByText("在阶段“阶段 1”中创建一个新节点。")).toBeInTheDocument();
+    expect(parseDraft().nodes).toHaveLength(0);
+    expect(parseDraft().edges).toHaveLength(0);
+  });
+
+  it("opens successor creation from a node output anchor without mutating the draft", async () => {
+    render(<EditorHarness />);
+
+    const sourceNode = await addNodeToSelectedStage(1);
+    const beforeDraft = parseDraft();
+
+    await openCreateNodeDialogFromNodeOutput(sourceNode.nodeKey);
+
+    expect(screen.getByRole("heading", { name: "创建节点" })).toBeInTheDocument();
+    expect(parseDraft()).toEqual(beforeDraft);
+  });
+
+  it("creates a successor edge from the node output anchor and keeps cancel side-effect free", async () => {
+    render(<EditorHarness managedProjects={managedProjectsFixture} />);
+
+    const sourceNode = await addNodeToSelectedStage(1);
+
+    await openCreateNodeDialogFromNodeOutput(sourceNode.nodeKey);
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "创建节点" })).not.toBeInTheDocument();
+    });
+
+    expect(parseDraft().nodes).toHaveLength(1);
+    expect(parseDraft().edges).toHaveLength(0);
+
+    await openCreateNodeDialogFromNodeOutput(sourceNode.nodeKey);
+    const createDialog = screen.getByRole("dialog");
+    fireEvent.change(within(createDialog).getByLabelText("节点类型"), {
+      target: { value: "switch_project" },
+    });
+    fireEvent.change(within(createDialog).getByLabelText("项目"), {
+      target: { value: "101" },
+    });
+    fireEvent.click(within(createDialog).getByRole("button", { name: "创建节点" }));
+
+    await waitFor(() => {
+      const draft = parseDraft();
+      expect(draft.nodes).toHaveLength(2);
+      expect(draft.edges).toHaveLength(1);
+    });
+
+    const draft = parseDraft();
+    const createdNode = draft.nodes.find((node) => node.nodeKey !== sourceNode.nodeKey);
+    expect(createdNode).toBeDefined();
+    expect(draft.edges).toEqual([
+      expect.objectContaining({
+        sourceNodeKey: sourceNode.nodeKey,
+        targetNodeKey: createdNode?.nodeKey,
+      }),
+    ]);
   });
 
   it("allows optional builtin fields to stay empty during creation", async () => {

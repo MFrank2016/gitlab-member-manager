@@ -70,6 +70,7 @@ type CreateNodeDialogState = {
   nodeType: string;
   parameters: Record<string, unknown>;
   errors: string[];
+  sourceNodeKey: string | null;
 } | null;
 
 type SelectedGraphObject =
@@ -259,6 +260,9 @@ export function PipelineGraphEditor({
               }) => {
                 openStageContextMenu(stageKey, x, y);
               },
+              onStartCreate: ({ stageKey }: { stageKey: string }) => {
+                openCreateNodeDialog(stageKey, null);
+              },
             } as unknown as PipelineGraphNode["data"],
           };
         }
@@ -277,6 +281,15 @@ export function PipelineGraphEditor({
               y: number;
             }) => {
               openNodeContextMenu(nodeKey, x, y);
+            },
+            onCreateSuccessor: ({
+              nodeKey,
+              stageKey,
+            }: {
+              nodeKey: string;
+              stageKey: string;
+            }) => {
+              openCreateNodeDialog(stageKey, nodeKey);
             },
           } as unknown as PipelineGraphNode["data"],
         };
@@ -395,7 +408,7 @@ export function PipelineGraphEditor({
                   role="menuitem"
                   data-testid="pipeline-graph-stage-context-add-node"
                   className={contextMenuItemClassName}
-                  onClick={() => openCreateNodeDialog(contextMenuState.stageKey)}
+                  onClick={() => openCreateNodeDialog(contextMenuState.stageKey, null)}
                 >
                   娣诲姞鑺傜偣
                 </button>
@@ -478,16 +491,17 @@ export function PipelineGraphEditor({
       return;
     }
 
-    openCreateNodeDialog(stageKey);
+    openCreateNodeDialog(stageKey, null);
   }
 
-  function openCreateNodeDialog(stageKey: string) {
+  function openCreateNodeDialog(stageKey: string, sourceNodeKey: string | null) {
     closeContextMenu();
     setCreateNodeDialogState({
       stageKey,
       nodeType: "",
       parameters: {},
       errors: [],
+      sourceNodeKey,
     });
   }
 
@@ -775,7 +789,19 @@ export function PipelineGraphEditor({
     });
 
     closeCreateNodeDialog();
-    updateNodes([...draft.nodes, nextNode]);
+    const nextNodes = [...draft.nodes, nextNode];
+    const nextEdges = createNodeDialogState.sourceNodeKey
+      ? [
+          ...draft.edges,
+          createEdgeDraft(createNodeDialogState.sourceNodeKey, nextNode.nodeKey),
+        ]
+      : draft.edges;
+    applyDraft({
+      ...draft,
+      nodes: nextNodes,
+      edges: nextEdges,
+      variableRows: ensureVariableRows(nextNodes, draft.variableRows),
+    });
     setSelectedObject({ kind: "node", id: nextNode.nodeKey });
     setActiveStageKey(createNodeDialogState.stageKey);
   }
@@ -946,7 +972,7 @@ export function PipelineGraphEditor({
                     role="menuitem"
                     data-testid="pipeline-graph-stage-context-add-node"
                     className={contextMenuItemClassName}
-                    onClick={() => openCreateNodeDialog(contextMenuState.stageKey)}
+                    onClick={() => openCreateNodeDialog(contextMenuState.stageKey, null)}
                   >
                     添加节点
                   </button>

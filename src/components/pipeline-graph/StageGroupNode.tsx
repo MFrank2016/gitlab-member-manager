@@ -11,6 +11,7 @@ import {
 
 type StageGroupNodeData = StageGraphNodeData & {
   onContextMenu?: (payload: { stageKey: string; x: number; y: number }) => void;
+  onStartCreate?: (payload: { stageKey: string }) => void;
 };
 
 export function StageGroupNode({
@@ -92,7 +93,16 @@ export function StageGroupNode({
               </span>
             </span>
             <span className="flex h-6 w-6 items-center justify-center rounded-full border border-sky-200 bg-sky-100 text-sky-700">
-              +
+              <div
+                data-testid={`pipeline-stage-start-anchor-trigger-${data.stageKey}`}
+                className="flex h-6 w-6 items-center justify-center rounded-full"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  data.onStartCreate?.({ stageKey: data.stageKey });
+                }}
+              >
+                +
+              </div>
             </span>
           </div>
         ) : (

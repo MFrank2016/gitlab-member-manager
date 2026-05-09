@@ -8,6 +8,7 @@ import { ACTION_DRAG_HANDLE_CLASSNAME, type PipelineActionNodeData } from "./gra
 
 type PipelineActionNodeViewData = PipelineActionNodeData & {
   onContextMenu?: (payload: { nodeKey: string; x: number; y: number }) => void;
+  onCreateSuccessor?: (payload: { nodeKey: string; stageKey: string }) => void;
 };
 
 function formatNodeType(nodeType: string) {
@@ -79,7 +80,15 @@ export function PipelineActionNode({
 
       <div
         data-testid={`pipeline-node-output-anchor-${data.nodeKey}`}
-        className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2"
+        className="absolute right-0 top-1/2 flex h-6 w-6 -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-full bg-transparent"
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          data.onCreateSuccessor?.({
+            nodeKey: data.nodeKey,
+            stageKey: data.stageKey,
+          });
+        }}
       >
         <Handle
           type="source"
