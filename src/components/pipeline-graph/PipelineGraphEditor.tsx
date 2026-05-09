@@ -202,11 +202,11 @@ export function PipelineGraphEditor({
   const [activeStageKey, setActiveStageKey] = React.useState<string | null>(
     () => getDefaultActiveStageKey(draft)
   );
-  const [connectionTarget, setConnectionTarget] = React.useState("");
   const [graphMessage, setGraphMessage] = React.useState<string | null>(null);
   const [contextMenuState, setContextMenuState] = React.useState<ContextMenuState>(null);
   const [createNodeDialogState, setCreateNodeDialogState] =
     React.useState<CreateNodeDialogState>(null);
+  const [dragPreviewStageKey, setDragPreviewStageKey] = React.useState<string | null>(null);
 
   const graphState = React.useMemo(() => buildGraphEditorState(draft), [draft]);
   const handleSelectGraphNode = React.useCallback((node: PipelineGraphNode) => {
@@ -264,6 +264,7 @@ export function PipelineGraphEditor({
               onStartCreate: ({ stageKey }: { stageKey: string }) => {
                 openCreateNodeDialog(stageKey, null);
               },
+              isDropPreviewTarget: dragPreviewStageKey === node.data.stageKey,
             } as unknown as PipelineGraphNode["data"],
           };
         }
@@ -295,7 +296,7 @@ export function PipelineGraphEditor({
           } as unknown as PipelineGraphNode["data"],
         };
       }),
-    [graphState.nodes, openNodeContextMenu, openStageContextMenu]
+    [dragPreviewStageKey, graphState.nodes, openNodeContextMenu, openStageContextMenu]
   );
   const graphNodeMap = React.useMemo(
     () => new Map(graphState.nodes.map((node) => [node.id, node])),
@@ -355,9 +356,6 @@ export function PipelineGraphEditor({
       ? { kind: "stage" as const, stageKey: selectedStage.stageKey }
       : null;
 
-  const connectionCandidates = draft.nodes.filter(
-    (node) => node.nodeKey !== selectedActionNode?.nodeKey
-  );
   const selectedSummary = selectedActionNode
     ? `已选中节点：${BUILTIN_NODE_MAP.get(selectedActionNode.nodeType)?.label ?? selectedActionNode.nodeType}`
     : selectedStage
@@ -407,9 +405,9 @@ export function PipelineGraphEditor({
                 <button
                   type="button"
                   role="menuitem"
-                  data-testid="pipeline-graph-stage-context-add-node"
-                  className={contextMenuItemClassName}
-                  onClick={() => openCreateNodeDialog(contextMenuState.stageKey, null)}
+                  data-testid="pipeline-graph-stage-context-add-node-hidden"
+                  className="hidden"
+                  onClick={() => undefined}
                 >
                   娣诲姞鑺傜偣
                 </button>
@@ -452,6 +450,22 @@ export function PipelineGraphEditor({
     setCreateNodeDialogState(null);
   }
 
+  function resolvePreviewStageKey(node: PipelineGraphNode) {
+    if (!isActionGraphNode(node)) {
+      return null;
+    }
+
+    if (draft.stages.some((stage) => stage.stageKey === node.data.stageKey)) {
+      return node.data.stageKey;
+    }
+
+    if (node.parentId && draft.stages.some((stage) => stage.stageKey === node.parentId)) {
+      return node.parentId;
+    }
+
+    return null;
+  }
+
   function updateNodes(nextNodes: NodeDraft[]) {
     applyDraft({
       ...draft,
@@ -479,20 +493,6 @@ export function PipelineGraphEditor({
     updateStages([...draft.stages, stage]);
     setSelectedObject({ kind: "stage", id: stage.stageKey });
     setActiveStageKey(stage.stageKey);
-  }
-
-  function resolveActiveStageKey() {
-    return activeStageKey ?? "";
-  }
-
-  function startCreateNodeFromActiveStage() {
-    const stageKey = resolveActiveStageKey();
-    if (!stageKey) {
-      setGraphMessage("请先创建一个阶段");
-      return;
-    }
-
-    openCreateNodeDialog(stageKey, null);
   }
 
   function openCreateNodeDialog(stageKey: string, sourceNodeKey: string | null) {
@@ -617,27 +617,19 @@ export function PipelineGraphEditor({
       ...draft,
       edges: [...draft.edges, createEdgeDraft(connection.source, connection.target)],
     });
-    setConnectionTarget("");
-  }
-
-  function createConnectionFromPanel() {
-    if (!selectedActionNode) {
-      setGraphMessage("请先选择一个源节点");
-      return;
-    }
-
-    commitConnection({
-      source: selectedActionNode.nodeKey,
-      target: connectionTarget,
-    });
   }
 
   function fitCanvasToViewport() {
     reactFlowRef.current?.fitView();
   }
 
+  function handleNodeDrag(node: PipelineGraphNode) {
+    setDragPreviewStageKey(resolvePreviewStageKey(node));
+  }
+
   function handleNodeDragStop(node: PipelineGraphNode) {
     closeContextMenu();
+    setDragPreviewStageKey(null);
 
     if (isStageGraphNode(node)) {
       const currentStageNode = graphNodeMap.get(node.id);
@@ -738,13 +730,8 @@ export function PipelineGraphEditor({
 
       setSelectedObject(fallbackSelection);
       setActiveStageKey(getActiveStageKeyFromSelection(nextDraft, fallbackSelection));
-      setConnectionTarget("");
       applyDraft(nextDraft);
       return;
-    }
-
-    if (connectionTarget && !nextDraft.nodes.some((node) => node.nodeKey === connectionTarget)) {
-      setConnectionTarget("");
     }
 
     applyDraft(nextDraft);
@@ -873,44 +860,12 @@ export function PipelineGraphEditor({
           >
             添加阶段
           </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            data-testid="pipeline-graph-add-node-button"
-            className={actionButtonClassName}
-            onClick={startCreateNodeFromActiveStage}
-            disabled={!resolveActiveStageKey()}
+          <div
+            data-testid="pipeline-graph-anchor-guidance"
+            className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800"
           >
-            在所选阶段添加节点
-          </Button>
-          <div className="grid gap-1">
-            <Label htmlFor="pipeline-graph-connect-target">连接到节点</Label>
-            <select
-              id="pipeline-graph-connect-target"
-              className="min-h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm leading-5"
-              value={connectionTarget}
-              onChange={(event) => setConnectionTarget(event.target.value)}
-              disabled={!selectedActionNode}
-              aria-label="连接到节点"
-            >
-              <option value="">请选择目标节点</option>
-              {connectionCandidates.map((node) => (
-                <option key={node.nodeKey} value={node.nodeKey}>
-                  {BUILTIN_NODE_MAP.get(node.nodeType)?.label ?? node.nodeType}（{node.nodeKey}）
-                </option>
-              ))}
-            </select>
+            通过阶段起始锚点创建首个节点，通过节点右侧输出锚点继续扩展流程。
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            data-testid="pipeline-graph-create-connection-button"
-            className={actionButtonClassName}
-            onClick={createConnectionFromPanel}
-            disabled={!selectedActionNode || !connectionTarget}
-          >
-            创建连线
-          </Button>
           <Button
             type="button"
             variant="outline"
@@ -949,11 +904,17 @@ export function PipelineGraphEditor({
           </div>
         </aside>
 
-        <div
-          className="relative min-w-0 h-[560px] rounded-2xl border border-border bg-slate-100/70"
-          data-testid="pipeline-graph-editor"
-        >
-          <ReactFlow
+	        <div
+	          className="relative min-w-0 h-[560px] rounded-2xl border border-border bg-slate-100/70"
+	          data-testid="pipeline-graph-editor"
+	        >
+	          {createNodeDialogState?.sourceNodeKey ? (
+	            <div
+	              data-testid="pipeline-graph-preview-edge"
+	              className="pointer-events-none absolute left-[132px] top-1/2 z-10 h-px w-[calc(100%-180px)] -translate-y-1/2 border-t-2 border-dashed border-sky-300 opacity-80"
+	            />
+	          ) : null}
+	          <ReactFlow
             nodes={graphNodes}
             edges={graphState.edges}
             nodeTypes={nodeTypes as any}
@@ -968,13 +929,16 @@ export function PipelineGraphEditor({
             }}
             onPaneClick={() => {
               closeContextMenu();
+              setDragPreviewStageKey(null);
               setSelectedObject(null);
             }}
             onPaneContextMenu={(event) => {
               event.preventDefault();
               closeContextMenu();
+              setDragPreviewStageKey(null);
             }}
             onNodesChange={handleNodesChange}
+            onNodeDrag={(_, node) => handleNodeDrag(node)}
             onNodeDragStop={(_, node) => handleNodeDragStop(node)}
             onSelectionChange={handleSelectionChange}
             onConnect={commitConnection}
@@ -991,51 +955,6 @@ export function PipelineGraphEditor({
           </ReactFlow>
 
           {contextMenuOverlay}
-          {/*
-            <div
-              role="menu"
-              aria-label={contextMenuState.kind === "stage" ? "阶段上下文菜单" : "节点上下文菜单"}
-              className="fixed z-50 min-w-[144px] rounded-lg border border-slate-200 bg-white p-1.5 shadow-lg"
-              style={{
-                left: contextMenuState.x,
-                top: contextMenuState.y,
-              }}
-            >
-              {contextMenuState.kind === "stage" ? (
-                <>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    data-testid="pipeline-graph-stage-context-add-node"
-                    className={contextMenuItemClassName}
-                    onClick={() => openCreateNodeDialog(contextMenuState.stageKey, null)}
-                  >
-                    添加节点
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    data-testid="pipeline-graph-stage-context-delete"
-                    className={contextMenuItemClassName}
-                    onClick={handleContextMenuDelete}
-                  >
-                    删除阶段
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  role="menuitem"
-                  data-testid="pipeline-graph-node-context-delete"
-                  className={contextMenuItemClassName}
-                  onClick={handleContextMenuDelete}
-                >
-                  删除节点
-                </button>
-              )}
-	            </div>,
-	            document.body
-		          */}
         </div>
 
         <PipelineGraphSelectionPanel

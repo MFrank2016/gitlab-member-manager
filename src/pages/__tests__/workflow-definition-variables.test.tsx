@@ -179,7 +179,15 @@ async function addNodeToSelectedStage(expectedCount: number) {
 */
 
 async function clickAddNode(expectedCount: number) {
-  fireEvent.click(screen.getByTestId("pipeline-graph-add-node-button"));
+  if (expectedCount === 1) {
+    const startAnchorTriggers = await screen.findAllByTestId(
+      /pipeline-stage-start-anchor-trigger-/
+    );
+    fireEvent.click(startAnchorTriggers[0]!);
+  } else {
+    const nodeOutputAnchors = await screen.findAllByTestId(/pipeline-node-output-anchor-/);
+    fireEvent.click(nodeOutputAnchors[nodeOutputAnchors.length - 1]!);
+  }
   const createNodeTypeSelect = document.getElementById("pipeline-create-node-type-select");
   if (!(createNodeTypeSelect instanceof HTMLSelectElement)) {
     throw new Error("pipeline-create-node-type-select not found");
@@ -313,14 +321,14 @@ describe("pipeline definition editor", () => {
   expect(screen.getByText("调度")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "添加阶段" })).toBeInTheDocument();
 
-  await clickAddNode(1);
-  await clickAddNode(2);
-  const actionNodes = screen.getAllByTestId(/graph-node-checkout_branch_node-/);
-  const firstNode = actionNodes[0];
-  const secondNodeKey =
-    actionNodes[actionNodes.length - 1]
-      ?.getAttribute("data-testid")
-      ?.replace("graph-node-", "") ?? "";
+	  await clickAddNode(1);
+	  await clickAddNode(2);
+	  const actionNodes = screen.getAllByTestId(/graph-node-checkout_branch_node-/);
+	  const firstNode = actionNodes[0];
+	  const secondNodeKey =
+	    actionNodes[actionNodes.length - 1]
+	      ?.getAttribute("data-testid")
+	      ?.replace("graph-node-", "") ?? "";
   fireEvent.click(
     within(actionNodes[actionNodes.length - 1]!).getByRole("button")
   );
@@ -331,16 +339,9 @@ describe("pipeline definition editor", () => {
     target: { value: "${target_branch}" },
   });
 
-  fireEvent.click(
-    within(firstNode!).getByRole("button")
-  );
-  fireEvent.change(screen.getByLabelText("连接到节点"), {
-    target: { value: secondNodeKey },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "创建连线" }));
-  await waitFor(() => {
-    expect(screen.getByTestId("mock-react-flow-edge-count")).toHaveTextContent("1");
-  });
+	  await waitFor(() => {
+	    expect(screen.getByTestId("mock-react-flow-edge-count")).toHaveTextContent("1");
+	  });
 
   activateEditorTab("调度");
   fireEvent.click(screen.getByRole("button", { name: "添加调度" }));

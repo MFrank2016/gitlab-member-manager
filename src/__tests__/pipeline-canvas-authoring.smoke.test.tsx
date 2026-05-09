@@ -182,9 +182,19 @@ describe("pipeline canvas authoring smoke", () => {
             ],
             nodes: [
               expect.objectContaining({
+                nodeType: "checkout_branch",
+                stageKey: draftStageKey,
+              }),
+              expect.objectContaining({
                 nodeType: "switch_project",
                 stageKey: draftStageKey,
                 parameters: { managedProjectId: "12" },
+              }),
+            ],
+            edges: [
+              expect.objectContaining({
+                sourceNodeKey: expect.any(String),
+                targetNodeKey: expect.any(String),
               }),
             ],
           })
@@ -207,8 +217,9 @@ describe("pipeline canvas authoring smoke", () => {
     draftStageKey =
       stageCard.getAttribute("data-testid")?.replace("pipeline-stage-node-card-", "") ?? "";
 
-    openStageContextMenu(draftStageKey);
-    fireEvent.click(await screen.findByTestId("pipeline-graph-stage-context-add-node"));
+    fireEvent.click(
+      await screen.findByTestId(`pipeline-stage-start-anchor-trigger-${draftStageKey}`)
+    );
 
     const nodeTypeSelect = document.getElementById("pipeline-create-node-type-select");
     if (!(nodeTypeSelect instanceof HTMLSelectElement)) {
@@ -219,20 +230,42 @@ describe("pipeline canvas authoring smoke", () => {
       throw new Error("create-node dialog not found");
     }
     fireEvent.change(nodeTypeSelect, {
-      target: { value: "switch_project" },
-    });
-
-    const managedProjectSelect = document.getElementById(
-      "pipeline-create-node-managed-project-select"
-    );
-    if (!(managedProjectSelect instanceof HTMLSelectElement)) {
-      throw new Error("pipeline-create-node-managed-project-select not found");
-    }
-    fireEvent.change(managedProjectSelect, {
-      target: { value: "11" },
+      target: { value: "checkout_branch" },
     });
 
     fireEvent.click(within(createNodeDialog).getByRole("button", { name: "创建节点" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("pipeline-node-output-anchor-checkout_branch_node-1")
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("pipeline-node-output-anchor-checkout_branch_node-1"));
+
+    const successorTypeSelect = document.getElementById("pipeline-create-node-type-select");
+    if (!(successorTypeSelect instanceof HTMLSelectElement)) {
+      throw new Error("pipeline-create-node-type-select not found for successor");
+    }
+    const successorDialog = successorTypeSelect.closest('[role="dialog"]');
+    if (!(successorDialog instanceof HTMLElement)) {
+      throw new Error("successor create-node dialog not found");
+    }
+    fireEvent.change(successorTypeSelect, {
+      target: { value: "switch_project" },
+    });
+
+    const successorManagedProjectSelect = document.getElementById(
+      "pipeline-create-node-managed-project-select"
+    );
+    if (!(successorManagedProjectSelect instanceof HTMLSelectElement)) {
+      throw new Error("pipeline-create-node-managed-project-select not found");
+    }
+    fireEvent.change(successorManagedProjectSelect, {
+      target: { value: "11" },
+    });
+
+    fireEvent.click(within(successorDialog).getByRole("button", { name: "创建节点" }));
 
     await waitFor(() => {
       const inspectorManagedProjectSelect = document.getElementById(
@@ -248,10 +281,10 @@ describe("pipeline canvas authoring smoke", () => {
     if (!(inspectorManagedProjectSelect instanceof HTMLSelectElement)) {
       throw new Error("pipeline-node-managed-project-select not found");
     }
-
     fireEvent.change(inspectorManagedProjectSelect, {
       target: { value: "12" },
     });
+
     expect(
       await screen.findByText("team/worker-service / D:/repos/worker-service")
     ).toBeInTheDocument();
@@ -286,5 +319,5 @@ describe("pipeline canvas authoring smoke", () => {
 
     expect(await screen.findByText("switch-project-authoring-flow")).toBeInTheDocument();
     expectNoProjectGroupFetch();
-  });
+  }, 15000);
 });

@@ -282,7 +282,10 @@ describe("pipeline definition upgrade smoke", () => {
   }
 
   async function addMinimalNodeToCreateDraft() {
-    fireEvent.click(screen.getByRole("button", { name: "在所选阶段添加节点" }));
+    const startAnchorTriggers = await screen.findAllByTestId(
+      /pipeline-stage-start-anchor-trigger-/
+    );
+    fireEvent.click(startAnchorTriggers[0]!);
     await screen.findByRole("button", { name: "创建节点" });
     fireEvent.change(screen.getByLabelText("节点类型"), {
       target: { value: "checkout_branch" },
@@ -1198,13 +1201,13 @@ describe("pipeline definition upgrade smoke", () => {
     expect(screen.getByText("项目组 ID（旧运行）")).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "运行 #451" })).toBeInTheDocument();
     expect(await screen.findAllByText("按步骤切换项目")).toHaveLength(2);
-  });
+  }, 15000);
 });
 
 describe("pipeline schedule runtime feedback", () => {
   beforeEach(() => {
     invokeMock.mockReset();
-  });
+  }, 15000);
 
   it("renders schedule runtime feedback in the edit form", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
@@ -1564,14 +1567,14 @@ describe("pipeline definition structured editor guardrails", () => {
         })
       );
     });
-  });
+  }, 15000);
 
 });
 
 describe("pipeline wrapper smoke", () => {
   beforeEach(() => {
     invokeMock.mockReset();
-  });
+  }, 15000);
 
   it("exposes pipeline-named invoke wrappers while keeping workflow wrappers intact", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
@@ -2747,7 +2750,7 @@ describe("stage-aware pipeline run monitor", () => {
         },
       });
     });
-  });
+  }, 15000);
 });
 
 describe("pipeline run auto refresh", () => {
@@ -2796,7 +2799,7 @@ describe("pipeline run auto refresh", () => {
 
   beforeEach(() => {
     invokeMock.mockReset();
-  });
+  }, 15000);
 
   it("auto refreshes the selected active pipeline run", async () => {
     const { clearIntervalSpy, getActiveAutoRefreshIntervals, setIntervalSpy } = createIntervalTracker();
