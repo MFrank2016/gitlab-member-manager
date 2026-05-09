@@ -18,6 +18,7 @@ export function StageGroupNode({
   selected,
 }: NodeProps) {
   const data = rawData as StageGroupNodeData;
+  const showStartAnchor = data.nodeCount === 0;
   const handleContextMenu: MouseEventHandler<HTMLDivElement> = (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -78,17 +79,27 @@ export function StageGroupNode({
         </span>
       </div>
 
-      <div className="nodrag mt-3 flex flex-1 flex-col justify-between rounded-2xl border border-dashed border-slate-300/80 bg-slate-50/80 p-3 text-xs text-slate-600">
-        <p className="font-medium text-slate-700">在这里放置动作节点并组织依赖关系。</p>
-        <div className="flex flex-wrap items-center gap-2 text-[11px]">
-          <span
-            className={cn(
-              "h-2 w-2 rounded-full",
-              data.enabled ? "bg-emerald-500" : "bg-slate-400"
-            )}
-          />
-          <span>{data.enabled ? "当前阶段会参与执行" : "当前阶段已停用"}</span>
-        </div>
+      <div className="nodrag mt-3 flex flex-1 flex-col justify-center rounded-2xl border border-dashed border-slate-300/80 bg-slate-50/80 p-3 text-xs text-slate-600">
+        {showStartAnchor ? (
+          <div
+            data-testid={`pipeline-stage-start-anchor-${data.stageKey}`}
+            className="mx-auto flex w-full max-w-[220px] items-center justify-between rounded-2xl border border-slate-300 bg-white px-4 py-3 text-left shadow-sm transition-colors hover:border-sky-300 hover:bg-sky-50/60"
+          >
+            <span className="space-y-1">
+              <span className="block text-sm font-semibold text-slate-800">从这里开始</span>
+              <span className="block text-[11px] text-slate-500">
+                通过右侧连接点创建首个节点
+              </span>
+            </span>
+            <span className="flex h-6 w-6 items-center justify-center rounded-full border border-sky-200 bg-sky-100 text-sky-700">
+              +
+            </span>
+          </div>
+        ) : (
+          <p className="text-center font-medium text-slate-700">
+            从已有节点继续扩展流程，并让画布自动整理结构。
+          </p>
+        )}
       </div>
     </div>
   );

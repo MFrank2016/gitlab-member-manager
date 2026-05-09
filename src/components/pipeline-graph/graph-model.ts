@@ -38,6 +38,7 @@ export type StageGraphNodeData = {
   stageKey: string;
   name: string;
   enabled: boolean;
+  nodeCount: number;
 };
 
 export type PipelineActionNodeData = {
@@ -393,7 +394,8 @@ function detectCycle(nodeKeys: string[], edges: { source: string; target: string
 function buildStageNode(
   stage: StageDraft,
   position: { x: number; y: number },
-  layout?: StageGridLayout
+  layout?: StageGridLayout,
+  stageNodeCount = 0
 ): PipelineGraphNode {
   return {
     id: stage.stageKey,
@@ -410,6 +412,7 @@ function buildStageNode(
       stageKey: stage.stageKey,
       name: stage.name,
       enabled: stage.enabled,
+      nodeCount: stageNodeCount,
     },
   };
 }
@@ -440,16 +443,21 @@ function buildActionNode(node: NodeDraft, layout?: StageGridLayout): PipelineGra
 
 export function buildGraphEditorState(draft: PipelineDraft): PipelineGraphState {
   const stageLayouts = buildStageLayouts(draft.nodes);
+  const stageNodeCounts = new Map<string, number>();
+  for (const node of draft.nodes) {
+    stageNodeCounts.set(node.stageKey, (stageNodeCounts.get(node.stageKey) ?? 0) + 1);
+  }
   const stagePositions = buildStagePositions(
     draft.stages.map((stage) => stage.stageKey),
     stageLayouts
   );
   const stageNodes = draft.stages.map((stage) =>
     buildStageNode(
-      stage,
-      stagePositions.get(stage.stageKey) ?? { x: STAGE_GROUP_START_X, y: STAGE_GROUP_START_Y },
-      stageLayouts.get(stage.stageKey)
-    )
+        stage,
+        stagePositions.get(stage.stageKey) ?? { x: STAGE_GROUP_START_X, y: STAGE_GROUP_START_Y },
+        stageLayouts.get(stage.stageKey),
+        stageNodeCounts.get(stage.stageKey) ?? 0
+      )
   );
   const actionNodes = draft.nodes.map((node) => buildActionNode(node, stageLayouts.get(node.stageKey)));
 

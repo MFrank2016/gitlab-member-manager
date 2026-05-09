@@ -423,23 +423,25 @@ describe("PipelineGraphEditor", () => {
     expect(screen.getByLabelText("节点类型")).toBeInTheDocument();
   });
 
-  it("renders compact stage and action cards with a summary-only node view", async () => {
+  it("renders start anchors and fixed-size action cards with type-plus-name node content", async () => {
     render(<EditorHarness />);
 
     expect(screen.getByTestId("pipeline-stage-node-card-stage-1")).toHaveClass(
       "overflow-visible",
       "p-3"
     );
+    expect(screen.getByTestId("pipeline-stage-start-anchor-stage-1")).toBeInTheDocument();
 
     const nextNode = await addNodeToSelectedStage(1);
     const actionCard = screen.getByTestId(`pipeline-action-node-card-${nextNode.nodeKey}`);
 
-    expect(actionCard).toHaveClass("w-[188px]", "p-3");
-    expect(
-      screen.getByTestId(`pipeline-action-node-summary-${nextNode.nodeKey}`)
-    ).toHaveTextContent("检出分支：${source_branch}");
-    expect(within(actionCard).queryByText(nextNode.nodeKey)).not.toBeInTheDocument();
-    expect(within(actionCard).queryByText(nextNode.stageKey)).not.toBeInTheDocument();
+    expect(actionCard).toHaveClass("w-[188px]", "h-[116px]", "p-3");
+    expect(within(actionCard).getByText("checkout branch")).toBeInTheDocument();
+    expect(within(actionCard).getByText("切换分支")).toBeInTheDocument();
+    expect(screen.getByTestId(`pipeline-node-output-anchor-${nextNode.nodeKey}`)).toBeInTheDocument();
+    expect(within(actionCard).queryByText(/检出分支：/)).not.toBeInTheDocument();
+    expect(within(actionCard).queryByText("当前选中")).not.toBeInTheDocument();
+    expect(within(actionCard).queryByText("已启用")).not.toBeInTheDocument();
   });
 
   it("selects a stage on left click and opens stage editing state", async () => {
