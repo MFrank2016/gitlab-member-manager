@@ -1176,7 +1176,7 @@ describe("PipelineGraphEditor", () => {
     ).toBe(3);
   });
 
-  it("rejects cross-stage drops for action nodes", async () => {
+  it("reassigns a dragged node into the target stage", async () => {
     const initialDraft: PipelineDraft = {
       ...createEmptyPipelineDraft(),
       stages: [
@@ -1206,7 +1206,6 @@ describe("PipelineGraphEditor", () => {
 
     render(<EditorHarness initialDraft={initialDraft} />);
 
-    const beforeDraft = parseDraft();
     dragGraphNode(
       "node-a",
       { x: 96, y: 72 },
@@ -1219,7 +1218,90 @@ describe("PipelineGraphEditor", () => {
     );
 
     await waitFor(() => {
-      expect(parseDraft()).toEqual(beforeDraft);
+      const draft = parseDraft();
+      expect(draft.nodes[0]).toEqual(
+        expect.objectContaining({
+          nodeKey: "node-a",
+          stageKey: "stage-2",
+        })
+      );
+    });
+  });
+
+  it("reorders stages after a cross-stage move when dependencies require a different legal order", async () => {
+    const initialDraft: PipelineDraft = {
+      ...createEmptyPipelineDraft(),
+      stages: [
+        createStageDraft({
+          id: "stage-1",
+          stageKey: "stage-1",
+          name: "Stage 1",
+          enabled: true,
+        }),
+        createStageDraft({
+          id: "stage-2",
+          stageKey: "stage-2",
+          name: "Stage 2",
+          enabled: true,
+        }),
+        createStageDraft({
+          id: "stage-3",
+          stageKey: "stage-3",
+          name: "Stage 3",
+          enabled: true,
+        }),
+      ],
+      nodes: [
+        createNodeDraft({
+          id: "node-a",
+          nodeKey: "node-a",
+          stageKey: "stage-1",
+          nodeType: "checkout_branch",
+          position: { x: 96, y: 72 },
+        }),
+        createNodeDraft({
+          id: "node-b",
+          nodeKey: "node-b",
+          stageKey: "stage-2",
+          nodeType: "trigger_pipeline",
+          position: { x: 96, y: 72 },
+        }),
+        createNodeDraft({
+          id: "node-c",
+          nodeKey: "node-c",
+          stageKey: "stage-3",
+          nodeType: "wait_pipeline",
+          position: { x: 96, y: 72 },
+        }),
+      ],
+      edges: [
+        {
+          id: "node-c->node-b",
+          sourceNodeKey: "node-c",
+          targetNodeKey: "node-b",
+        },
+      ],
+    };
+
+    render(<EditorHarness initialDraft={initialDraft} />);
+
+    dragGraphNode(
+      "node-a",
+      { x: 96, y: 72 },
+      {
+        parentId: "stage-3",
+        data: {
+          stageKey: "stage-3",
+        },
+      }
+    );
+
+    await waitFor(() => {
+      expect(parseDraft().stages.map((stage) => stage.stageKey)).toEqual([
+        "stage-1",
+        "stage-3",
+        "stage-2",
+      ]);
     });
   });
 

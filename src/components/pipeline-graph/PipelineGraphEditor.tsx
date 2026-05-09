@@ -45,6 +45,7 @@ import {
   isStageGraphNode,
   removeSelectedGraphObject,
   reflowNodesByStageOrder,
+  reorderStagesByDependencyOrder,
   reorderStageNodesForDropPosition,
   syncDraftFromGraphState,
   validateGraphConnection,
@@ -672,7 +673,42 @@ export function PipelineGraphEditor({
       return;
     }
 
-    if (node.parentId !== draggedNode.stageKey || node.data.stageKey !== draggedNode.stageKey) {
+    const targetStageKey =
+      draft.stages.some((stage) => stage.stageKey === node.data.stageKey)
+        ? node.data.stageKey
+        : node.parentId && draft.stages.some((stage) => stage.stageKey === node.parentId)
+          ? node.parentId
+          : draggedNode.stageKey;
+
+    if (targetStageKey !== draggedNode.stageKey) {
+      const remainingNodes = draft.nodes.filter((item) => item.nodeKey !== draggedNode.nodeKey);
+      const movedNode: NodeDraft = {
+        ...draggedNode,
+        stageKey: targetStageKey,
+        position: getNextNodePositionInStage(remainingNodes, targetStageKey),
+      };
+      const nextNodesBase = [...remainingNodes, movedNode];
+      const nextStages =
+        reorderStagesByDependencyOrder(draft.stages, nextNodesBase, draft.edges) ?? null;
+
+      if (!nextStages) {
+        setGraphMessage("当前节点不能放入该阶段，否则阶段顺序无法保持合法。");
+        return;
+      }
+
+      const nextNodes = reflowNodesByStageOrder(
+        nextNodesBase,
+        nextStages.map((stage) => stage.stageKey)
+      );
+      applyDraft({
+        ...draft,
+        stages: nextStages,
+        nodes: nextNodes,
+        variableRows: ensureVariableRows(nextNodes, draft.variableRows),
+      });
+      if (selectedObject?.kind === "node" && selectedObject.id === draggedNode.nodeKey) {
+        setActiveStageKey(targetStageKey);
+      }
       return;
     }
 

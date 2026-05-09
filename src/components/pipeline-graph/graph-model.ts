@@ -14,6 +14,7 @@ import {
 import {
   buildConnectionDrivenStageLayout,
   centerStageContent,
+  orderStagesByDependencies,
   resolveDropIntent,
 } from "@/components/pipeline-graph/connection-layout";
 
@@ -321,6 +322,45 @@ function buildStagePositions(stageKeys: string[], stageLayouts: Map<string, Stag
   }
 
   return positions;
+}
+
+export function reorderStagesByDependencyOrder(
+  stages: StageDraft[],
+  nodes: NodeDraft[],
+  edges: PipelineDraft["edges"]
+) {
+  const stageMap = new Map(stages.map((stage) => [stage.stageKey, stage]));
+  const nodeStageMap = new Map(nodes.map((node) => [node.nodeKey, node.stageKey]));
+  const dependencies = edges.flatMap((edge) => {
+    const sourceStageKey = nodeStageMap.get(edge.sourceNodeKey);
+    const targetStageKey = nodeStageMap.get(edge.targetNodeKey);
+    if (!sourceStageKey || !targetStageKey || sourceStageKey === targetStageKey) {
+      return [];
+    }
+
+    return [{ sourceStageKey, targetStageKey }];
+  });
+
+  const orderedStageKeys = orderStagesByDependencies(
+    stages.map((stage) => stage.stageKey),
+    dependencies
+  );
+  const stageOrder = new Map(
+    orderedStageKeys.map((stageKey, index) => [stageKey, index])
+  );
+  const hasIllegalDependency = dependencies.some(
+    (dependency) =>
+      (stageOrder.get(dependency.sourceStageKey) ?? Number.MAX_SAFE_INTEGER) >
+      (stageOrder.get(dependency.targetStageKey) ?? Number.MAX_SAFE_INTEGER)
+  );
+
+  if (hasIllegalDependency) {
+    return null;
+  }
+
+  return orderedStageKeys
+    .map((stageKey) => stageMap.get(stageKey) ?? null)
+    .filter((stage): stage is StageDraft => stage !== null);
 }
 
 function getNextAvailableStageGridSlot(nodes: Array<Pick<NodeDraft, "position">>) {
