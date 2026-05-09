@@ -520,6 +520,7 @@ describe("PipelineGraphEditor", () => {
 
     expect(await screen.findByTestId("pipeline-graph-stage-context-delete")).toBeInTheDocument();
     expect(screen.queryByTestId("pipeline-graph-stage-context-add-node")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pipeline-graph-stage-context-add-node-hidden")).not.toBeInTheDocument();
     expect(screen.getByTestId("pipeline-graph-selection-summary")).toHaveTextContent(
       "已选中节点"
     );
@@ -533,6 +534,7 @@ describe("PipelineGraphEditor", () => {
 
     expect(await screen.findByTestId("pipeline-graph-stage-context-delete")).toBeInTheDocument();
     expect(screen.queryByTestId("pipeline-graph-stage-context-add-node")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pipeline-graph-stage-context-add-node-hidden")).not.toBeInTheDocument();
     expect(screen.getByTestId("pipeline-stage-start-anchor-trigger-stage-1")).toBeInTheDocument();
   });
 
@@ -759,7 +761,7 @@ describe("PipelineGraphEditor", () => {
     expect(document.getElementById("pipeline-stage-name-input")).not.toBeNull();
     expect(document.getElementById("pipeline-node-type-select")).toBeNull();
   });
-  it("shows a preview edge while creating a successor from a node output anchor", async () => {
+  it("shows a successor preview edge and stage hint while creating from a node output anchor", async () => {
     render(<EditorHarness />);
 
     const firstNode = await addNodeToStage("stage-1", 1);
@@ -767,10 +769,14 @@ describe("PipelineGraphEditor", () => {
     await openCreateNodeDialogFromNodeOutput(firstNode.nodeKey);
 
     expect(screen.getByTestId("pipeline-graph-preview-edge")).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-stage-drop-preview-stage-1")).toHaveTextContent(
+      "新后继将追加到此阶段"
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     await waitFor(() => {
       expect(screen.queryByTestId("pipeline-graph-preview-edge")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("pipeline-stage-drop-preview-stage-1")).not.toBeInTheDocument();
     });
   });
 
@@ -1290,7 +1296,9 @@ describe("PipelineGraphEditor", () => {
       }
     );
 
-    expect(screen.getByTestId("pipeline-stage-drop-preview-stage-2")).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-stage-drop-preview-stage-2")).toHaveTextContent(
+      "松开后移动到此阶段"
+    );
   });
 
   it("reorders stages after a cross-stage move when dependencies require a different legal order", async () => {

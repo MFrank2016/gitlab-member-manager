@@ -74,6 +74,11 @@ type CreateNodeDialogState = {
   sourceNodeKey: string | null;
 } | null;
 
+type CanvasPreviewState =
+  | { kind: "create-successor"; sourceNodeKey: string; stageKey: string }
+  | { kind: "drag-move"; nodeKey: string; stageKey: string }
+  | null;
+
 type SelectedGraphObject =
   | { kind: "stage"; id: string }
   | { kind: "node"; id: string }
@@ -88,6 +93,8 @@ const actionButtonClassName =
   "h-auto w-full justify-start whitespace-normal px-4 py-2.5 text-left leading-5";
 const contextMenuItemClassName =
   "w-full rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-slate-100";
+const ACTION_NODE_CARD_WIDTH = 188;
+const ACTION_NODE_CARD_HEIGHT = 116;
 
 function getDefaultSelectedObject(draft: PipelineDraft): SelectedGraphObject {
   if (draft.nodes[0]) {
@@ -206,7 +213,7 @@ export function PipelineGraphEditor({
   const [contextMenuState, setContextMenuState] = React.useState<ContextMenuState>(null);
   const [createNodeDialogState, setCreateNodeDialogState] =
     React.useState<CreateNodeDialogState>(null);
-  const [dragPreviewStageKey, setDragPreviewStageKey] = React.useState<string | null>(null);
+  const [previewState, setPreviewState] = React.useState<CanvasPreviewState>(null);
 
   const graphState = React.useMemo(() => buildGraphEditorState(draft), [draft]);
   const handleSelectGraphNode = React.useCallback((node: PipelineGraphNode) => {
@@ -264,7 +271,8 @@ export function PipelineGraphEditor({
               onStartCreate: ({ stageKey }: { stageKey: string }) => {
                 openCreateNodeDialog(stageKey, null);
               },
-              isDropPreviewTarget: dragPreviewStageKey === node.data.stageKey,
+              previewHint: getStagePreviewHint(node.data.stageKey),
+              previewTone: getStagePreviewTone(node.data.stageKey),
             } as unknown as PipelineGraphNode["data"],
           };
         }
@@ -293,10 +301,13 @@ export function PipelineGraphEditor({
             }) => {
               openCreateNodeDialog(stageKey, nodeKey);
             },
+            isSuccessorPreviewSource:
+              previewState?.kind === "create-successor" &&
+              previewState.sourceNodeKey === node.data.nodeKey,
           } as unknown as PipelineGraphNode["data"],
         };
       }),
-    [dragPreviewStageKey, graphState.nodes, openNodeContextMenu, openStageContextMenu]
+    [graphState.nodes, openNodeContextMenu, openStageContextMenu, previewState]
   );
   const graphNodeMap = React.useMemo(
     () => new Map(graphState.nodes.map((node) => [node.id, node])),
@@ -335,6 +346,7 @@ export function PipelineGraphEditor({
       !draft.stages.some((stage) => stage.stageKey === createNodeDialogState.stageKey)
     ) {
       setCreateNodeDialogState(null);
+      setPreviewState((current) => (current?.kind === "create-successor" ? null : current));
     }
   }, [createNodeDialogState, draft.stages]);
 
@@ -388,6 +400,7 @@ export function PipelineGraphEditor({
         createNodeDialogState.parameters
       )
     : {};
+  const createPreviewPath = buildCreatePreviewPath();
   const contextMenuOverlay =
     contextMenuState && typeof document !== "undefined"
       ? createPortal(
@@ -405,7 +418,7 @@ export function PipelineGraphEditor({
                 <button
                   type="button"
                   role="menuitem"
-                  data-testid="pipeline-graph-stage-context-add-node-hidden"
+                  data-testid="pipeline-graph-stage-context-legacy-placeholder"
                   className="hidden"
                   onClick={() => undefined}
                 >
@@ -448,6 +461,80 @@ export function PipelineGraphEditor({
 
   function closeCreateNodeDialog() {
     setCreateNodeDialogState(null);
+    setPreviewState((current) => (current?.kind === "create-successor" ? null : current));
+  }
+
+  function getStagePreviewHint(stageKey: string) {
+    if (previewState?.stageKey !== stageKey) {
+      return undefined;
+    }
+
+    return previewState.kind === "create-successor"
+      ? "新后继将追加到此阶段"
+      : "松开后移动到此阶段";
+  }
+
+  function getStagePreviewTone(stageKey: string) {
+    if (previewState?.stageKey !== stageKey) {
+      return undefined;
+    }
+
+    return previewState.kind === "create-successor" ? "create" : "drag";
+  }
+
+  function resolveNodeCanvasBox(node: PipelineGraphNode) {
+    if (isStageGraphNode(node)) {
+      return {
+        x: node.position.x,
+        y: node.position.y,
+        width: Number(node.style?.width ?? 0),
+        height: Number(node.style?.height ?? 0),
+      };
+    }
+
+    const stageNode = graphNodeMap.get(node.parentId ?? node.data.stageKey);
+    const parentX = stageNode?.position.x ?? 0;
+    const parentY = stageNode?.position.y ?? 0;
+
+    return {
+      x: parentX + node.position.x,
+      y: parentY + node.position.y,
+      width: ACTION_NODE_CARD_WIDTH,
+      height: ACTION_NODE_CARD_HEIGHT,
+    };
+  }
+
+  function buildCreatePreviewPath() {
+    if (previewState?.kind !== "create-successor") {
+      return null;
+    }
+
+    const sourceNode = graphNodeMap.get(previewState.sourceNodeKey);
+    if (!sourceNode || !isActionGraphNode(sourceNode)) {
+      return null;
+    }
+
+    const sourceBox = resolveNodeCanvasBox(sourceNode);
+    const targetStage = graphNodeMap.get(previewState.stageKey);
+    const targetStageBox =
+      targetStage && isStageGraphNode(targetStage) ? resolveNodeCanvasBox(targetStage) : null;
+
+    const startX = sourceBox.x + sourceBox.width;
+    const startY = sourceBox.y + sourceBox.height / 2;
+    const fallbackEndX = startX + 112;
+    const endX = targetStageBox
+      ? Math.min(fallbackEndX, targetStageBox.x + targetStageBox.width - 48)
+      : fallbackEndX;
+    const endY = startY;
+    const curveOffset = 28;
+
+    return {
+      d: `M ${startX} ${startY} C ${startX + curveOffset} ${startY}, ${endX - curveOffset} ${endY}, ${endX} ${endY}`,
+      startX,
+      startY,
+      endX,
+      endY,
+    };
   }
 
   function resolvePreviewStageKey(node: PipelineGraphNode) {
@@ -497,6 +584,15 @@ export function PipelineGraphEditor({
 
   function openCreateNodeDialog(stageKey: string, sourceNodeKey: string | null) {
     closeContextMenu();
+    setPreviewState(
+      sourceNodeKey
+        ? {
+            kind: "create-successor",
+            sourceNodeKey,
+            stageKey,
+          }
+        : null
+    );
     setCreateNodeDialogState({
       stageKey,
       nodeType: "",
@@ -624,12 +720,22 @@ export function PipelineGraphEditor({
   }
 
   function handleNodeDrag(node: PipelineGraphNode) {
-    setDragPreviewStageKey(resolvePreviewStageKey(node));
+    const stageKey = resolvePreviewStageKey(node);
+    if (!stageKey || !isActionGraphNode(node)) {
+      setPreviewState(null);
+      return;
+    }
+
+    setPreviewState({
+      kind: "drag-move",
+      nodeKey: node.data.nodeKey,
+      stageKey,
+    });
   }
 
   function handleNodeDragStop(node: PipelineGraphNode) {
     closeContextMenu();
-    setDragPreviewStageKey(null);
+    setPreviewState((current) => (current?.kind === "drag-move" ? null : current));
 
     if (isStageGraphNode(node)) {
       const currentStageNode = graphNodeMap.get(node.id);
@@ -825,6 +931,7 @@ export function PipelineGraphEditor({
       edges: nextEdges,
       variableRows: ensureVariableRows(nextNodes, draft.variableRows),
     });
+    setPreviewState(null);
     setSelectedObject({ kind: "node", id: nextNode.nodeKey });
     setActiveStageKey(createNodeDialogState.stageKey);
   }
@@ -908,12 +1015,30 @@ export function PipelineGraphEditor({
 	          className="relative min-w-0 h-[560px] rounded-2xl border border-border bg-slate-100/70"
 	          data-testid="pipeline-graph-editor"
 	        >
-	          {createNodeDialogState?.sourceNodeKey ? (
-	            <div
-	              data-testid="pipeline-graph-preview-edge"
-	              className="pointer-events-none absolute left-[132px] top-1/2 z-10 h-px w-[calc(100%-180px)] -translate-y-1/2 border-t-2 border-dashed border-sky-300 opacity-80"
-	            />
-	          ) : null}
+          {createPreviewPath ? (
+            <svg
+              data-testid="pipeline-graph-preview-edge"
+              className="pointer-events-none absolute inset-0 z-10 overflow-visible"
+              aria-hidden="true"
+            >
+              <path
+                d={createPreviewPath.d}
+                fill="none"
+                stroke="rgb(56 189 248)"
+                strokeWidth="3"
+                strokeDasharray="8 6"
+                strokeLinecap="round"
+                opacity="0.9"
+              />
+              <circle
+                cx={createPreviewPath.endX}
+                cy={createPreviewPath.endY}
+                r="6"
+                fill="rgb(14 165 233)"
+                opacity="0.95"
+              />
+            </svg>
+          ) : null}
 	          <ReactFlow
             nodes={graphNodes}
             edges={graphState.edges}
@@ -929,13 +1054,13 @@ export function PipelineGraphEditor({
             }}
             onPaneClick={() => {
               closeContextMenu();
-              setDragPreviewStageKey(null);
+              setPreviewState((current) => (current?.kind === "drag-move" ? null : current));
               setSelectedObject(null);
             }}
             onPaneContextMenu={(event) => {
               event.preventDefault();
               closeContextMenu();
-              setDragPreviewStageKey(null);
+              setPreviewState((current) => (current?.kind === "drag-move" ? null : current));
             }}
             onNodesChange={handleNodesChange}
             onNodeDrag={(_, node) => handleNodeDrag(node)}

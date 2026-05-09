@@ -12,7 +12,8 @@ import {
 type StageGroupNodeData = StageGraphNodeData & {
   onContextMenu?: (payload: { stageKey: string; x: number; y: number }) => void;
   onStartCreate?: (payload: { stageKey: string }) => void;
-  isDropPreviewTarget?: boolean;
+  previewHint?: string;
+  previewTone?: "create" | "drag";
 };
 
 export function StageGroupNode({
@@ -21,6 +22,7 @@ export function StageGroupNode({
 }: NodeProps) {
   const data = rawData as StageGroupNodeData;
   const showStartAnchor = data.nodeCount === 0;
+  const isPreviewTarget = Boolean(data.previewHint);
   const handleContextMenu: MouseEventHandler<HTMLDivElement> = (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -40,8 +42,10 @@ export function StageGroupNode({
         selected
           ? "border-sky-500 ring-4 ring-sky-100 shadow-sky-100/70"
           : "border-slate-300/90",
-        data.isDropPreviewTarget &&
-          "border-amber-400 ring-4 ring-amber-100 shadow-amber-100/70",
+        isPreviewTarget &&
+          (data.previewTone === "create"
+            ? "border-sky-400 ring-4 ring-sky-100 shadow-sky-100/70"
+            : "border-amber-400 ring-4 ring-amber-100 shadow-amber-100/70"),
         !data.enabled && "bg-slate-100/90 text-slate-600"
       )}
     >
@@ -82,12 +86,17 @@ export function StageGroupNode({
           {data.enabled ? "已启用" : "已停用"}
         </span>
       </div>
-      {data.isDropPreviewTarget ? (
+      {isPreviewTarget ? (
         <div
           data-testid={`pipeline-stage-drop-preview-${data.stageKey}`}
-          className="nodrag mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700"
+          className={cn(
+            "nodrag mt-2 rounded-xl px-3 py-2 text-[11px]",
+            data.previewTone === "create"
+              ? "border border-sky-200 bg-sky-50 text-sky-700"
+              : "border border-amber-200 bg-amber-50 text-amber-700"
+          )}
         >
-          将在此阶段落位
+          {data.previewHint}
         </div>
       ) : null}
 

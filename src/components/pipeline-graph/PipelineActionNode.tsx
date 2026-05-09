@@ -9,6 +9,7 @@ import { ACTION_DRAG_HANDLE_CLASSNAME, type PipelineActionNodeData } from "./gra
 type PipelineActionNodeViewData = PipelineActionNodeData & {
   onContextMenu?: (payload: { nodeKey: string; x: number; y: number }) => void;
   onCreateSuccessor?: (payload: { nodeKey: string; stageKey: string }) => void;
+  isSuccessorPreviewSource?: boolean;
 };
 
 function formatNodeType(nodeType: string) {
@@ -93,7 +94,10 @@ export function PipelineActionNode({
         <Handle
           type="source"
           position={Position.Right}
-          className="!h-4 !w-4 !rounded-full !border-2 !border-white !bg-sky-500 shadow-sm"
+          className={cn(
+            "!h-4 !w-4 !rounded-full !border-2 !border-white shadow-sm",
+            data.isSuccessorPreviewSource ? "!bg-sky-600 ring-4 ring-sky-100" : "!bg-sky-500"
+          )}
           style={sourceHandleStyle}
         />
       </div>
