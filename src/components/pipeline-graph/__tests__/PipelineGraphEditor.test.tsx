@@ -47,7 +47,23 @@ vi.mock("@xyflow/react", async () => {
     Background: () => null,
     Controls: () => <div data-testid="mock-react-flow-controls" />,
     MiniMap: () => <div data-testid="mock-react-flow-minimap" />,
-    Handle: () => null,
+    Handle: ({
+      type,
+      position,
+      className,
+      style,
+    }: {
+      type?: string;
+      position?: string;
+      className?: string;
+      style?: Record<string, unknown>;
+    }) => (
+      <div
+        data-testid={`mock-handle-${type ?? "unknown"}-${position ?? "unknown"}`}
+        className={className}
+        data-style={JSON.stringify(style ?? {})}
+      />
+    ),
     Position: {
       Top: "top",
       Right: "right",
@@ -411,7 +427,7 @@ describe("PipelineGraphEditor", () => {
     render(<EditorHarness />);
 
     expect(screen.getByTestId("pipeline-stage-node-card-stage-1")).toHaveClass(
-      "overflow-hidden",
+      "overflow-visible",
       "p-3"
     );
 
@@ -693,10 +709,10 @@ describe("PipelineGraphEditor", () => {
     expect(lastReactFlowProps?.selectionOnDrag).toBe(false);
   });
 
-  it("passes the updated pan and zoom toggles through to React Flow", () => {
+  it("keeps pane dragging enabled while preserving zoom", () => {
     render(<EditorHarness />);
 
-    expect(lastReactFlowProps?.panOnDrag).toEqual([1]);
+    expect(lastReactFlowProps?.panOnDrag).toBe(true);
     expect(lastReactFlowProps?.zoomOnScroll).toBe(true);
   });
 
@@ -713,6 +729,24 @@ describe("PipelineGraphEditor", () => {
     const actionNode = lastReactFlowProps?.nodes.find((node) => node.id === nextNode.nodeKey);
     expect(stageNode?.dragHandle).toBe(".pipeline-stage-drag-handle");
     expect(actionNode?.dragHandle).toBe(".pipeline-action-drag-handle");
+  });
+
+  it("renders larger visible connection handles without clipping node cards", async () => {
+    render(<EditorHarness />);
+
+    const nextNode = await addNodeToSelectedStage(1);
+    const actionCard = screen.getByTestId(`pipeline-action-node-card-${nextNode.nodeKey}`);
+    const stageCard = screen.getByTestId("pipeline-stage-node-card-stage-1");
+
+    expect(actionCard).toHaveClass("overflow-visible");
+    expect(stageCard).toHaveClass("overflow-visible");
+
+    const targetHandle = within(actionCard).getByTestId("mock-handle-target-left");
+    const sourceHandle = within(actionCard).getByTestId("mock-handle-source-right");
+    expect(targetHandle).toHaveClass("!h-4", "!w-4", "!border-2");
+    expect(sourceHandle).toHaveClass("!h-4", "!w-4", "!border-2");
+    expect(targetHandle.getAttribute("data-style")).toContain("\"width\":16");
+    expect(sourceHandle.getAttribute("data-style")).toContain("\"width\":16");
   });
 
   it("opens the stage context menu from the React Flow node contextmenu callback", async () => {

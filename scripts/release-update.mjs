@@ -101,6 +101,31 @@ function updateCargoTomlVersion(content, nextVersion) {
   return nextContent;
 }
 
+function updateWindowTitles(config, nextVersion) {
+  const productName =
+    typeof config.productName === "string" && config.productName.trim().length > 0
+      ? config.productName.trim()
+      : "App";
+  const nextTitle = `${productName} v${nextVersion}`;
+
+  if (!config.app || typeof config.app !== "object") {
+    return config;
+  }
+
+  const windows = Array.isArray(config.app.windows) ? config.app.windows : [];
+
+  return {
+    ...config,
+    app: {
+      ...config.app,
+      windows: windows.map((windowConfig) => ({
+        ...windowConfig,
+        title: nextTitle,
+      })),
+    },
+  };
+}
+
 function renderUpdateEntry({ date, version, notes }) {
   const body = notes.map((note) => `- ${note}`).join("\n");
   return `## ${date} v${version}\n${body}\n`;
@@ -145,11 +170,17 @@ export async function applyReleaseUpdate({
   const nextVersion = bumpVersion(previousVersion, type);
 
   packageJson.version = nextVersion;
-  tauriConfig.version = nextVersion;
+  const nextTauriConfig = updateWindowTitles(
+    {
+      ...tauriConfig,
+      version: nextVersion,
+    },
+    nextVersion,
+  );
 
   await writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
   await writeFile(cargoTomlPath, updateCargoTomlVersion(cargoToml, nextVersion), "utf8");
-  await writeFile(tauriConfigPath, `${JSON.stringify(tauriConfig, null, 2)}\n`, "utf8");
+  await writeFile(tauriConfigPath, `${JSON.stringify(nextTauriConfig, null, 2)}\n`, "utf8");
 
   let existingUpdateLog = "";
   try {

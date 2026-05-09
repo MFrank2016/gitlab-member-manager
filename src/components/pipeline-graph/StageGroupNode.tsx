@@ -33,7 +33,7 @@ export function StageGroupNode({
       data-testid={`pipeline-stage-node-card-${data.stageKey}`}
       onContextMenu={handleContextMenu}
       className={cn(
-        "flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border bg-white/95 p-3 text-slate-900 shadow-sm transition-colors",
+        "flex h-full min-h-0 flex-col overflow-visible rounded-3xl border bg-white/95 p-3 text-slate-900 shadow-sm transition-colors",
         selected
           ? "border-sky-500 ring-4 ring-sky-100 shadow-sky-100/70"
           : "border-slate-300/90",
@@ -51,7 +51,7 @@ export function StageGroupNode({
         <span className="pointer-events-none font-mono tracking-[0.3em] text-slate-400">:::</span>
       </div>
 
-      <div className="flex items-start justify-between gap-2">
+      <div className="nodrag flex items-start justify-between gap-2">
         <div className="min-w-0 space-y-1.5">
           <div className="flex flex-wrap items-center gap-2">
             <span className="rounded-full bg-slate-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.24em] text-white">
@@ -78,7 +78,7 @@ export function StageGroupNode({
         </span>
       </div>
 
-      <div className="mt-3 flex flex-1 flex-col justify-between rounded-2xl border border-dashed border-slate-300/80 bg-slate-50/80 p-3 text-xs text-slate-600">
+      <div className="nodrag mt-3 flex flex-1 flex-col justify-between rounded-2xl border border-dashed border-slate-300/80 bg-slate-50/80 p-3 text-xs text-slate-600">
         <p className="font-medium text-slate-700">在这里放置动作节点并组织依赖关系。</p>
         <div className="flex flex-wrap items-center gap-2 text-[11px]">
           <span

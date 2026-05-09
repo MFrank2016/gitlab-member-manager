@@ -40,7 +40,17 @@ test("applyReleaseUpdate syncs version files and prepends UPDATE entry", async (
     );
     await writeFile(
       path.join(tempRoot, "src-tauri", "tauri.conf.json"),
-      JSON.stringify({ version: "0.1.0" }, null, 2) + "\n",
+      JSON.stringify(
+        {
+          productName: "Gitlab Manager",
+          version: "0.1.0",
+          app: {
+            windows: [{ title: "Gitlab Manager" }],
+          },
+        },
+        null,
+        2,
+      ) + "\n",
       "utf8",
     );
     await writeFile(
@@ -66,6 +76,7 @@ test("applyReleaseUpdate syncs version files and prepends UPDATE entry", async (
 
     assert.equal(packageJson.version, "0.1.1");
     assert.equal(tauriConfig.version, "0.1.1");
+    assert.equal(tauriConfig.app.windows[0].title, "Gitlab Manager v0.1.1");
     assert.match(cargoToml, /version = "0\.1\.1"/);
     assert.match(updateLog, /## 2026-04-20 v0\.1\.1/);
     assert.match(updateLog, /- 新增自动版本同步/);

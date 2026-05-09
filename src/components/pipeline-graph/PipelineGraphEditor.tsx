@@ -916,7 +916,9 @@ export function PipelineGraphEditor({
             onNodeDragStop={(_, node) => handleNodeDragStop(node)}
             onSelectionChange={handleSelectionChange}
             onConnect={commitConnection}
-            panOnDrag={[1]}
+            panOnDrag
+            nodesDraggable
+            nodesConnectable
             zoomOnScroll
             selectionOnDrag={false}
             fitView

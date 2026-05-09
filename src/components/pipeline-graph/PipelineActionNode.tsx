@@ -69,6 +69,8 @@ export function PipelineActionNode({
 }: NodeProps) {
   const data = rawData as PipelineActionNodeViewData;
   const summary = buildActionSummary(data);
+  const targetHandleStyle = { width: 16, height: 16, left: -8 };
+  const sourceHandleStyle = { width: 16, height: 16, right: -8 };
   const handleContextMenu: MouseEventHandler<HTMLDivElement> = (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -84,14 +86,19 @@ export function PipelineActionNode({
       data-testid={`pipeline-action-node-card-${data.nodeKey}`}
       onContextMenu={handleContextMenu}
       className={cn(
-        "w-[188px] max-w-[188px] overflow-hidden rounded-xl border bg-white/95 p-3 shadow-sm transition-colors",
+        "w-[188px] max-w-[188px] overflow-visible rounded-xl border bg-white/95 p-3 shadow-sm transition-colors",
         selected
           ? "border-sky-500 ring-4 ring-sky-100 shadow-sky-100/70"
           : "border-slate-300/90",
         !data.enabled && "bg-slate-100/90 text-slate-600"
       )}
     >
-      <Handle type="target" position={Position.Left} />
+      <Handle
+        type="target"
+        position={Position.Left}
+        className="!h-4 !w-4 !rounded-full !border-2 !border-white !bg-sky-500 shadow-sm"
+        style={targetHandleStyle}
+      />
 
       <div className="space-y-2.5">
         <div
@@ -105,7 +112,7 @@ export function PipelineActionNode({
           <span className="pointer-events-none font-mono tracking-[0.3em] text-slate-400">:::</span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="nodrag flex flex-wrap items-center gap-1.5">
           <span className="rounded-full bg-slate-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-white">
             动作
           </span>
@@ -124,7 +131,7 @@ export function PipelineActionNode({
           </span>
         </div>
 
-        <div className="space-y-1">
+        <div className="nodrag space-y-1">
           <div className="break-words text-sm font-semibold leading-5 text-slate-900">
             {data.label}
           </div>
@@ -136,13 +143,18 @@ export function PipelineActionNode({
           </p>
         </div>
 
-        <div className="flex items-center justify-between gap-2 border-t border-slate-200 pt-2 text-[10px] uppercase tracking-[0.16em] text-slate-400">
+        <div className="nodrag flex items-center justify-between gap-2 border-t border-slate-200 pt-2 text-[10px] uppercase tracking-[0.16em] text-slate-400">
           <span className="truncate">{formatNodeType(data.nodeType)}</span>
           <span>{data.enabled ? "就绪" : "停用"}</span>
         </div>
       </div>
 
-      <Handle type="source" position={Position.Right} />
+      <Handle
+        type="source"
+        position={Position.Right}
+        className="!h-4 !w-4 !rounded-full !border-2 !border-white !bg-sky-500 shadow-sm"
+        style={sourceHandleStyle}
+      />
     </div>
   );
 }
