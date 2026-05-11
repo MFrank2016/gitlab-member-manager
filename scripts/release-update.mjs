@@ -106,7 +106,7 @@ function updateWindowTitles(config, nextVersion) {
     typeof config.productName === "string" && config.productName.trim().length > 0
       ? config.productName.trim()
       : "App";
-  const nextTitle = `${productName} v${nextVersion}`;
+  const nextTitle = productName;
 
   if (!config.app || typeof config.app !== "object") {
     return config;
