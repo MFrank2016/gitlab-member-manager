@@ -5,6 +5,7 @@ use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json;
+use std::fmt;
 use std::future::Future;
 
 #[derive(Debug, Clone)]
@@ -378,9 +379,90 @@ pub async fn add_member(
     cfg: &GitLabConfig,
     project: &str,
     user_id: u64,
+    username: Option<&str>,
     access_level: i64,
     expires_at: Option<String>,
 ) -> Result<()> {
+    let normalized_username = username.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    match add_member_once(
+        cfg,
+        project,
+        "user_id",
+        user_id.to_string(),
+        access_level,
+        expires_at.clone(),
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            if should_retry_add_member_with_username(&first_error, normalized_username.as_deref()) {
+                let retry_username = normalized_username.expect("validated username for retry");
+                tracing::warn!(
+                    user_id = user_id,
+                    username = %retry_username,
+                    status = %first_error.status,
+                    body = %first_error.body,
+                    "[gitlab] add_member retrying with username after user_id rejection"
+                );
+
+                return add_member_once(
+                    cfg,
+                    project,
+                    "username",
+                    retry_username,
+                    access_level,
+                    expires_at,
+                )
+                .await
+                .map_err(|error| anyhow!(error.to_string()));
+            }
+
+            Err(anyhow!(first_error.to_string()))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AddMemberApiError {
+    status: StatusCode,
+    body: String,
+}
+
+impl fmt::Display for AddMemberApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GitLab API error {}: {}", self.status, self.body)
+    }
+}
+
+fn should_retry_add_member_with_username(
+    error: &AddMemberApiError,
+    username: Option<&str>,
+) -> bool {
+    username.is_some()
+        && matches!(
+            error.status,
+            StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::UNPROCESSABLE_ENTITY
+        )
+        && error.body.to_ascii_lowercase().contains("does not exist")
+}
+
+async fn add_member_once(
+    cfg: &GitLabConfig,
+    project: &str,
+    identity_key: &str,
+    identity_value: String,
+    access_level: i64,
+    expires_at: Option<String>,
+) -> std::result::Result<(), AddMemberApiError> {
     let project = encode_project(project.trim());
     let url = api_url(
         &cfg.base_url,
@@ -390,14 +472,15 @@ pub async fn add_member(
 
     tracing::info!(
       url = %url,
-      user_id = user_id,
+      identity_key = identity_key,
+      identity_value = %identity_value,
       access_level = access_level,
       expires_at = ?expires_at,
       "[gitlab] POST add member"
     );
 
     let mut params: Vec<(&str, String)> = vec![
-        ("user_id", user_id.to_string()),
+        (identity_key, identity_value.clone()),
         ("access_level", access_level.to_string()),
     ];
     if let Some(expires_at) = expires_at {
@@ -412,20 +495,28 @@ pub async fn add_member(
         .form(&params)
         .send()
         .await
-        .context("GitLab request failed")?;
+        .map_err(|error| AddMemberApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: format!("GitLab request failed: {error}"),
+        })?;
 
     let status = resp.status();
     tracing::info!(status = %status, "[gitlab] add_member response");
 
     if status.is_success() {
-        tracing::info!(user_id = user_id, "[gitlab] add_member success");
+        tracing::info!(
+            identity_key = identity_key,
+            identity_value = %identity_value,
+            "[gitlab] add_member success"
+        );
         return Ok(());
     }
 
     // GitLab 在成员已存在时返回 409，需视作成功
     if status == StatusCode::CONFLICT {
         tracing::info!(
-            user_id = user_id,
+            identity_key = identity_key,
+            identity_value = %identity_value,
             "[gitlab] member already exists, treating as success"
         );
         return Ok(());
@@ -434,7 +525,7 @@ pub async fn add_member(
     let text = resp.text().await.unwrap_or_default();
     tracing::warn!(status = %status, body = %text, "[gitlab] add_member failed");
 
-    Err(anyhow!("GitLab API error {status}: {text}"))
+    Err(AddMemberApiError { status, body: text })
 }
 
 pub async fn remove_member(cfg: &GitLabConfig, project: &str, user_id: u64) -> Result<()> {
@@ -535,6 +626,7 @@ pub async fn sync_members_for_managed_project(
                 cfg,
                 &project.gitlab_project_id.to_string(),
                 user_id,
+                None,
                 access_level,
                 expires_at,
             )
@@ -729,6 +821,37 @@ mod tests {
         assert_eq!(row.failed[0].user_id, 1002);
         assert!(row.failed[0].message.contains("simulated gitlab failure"));
         assert!(!row.success);
+    }
+
+    #[tokio::test]
+    async fn add_member_retries_with_username_when_user_id_is_rejected() {
+        let (cfg, requests) = spawn_gitlab_test_server(vec![
+            TestHttpResponse {
+                status_line: "400 Bad Request",
+                body: r#"{"message":"User 20065= does not exist!"}"#.to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+            TestHttpResponse {
+                status_line: "201 Created",
+                body: "{}".to_string(),
+                extra_headers: vec![],
+                delay_ms: 0,
+            },
+        ])
+        .await;
+
+        add_member(&cfg, "3456", 20065, Some("alice"), 30, None)
+            .await
+            .expect("retry add member with username");
+
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].method, "POST");
+        assert!(captured[0].path.contains("/api/v4/projects/3456/members"));
+        assert!(captured[0].body.contains("user_id=20065"));
+        assert!(captured[1].body.contains("username=alice"));
+        assert!(!captured[1].body.contains("user_id="));
     }
 
     #[tokio::test]

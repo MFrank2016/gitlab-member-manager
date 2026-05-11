@@ -1344,7 +1344,9 @@ async fn batch_add_members_to_project(
     let mut failed = Vec::new();
 
     for uid in &user_ids {
-        match gitlab::add_member(&cfg, &project, *uid, access_level, expires_at.clone()).await {
+        match gitlab::add_member(&cfg, &project, *uid, None, access_level, expires_at.clone())
+            .await
+        {
             Ok(_) => {
                 tracing::debug!(user_id = uid, "add member success");
                 ok.push(*uid);
@@ -1376,19 +1378,28 @@ async fn add_member_to_project(
     state: State<'_, AppState>,
     project: String,
     user_id: u64,
+    username: Option<String>,
     access_level: i64,
     expires_at: Option<String>,
 ) -> Result<(), String> {
     tracing::info!(
       project = %project,
       user_id = user_id,
+      username = ?username,
       access_level = access_level,
       expires_at = ?expires_at,
       "add_member_to_project called"
     );
 
     let cfg = require_cfg(&state)?;
-    gitlab::add_member(&cfg, &project, user_id, access_level, expires_at)
+    gitlab::add_member(
+        &cfg,
+        &project,
+        user_id,
+        username.as_deref(),
+        access_level,
+        expires_at,
+    )
         .await
         .map_err(|e| e.to_string())?;
 

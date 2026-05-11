@@ -241,6 +241,7 @@ export function MembersPage() {
         const result = await addMemberToProject({
           project: String(selectedProject.id),
           userId: m.userId,
+          username: m.username,
           accessLevel: Number(accessLevel),
           expiresAt: expires,
         }).then(

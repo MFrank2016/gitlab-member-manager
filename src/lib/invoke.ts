@@ -693,14 +693,17 @@ export async function batchAddMembersToProject(args: {
 export async function addMemberToProject(args: {
   project: string;
   userId: number;
+  username?: string | null;
   accessLevel: number;
   expiresAt?: string | null;
 }) {
   // 注意：Tauri command 参数名会按 camelCase 进行匹配（例如 user_ids -> userIds）
   const normalizedExpiresAt = args.expiresAt?.trim();
+  const normalizedUsername = args.username?.trim();
   return loggedInvoke<void>("add_member_to_project", {
     project: args.project,
     userId: args.userId,
+    username: normalizedUsername ? normalizedUsername : null,
     accessLevel: args.accessLevel,
     expiresAt: normalizedExpiresAt ? normalizedExpiresAt : null,
   });
